@@ -239,6 +239,18 @@ jobs:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
       - name: Install Android packages
         run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.1" "ndk;29.0.14206865"
+      - name: Install cargo-tauri npm shim
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          cat > "$HOME/.cargo/bin/cargo-tauri" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [ "${1:-}" = "tauri" ]; then
+            shift
+          fi
+          exec npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" "$@"
+          SH
+          chmod +x "$HOME/.cargo/bin/cargo-tauri"
       - name: Build Android debug APK
         working-directory: clients/app
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} android build --debug --apk --features native --ci
