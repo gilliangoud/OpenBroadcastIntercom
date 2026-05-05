@@ -42,11 +42,16 @@ jobs:
         run: git lfs fsck
 
   ios-check:
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: true
+      - name: Select Xcode 26.4
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.4.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphonesimulator --show-sdk-version
       - uses: actions/setup-node@v4
         with:
           node-version: 22

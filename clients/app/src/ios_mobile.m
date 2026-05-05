@@ -51,9 +51,16 @@ static int intercom_configure_audio_session(char *error_buffer, size_t error_buf
   }
 
   NSError *error = nil;
+  AVAudioSessionCategoryOptions bluetooth_hfp =
+#if defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 260000
+      AVAudioSessionCategoryOptionAllowBluetoothHFP;
+#else
+      AVAudioSessionCategoryOptionAllowBluetooth;
+#endif
+
   AVAudioSessionCategoryOptions options =
       AVAudioSessionCategoryOptionDefaultToSpeaker |
-      AVAudioSessionCategoryOptionAllowBluetoothHFP;
+      bluetooth_hfp;
   if (@available(iOS 10.0, *)) {
     options |= AVAudioSessionCategoryOptionAllowBluetoothA2DP;
   }
