@@ -7,6 +7,9 @@ on:
 permissions:
   contents: write
 
+env:
+  TAURI_CLI_VERSION: 2.10.1
+
 concurrency:
   group: release-main
   cancel-in-progress: false
@@ -122,17 +125,15 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
       - name: Build Intercom Suite macOS app
         working-directory: clients/app
-        run: cargo tauri build --features native --bundles app --ci
+        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
       - name: Build Intercom Bridge macOS app
         working-directory: clients/bridge-app
-        run: cargo tauri build --features native --bundles app --ci
+        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
       - name: Build Intercom Server macOS app
         working-directory: server-app
-        run: cargo tauri build --features native --bundles app --ci
+        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
       - name: Archive macOS apps
         run: |
           mkdir -p artifacts
@@ -162,14 +163,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
       - name: Build Intercom Suite Linux bundles
         working-directory: clients/app
-        run: cargo tauri build --features native --bundles appimage deb --ci
+        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles appimage deb --ci
       - name: Build Intercom Bridge Linux bundles
         working-directory: clients/bridge-app
-        run: cargo tauri build --features native --bundles appimage deb --ci
+        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles appimage deb --ci
       - name: Collect Linux artifacts
         run: |
           mkdir -p artifacts
@@ -195,14 +194,12 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
       - name: Build Intercom Suite Windows installer
         working-directory: clients/app
-        run: cargo tauri build --features native --bundles nsis --ci
+        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles nsis --ci
       - name: Build Intercom Bridge Windows installer
         working-directory: clients/bridge-app
-        run: cargo tauri build --features native --bundles nsis --ci
+        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles nsis --ci
       - name: Collect Windows artifacts
         shell: pwsh
         run: |
@@ -242,11 +239,9 @@ jobs:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
       - name: Install Android packages
         run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.1" "ndk;29.0.14206865"
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked
       - name: Build Android debug APK
         working-directory: clients/app
-        run: cargo tauri android build --debug --apk --features native --ci
+        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} android build --debug --apk --features native --ci
       - name: Collect Android artifacts
         run: |
           mkdir -p artifacts
