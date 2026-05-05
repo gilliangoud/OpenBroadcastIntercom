@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::process::Command;
 use tokio::sync::{mpsc, RwLock};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{error::ProtocolError, Error as WsError, Message};
 
 #[cfg(feature = "processing-deepfilternet")]
@@ -1308,6 +1309,7 @@ fn default_tts_gain() -> f32 {
 
 #[derive(Debug, Serialize)]
 struct AdminStateResponse {
+    build: common::BuildInfo,
     sessions: Vec<SessionStatus>,
     metrics: StatusMetrics,
     enrollment_policy: EnrollmentPolicy,
@@ -1934,6 +1936,65 @@ pub async fn run(
     run_with_options(audio_socket, control_listener, RunOptions::default()).await
 }
 
+#[derive(Debug, Clone)]
+pub struct ServerRuntimeConfig {
+    pub audio_bind: SocketAddr,
+    pub control_bind: SocketAddr,
+    pub admin_bind: Option<SocketAddr>,
+    pub admin_state_file: Option<PathBuf>,
+    pub admin_auth: HttpAuthConfig,
+    pub enrollment_policy: EnrollmentPolicy,
+    pub advertise_name: Option<String>,
+    pub disable_discovery: bool,
+    pub recordings_dir: PathBuf,
+    pub debug_audio_dir: Option<PathBuf>,
+    pub whisper_command: Option<PathBuf>,
+    pub whisper_model: Option<PathBuf>,
+    pub whisper_model_dir: PathBuf,
+    pub deepfilternet_model_dir: PathBuf,
+    pub transcription_engine: TranscriptionEngineMode,
+}
+
+impl Default for ServerRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            audio_bind: SocketAddr::from(([0, 0, 0, 0], 40000)),
+            control_bind: SocketAddr::from(([0, 0, 0, 0], 40001)),
+            admin_bind: Some(SocketAddr::from(([0, 0, 0, 0], 40002))),
+            admin_state_file: Some(PathBuf::from("intercom-state.json")),
+            admin_auth: HttpAuthConfig::disabled(),
+            enrollment_policy: EnrollmentPolicy::Auto,
+            advertise_name: None,
+            disable_discovery: false,
+            recordings_dir: PathBuf::from("intercom-recordings"),
+            debug_audio_dir: None,
+            whisper_command: None,
+            whisper_model: None,
+            whisper_model_dir: PathBuf::from("intercom-models"),
+            deepfilternet_model_dir: PathBuf::from("deepfilternet-models"),
+            transcription_engine: TranscriptionEngineMode::Disabled,
+        }
+    }
+}
+
+impl ServerRuntimeConfig {
+    fn run_options(&self, admin_listener: Option<TcpListener>) -> RunOptions {
+        RunOptions {
+            admin_listener,
+            admin_state_file: self.admin_state_file.clone(),
+            admin_auth: self.admin_auth.clone(),
+            enrollment_policy: self.enrollment_policy,
+            recordings_dir: self.recordings_dir.clone(),
+            debug_audio_dir: self.debug_audio_dir.clone(),
+            whisper_command: self.whisper_command.clone(),
+            whisper_model: self.whisper_model.clone(),
+            whisper_model_dir: self.whisper_model_dir.clone(),
+            deepfilternet_model_dir: self.deepfilternet_model_dir.clone(),
+            transcription_engine: self.transcription_engine,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct RunOptions {
     pub admin_listener: Option<TcpListener>,
@@ -1949,11 +2010,166 @@ pub struct RunOptions {
     pub transcription_engine: TranscriptionEngineMode,
 }
 
+pub struct ServerRuntimeHandle {
+    pub audio_addr: SocketAddr,
+    pub control_addr: SocketAddr,
+    pub admin_addr: Option<SocketAddr>,
+    _discovery_handle: Option<DiscoveryAdvertisementHandle>,
+    tasks: ServerRuntimeTasks,
+}
+
+struct ServerRuntimeTasks {
+    receiver: JoinHandle<anyhow::Result<()>>,
+    mixer: JoinHandle<anyhow::Result<()>>,
+    presence: JoinHandle<anyhow::Result<()>>,
+    control: JoinHandle<anyhow::Result<()>>,
+    admin: Option<JoinHandle<anyhow::Result<()>>>,
+}
+
+impl ServerRuntimeTasks {
+    fn abort(&self) {
+        self.receiver.abort();
+        self.mixer.abort();
+        self.presence.abort();
+        self.control.abort();
+        if let Some(admin) = &self.admin {
+            admin.abort();
+        }
+    }
+}
+
+impl ServerRuntimeHandle {
+    pub async fn wait(&mut self) -> anyhow::Result<()> {
+        let tasks = &mut self.tasks;
+        tokio::select! {
+            result = &mut tasks.receiver => result.context("audio receiver task panicked")??,
+            result = &mut tasks.mixer => result.context("audio mixer task panicked")??,
+            result = &mut tasks.presence => result.context("presence task panicked")??,
+            result = &mut tasks.control => result.context("control task panicked")??,
+            result = wait_for_optional_task(tasks.admin.as_mut()) => result.context("admin task panicked")??,
+        }
+
+        Ok(())
+    }
+
+    pub fn shutdown(&self) {
+        self.tasks.abort();
+    }
+}
+
+impl Drop for ServerRuntimeHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+pub async fn start_runtime(config: ServerRuntimeConfig) -> anyhow::Result<ServerRuntimeHandle> {
+    let audio_socket = Arc::new(
+        UdpSocket::bind(config.audio_bind)
+            .await
+            .with_context(|| format!("bind UDP audio socket at {}", config.audio_bind))?,
+    );
+    let control_listener = TcpListener::bind(config.control_bind)
+        .await
+        .with_context(|| format!("bind WebSocket control listener at {}", config.control_bind))?;
+    let admin_listener = match config.admin_bind {
+        Some(admin_bind) => Some(
+            TcpListener::bind(admin_bind)
+                .await
+                .with_context(|| format!("bind admin HTTP listener at {}", admin_bind))?,
+        ),
+        None => None,
+    };
+
+    let actual_audio_addr = audio_socket.local_addr()?;
+    let actual_control_addr = control_listener.local_addr()?;
+    let actual_admin_addr = admin_listener
+        .as_ref()
+        .map(|listener| listener.local_addr())
+        .transpose()?;
+    let discovery_handle = if config.disable_discovery {
+        None
+    } else {
+        let advertisement = DiscoveryAdvertisement {
+            name: config
+                .advertise_name
+                .clone()
+                .unwrap_or_else(default_discovery_name),
+            control_port: actual_control_addr.port(),
+            audio_port: actual_audio_addr.port(),
+            admin_port: discovery_admin_port(actual_admin_addr),
+            auth_required: config.admin_auth.is_enabled(),
+            version: common::current_build_info().version,
+        };
+        match start_discovery_advertisement(&advertisement) {
+            Ok(handle) => {
+                tracing::info!(
+                    name = %advertisement.name,
+                    service = DISCOVERY_SERVICE_TYPE,
+                    control_port = advertisement.control_port,
+                    "Bonjour discovery advertisement started"
+                );
+                Some(handle)
+            }
+            Err(err) => {
+                tracing::warn!(%err, "Bonjour discovery advertisement unavailable");
+                None
+            }
+        }
+    };
+
+    start_runtime_from_bound(
+        audio_socket,
+        control_listener,
+        config.run_options(admin_listener),
+        actual_audio_addr,
+        actual_control_addr,
+        actual_admin_addr,
+        discovery_handle,
+    )
+    .await
+}
+
+pub fn discovery_admin_port(admin_addr: Option<SocketAddr>) -> Option<u16> {
+    admin_addr
+        .filter(|addr| !addr.ip().is_loopback())
+        .map(|addr| addr.port())
+}
+
 pub async fn run_with_options(
     audio_socket: Arc<UdpSocket>,
     control_listener: TcpListener,
     options: RunOptions,
 ) -> anyhow::Result<()> {
+    let audio_addr = audio_socket.local_addr()?;
+    let control_addr = control_listener.local_addr()?;
+    let admin_addr = options
+        .admin_listener
+        .as_ref()
+        .map(|listener| listener.local_addr())
+        .transpose()?;
+    let mut handle = start_runtime_from_bound(
+        audio_socket,
+        control_listener,
+        options,
+        audio_addr,
+        control_addr,
+        admin_addr,
+        None,
+    )
+    .await?;
+    handle.wait().await
+}
+
+async fn start_runtime_from_bound(
+    audio_socket: Arc<UdpSocket>,
+    control_listener: TcpListener,
+    options: RunOptions,
+    audio_addr: SocketAddr,
+    control_addr: SocketAddr,
+    admin_addr: Option<SocketAddr>,
+    discovery_handle: Option<DiscoveryAdvertisementHandle>,
+) -> anyhow::Result<ServerRuntimeHandle> {
     let admin_listener = options.admin_listener;
     let admin_auth = options.admin_auth;
     let whisper_command = options.whisper_command;
@@ -2005,19 +2221,23 @@ pub async fn run_with_options(
         tokio::spawn(async move { run_admin(listener, admin_state, admin_auth).await })
     });
 
-    tokio::select! {
-        result = receiver_task => result.context("audio receiver task panicked")??,
-        result = mixer_task => result.context("audio mixer task panicked")??,
-        result = presence_task => result.context("presence task panicked")??,
-        result = control_task => result.context("control task panicked")??,
-        result = wait_for_optional_task(admin_task) => result.context("admin task panicked")??,
-    }
-
-    Ok(())
+    Ok(ServerRuntimeHandle {
+        audio_addr,
+        control_addr,
+        admin_addr,
+        _discovery_handle: discovery_handle,
+        tasks: ServerRuntimeTasks {
+            receiver: receiver_task,
+            mixer: mixer_task,
+            presence: presence_task,
+            control: control_task,
+            admin: admin_task,
+        },
+    })
 }
 
 async fn wait_for_optional_task(
-    task: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    task: Option<&mut tokio::task::JoinHandle<anyhow::Result<()>>>,
 ) -> Result<anyhow::Result<()>, tokio::task::JoinError> {
     match task {
         Some(task) => task.await,
@@ -2945,6 +3165,7 @@ async fn admin_state_snapshot(state: &ServerState) -> AdminStateResponse {
     let deepfilternet = deepfilternet_status_snapshot(state).await;
 
     AdminStateResponse {
+        build: common::current_build_info(),
         sessions,
         metrics,
         enrollment_policy: state.enrollment_policy,
@@ -12412,6 +12633,18 @@ mod tests {
         assert_eq!(args[4], "41001");
         assert!(args.contains(&"audio_port=41000".to_string()));
         assert!(args.contains(&"auth=none".to_string()));
+    }
+
+    #[test]
+    fn discovery_admin_port_omits_loopback_admin() {
+        assert_eq!(
+            discovery_admin_port(Some(SocketAddr::from(([127, 0, 0, 1], 40002)))),
+            None
+        );
+        assert_eq!(
+            discovery_admin_port(Some(SocketAddr::from(([0, 0, 0, 0], 40002)))),
+            Some(40002)
+        );
     }
 
     #[tokio::test]

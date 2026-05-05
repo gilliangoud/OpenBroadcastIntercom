@@ -1,0 +1,266 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev
+      - name: Verify formatting
+        run: cargo fmt --all -- --check
+      - name: Check generated artifacts
+        run: tools/check-generated-artifacts.sh
+      - name: Check public secrets
+        run: tools/check-public-secrets.sh
+      - name: Check version sync
+        run: tools/check-version-sync.sh
+      - name: Test release version tool
+        run: python3 -m unittest tools/test_release_version.py
+      - name: Test client core
+        run: cargo test -p client-core
+      - name: Test desktop client
+        run: cargo test -p desktop
+      - name: Test app shell
+        run: cargo test -p app
+      - name: Test server without optional engines
+        run: cargo test -p server --no-default-features
+      - name: Test server app shell
+        run: cargo test -p server-app
+      - name: Verify Git LFS objects
+        run: git lfs fsck
+
+  ios-check:
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+      - name: Check iOS simulator Rust target
+        run: cargo check -p app --features native --target aarch64-apple-ios-sim
+
+  version:
+    needs: [checks, ios-check]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release-version.outputs.version }}
+      tag: ${{ steps.release-version.outputs.tag }}
+      sha: ${{ steps.release-version.outputs.sha }}
+      timestamp: ${{ steps.release-version.outputs.timestamp }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+      - name: Configure git author
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Apply release version
+        id: release-version
+        run: |
+          version="$(python3 tools/release_version.py --apply --print-next | tail -n 1)"
+          tools/check-version-sync.sh
+          git add Cargo.toml clients/app/tauri.conf.json clients/bridge-app/tauri.conf.json server-app/tauri.conf.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): v${version} [skip release]"
+          fi
+          git tag "v${version}"
+          git push origin HEAD:main
+          git push origin "v${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      INTERCOM_RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      INTERCOM_GIT_SHA: ${{ needs.version.outputs.sha }}
+      INTERCOM_BUILD_TIMESTAMP: ${{ needs.version.outputs.timestamp }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+      - name: Build Intercom Suite macOS app
+        working-directory: clients/app
+        run: cargo tauri build --features native --bundles app --ci
+      - name: Build Intercom Bridge macOS app
+        working-directory: clients/bridge-app
+        run: cargo tauri build --features native --bundles app --ci
+      - name: Build Intercom Server macOS app
+        working-directory: server-app
+        run: cargo tauri build --features native --bundles app --ci
+      - name: Archive macOS apps
+        run: |
+          mkdir -p artifacts
+          ditto -c -k --sequesterRsrc --keepParent "target/release/bundle/macos/Intercom Suite.app" "artifacts/Intercom-Suite-macos-${VERSION}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "target/release/bundle/macos/Intercom Bridge App.app" "artifacts/Intercom-Bridge-App-macos-${VERSION}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "target/release/bundle/macos/Intercom Server.app" "artifacts/Intercom-Server-macos-${VERSION}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-apps
+          path: artifacts/*
+
+  linux:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      INTERCOM_RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      INTERCOM_GIT_SHA: ${{ needs.version.outputs.sha }}
+      INTERCOM_BUILD_TIMESTAMP: ${{ needs.version.outputs.timestamp }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+      - name: Build Intercom Suite Linux bundles
+        working-directory: clients/app
+        run: cargo tauri build --features native --bundles appimage deb --ci
+      - name: Build Intercom Bridge Linux bundles
+        working-directory: clients/bridge-app
+        run: cargo tauri build --features native --bundles appimage deb --ci
+      - name: Collect Linux artifacts
+        run: |
+          mkdir -p artifacts
+          find target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' \) -exec cp '{}' artifacts/ \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-apps
+          path: artifacts/*
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      INTERCOM_RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      INTERCOM_GIT_SHA: ${{ needs.version.outputs.sha }}
+      INTERCOM_BUILD_TIMESTAMP: ${{ needs.version.outputs.timestamp }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+      - name: Build Intercom Suite Windows installer
+        working-directory: clients/app
+        run: cargo tauri build --features native --bundles nsis --ci
+      - name: Build Intercom Bridge Windows installer
+        working-directory: clients/bridge-app
+        run: cargo tauri build --features native --bundles nsis --ci
+      - name: Collect Windows artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Get-ChildItem target/release/bundle/nsis -Recurse -Filter *.exe | Copy-Item -Destination artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-apps
+          path: artifacts/*
+
+  android:
+    needs: version
+    runs-on: ubuntu-latest
+    env:
+      INTERCOM_RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      INTERCOM_GIT_SHA: ${{ needs.version.outputs.sha }}
+      INTERCOM_BUILD_TIMESTAMP: ${{ needs.version.outputs.timestamp }}
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/29.0.14206865
+      ANDROID_NDK_ROOT: /usr/local/lib/android/sdk/ndk/29.0.14206865
+      NDK_HOME: /usr/local/lib/android/sdk/ndk/29.0.14206865
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - name: Install Android packages
+        run: sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.1" "ndk;29.0.14206865"
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+      - name: Build Android debug APK
+        working-directory: clients/app
+        run: cargo tauri android build --debug --apk --features native --ci
+      - name: Collect Android artifacts
+        run: |
+          mkdir -p artifacts
+          find clients/app/gen/android/app/build/outputs/apk -type f -name '*.apk' -exec cp '{}' artifacts/ \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: artifacts/*
+
+  publish:
+    needs: [version, macos, linux, windows, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: gh release create "$TAG" release-artifacts/* --title "Intercom Suite $TAG" --generate-notes

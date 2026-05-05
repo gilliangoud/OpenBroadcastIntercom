@@ -9,6 +9,7 @@ members = [
     "clients/pi-gpio",
     "clients/bridge",
     "clients/bridge-app",
+    "server-app",
     "tools/admin",
     "tools/netem",
 ]

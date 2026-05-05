@@ -3,11 +3,14 @@
 .DS_Store
 **/.DS_Store
 *.log
+__pycache__/
+*.pyc
 
 # Local runtime state and operator settings.
 /intercom-state.json
 /intercom-app-settings.json
 /debug-audio/
+/artifacts/
 
 /clients/esp32/build/
 /clients/esp32/managed_components/
@@ -22,6 +25,16 @@
 /clients/app/gen/android/.gradle/
 /clients/app/gen/android/buildSrc/.gradle/
 /clients/app/gen/android/**/build/
+
+# Release bundles are produced by GitHub Actions and local packaging scripts.
+*.AppImage
+*.deb
+*.rpm
+*.dmg
+*.msi
+*.apk
+*.aab
+*.ipa
 
 # Finder duplicate files and local git backups.
 **/*\ [0-9]

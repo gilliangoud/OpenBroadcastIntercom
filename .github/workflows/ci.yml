@@ -24,6 +24,10 @@ jobs:
         run: tools/check-generated-artifacts.sh
       - name: Check public secrets
         run: tools/check-public-secrets.sh
+      - name: Check version sync
+        run: tools/check-version-sync.sh
+      - name: Test release version tool
+        run: python3 -m unittest tools/test_release_version.py
       - name: Test client core
         run: cargo test -p client-core
       - name: Test desktop client
@@ -32,6 +36,22 @@ jobs:
         run: cargo test -p app
       - name: Test server without optional engines
         run: cargo test -p server --no-default-features
+      - name: Test server app shell
+        run: cargo test -p server-app
       - name: Verify Git LFS objects
         run: git lfs fsck
 
+  ios-check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+      - name: Check iOS simulator Rust target
+        run: cargo check -p app --features native --target aarch64-apple-ios-sim

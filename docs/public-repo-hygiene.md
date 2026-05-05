@@ -28,6 +28,8 @@ cargo test -p client-core
 cargo test -p desktop
 cargo test -p app
 cargo test -p server --no-default-features
+tools/check-version-sync.sh
+python3 -m unittest tools/test_release_version.py
 tools/check-generated-artifacts.sh
 tools/check-public-secrets.sh
 git lfs fsck
@@ -35,4 +37,3 @@ git status --short
 git ls-files
 git lfs ls-files
 ```
-

@@ -18,6 +18,15 @@ tracked="$(
     'debug-audio/**' \
     'intercom-state.json' \
     'intercom-app-settings.json' \
+    'artifacts/**' \
+    '*.AppImage' \
+    '*.deb' \
+    '*.rpm' \
+    '*.dmg' \
+    '*.msi' \
+    '*.apk' \
+    '*.aab' \
+    '*.ipa' \
     'intercom-models/ggml-medium-*.bin' \
     'intercom-models/ggml-large-*.bin' \
     '**/.DS_Store' \

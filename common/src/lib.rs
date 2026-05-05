@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 
 pub mod admin;
 pub mod audio;
+pub mod build_info;
 pub mod device;
 pub mod processing;
 pub mod protocol;
 pub mod status;
+pub use build_info::{current_build_info, BuildInfo};
 
 pub const MAGIC: [u8; 2] = *b"IC";
 pub const VERSION: u8 = 2;

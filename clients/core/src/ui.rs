@@ -3,10 +3,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use common::{
-    AlertId, AlertStatus, AlertTarget, ButtonCapability, ButtonId, ChannelPresenceRoster,
-    ClientLockoutPolicy, Codec, ControlMessage, DirectCallHistoryEntry, DirectCallStatus,
-    EmergencyStatus, IfbConfig, OpusProfile, ProcessingConfig, StereoConfig, TalkButtonConfig,
-    TalkMode,
+    AlertId, AlertStatus, AlertTarget, BuildInfo, ButtonCapability, ButtonId,
+    ChannelPresenceRoster, ClientLockoutPolicy, Codec, ControlMessage, DirectCallHistoryEntry,
+    DirectCallStatus, EmergencyStatus, IfbConfig, OpusProfile, ProcessingConfig, StereoConfig,
+    TalkButtonConfig, TalkMode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +143,7 @@ pub struct OkResponse {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct StateResponse {
+    pub build: BuildInfo,
     pub user_id: u16,
     pub client_uid: String,
     pub name: String,
@@ -189,6 +190,7 @@ impl StateResponse {
         playback: PlaybackStats,
     ) -> Self {
         Self {
+            build: common::current_build_info(),
             user_id: config.user_id,
             client_uid: config.client_uid.clone(),
             name: config.name.clone(),

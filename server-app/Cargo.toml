@@ -1,0 +1,26 @@
+[package]
+name = "server-app"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+default-run = "server-app-native"
+
+[features]
+default = []
+native = ["dep:tauri"]
+
+[[bin]]
+name = "server-app-native"
+path = "src/bin/server_app_native.rs"
+
+[dependencies]
+anyhow.workspace = true
+common.workspace = true
+server = { path = "../server" }
+tauri = { version = "2", optional = true, features = [] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Intercom Server",
+  "version": "0.1.0",
+  "identifier": "com.intercomsuite.server",
+  "mainBinaryName": "server-app-native",
+  "build": {
+    "frontendDist": "tauri-assets"
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": false,
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "Intercom Suite",
+    "category": "DeveloperTool",
+    "shortDescription": "Intercom Suite server",
+    "longDescription": "Intercom Server runs the LAN audio router and admin dashboard for Intercom Suite.",
+    "icon": [
+      "../clients/app/icons/icon.png",
+      "../clients/app/icons/icon.ico",
+      "../clients/app/icons/icon.icns"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.13"
+    }
+  }
+}

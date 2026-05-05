@@ -750,6 +750,7 @@ mod mobile {
 
     #[derive(Debug, Clone, Serialize)]
     struct MobileStartResponse {
+        build: common::BuildInfo,
         running: bool,
         phase: ClientRuntimePhase,
         local_ui_url: String,
@@ -758,6 +759,7 @@ mod mobile {
 
     #[derive(Debug, Clone, Serialize)]
     struct MobileStatusResponse {
+        build: common::BuildInfo,
         running: bool,
         phase: ClientRuntimePhase,
         local_ui_url: Option<String>,
@@ -911,6 +913,7 @@ mod mobile {
             if let Some(runtime) = runtime_state.runtime.as_ref() {
                 let local_ui_url = runtime.controls_url.clone();
                 return Ok(MobileStartResponse {
+                    build: common::current_build_info(),
                     running: true,
                     phase: runtime_state.phase,
                     local_ui_url,
@@ -955,6 +958,7 @@ mod mobile {
         runtime_state.phase = ClientRuntimePhase::Running;
         runtime_state.last_error = None;
         Ok(MobileStartResponse {
+            build: common::current_build_info(),
             running: true,
             phase: ClientRuntimePhase::Running,
             local_ui_url: controls_url,
@@ -999,6 +1003,7 @@ mod mobile {
             .map_err(|_| "mobile runtime state is poisoned".to_string())?;
         refresh_mobile_runtime_state(&mut runtime_state);
         Ok(MobileStatusResponse {
+            build: common::current_build_info(),
             running: runtime_state.runtime.is_some(),
             phase: runtime_state.phase,
             local_ui_url: runtime_state
