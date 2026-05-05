@@ -1,0 +1,16 @@
+[package]
+name = "bridge"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+client-core.workspace = true
+common.workspace = true
+cpal.workspace = true
+opus = "0.3"
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

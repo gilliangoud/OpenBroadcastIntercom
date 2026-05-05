@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Intercom Admin - Recording</title>
+  <link rel="stylesheet" href="/admin/style.css">
+</head>
+<body data-page="recording">
+  <header class="topbar">
+    <div class="brand"><strong>Intercom Admin</strong><span id="summary">Loading</span></div>
+    <nav class="admin-nav" aria-label="Admin navigation">
+      <a href="/admin/" data-nav="dashboard">Dashboard</a>
+      <a href="/admin/clients/" data-nav="clients">Clients</a>
+      <a href="/admin/routing/" data-nav="routing">Routing</a>
+      <a href="/admin/presets/" data-nav="presets">Presets</a>
+      <a href="/admin/calls/" data-nav="calls">Calls</a>
+      <a href="/admin/recording/" data-nav="recording">Recording</a>
+      <a href="/admin/system/" data-nav="system">System</a>
+    </nav>
+  </header>
+  <main>
+    <section class="page-head">
+      <h1>Recording &amp; Live Transcription</h1>
+      <p>Start or stop recording sessions, run live transcription, inspect engine status, and query transcript text views.</p>
+    </section>
+    <div id="page-root"></div>
+  </main>
+  <div id="modal-root"></div>
+  <script src="/admin/app.js"></script>
+</body>
+</html>

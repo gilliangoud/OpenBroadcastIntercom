@@ -1,0 +1,25 @@
+{
+  "channels": [
+    {
+      "id": 1,
+      "name": "Program"
+    },
+    {
+      "id": 2,
+      "name": "Director"
+    }
+  ],
+  "devices": [],
+  "clients": [
+    {
+      "user_id": 1,
+      "name": "Operator 1",
+      "listen": [1],
+      "tx": [1],
+      "codec": "pcm16"
+    }
+  ],
+  "presets": [],
+  "templates": []
+}
+

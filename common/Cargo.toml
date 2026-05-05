@@ -1,0 +1,13 @@
+[package]
+name = "common"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+rubato.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

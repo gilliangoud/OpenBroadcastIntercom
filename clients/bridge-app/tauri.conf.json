@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Intercom Bridge App",
+  "version": "0.1.0",
+  "identifier": "com.intercomsuite.bridge",
+  "mainBinaryName": "bridge-app-native",
+  "build": {
+    "frontendDist": "tauri-assets"
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": false,
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "Intercom Suite",
+    "category": "Productivity",
+    "shortDescription": "Multi-route production audio bridge launcher",
+    "longDescription": "Intercom Bridge App manages multiple production audio bridge routes for vMix, PA, virtual audio, USB interfaces, and venue workflows.",
+    "icon": [
+      "../app/icons/icon.png",
+      "../app/icons/icon.ico",
+      "../app/icons/icon.icns"
+    ]
+  }
+}

@@ -1,0 +1,490 @@
+menu "Intercom ESP32 Client"
+
+config INTERCOM_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+
+config INTERCOM_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+
+config INTERCOM_SERVER_HOST
+    string "Intercom server host or IP"
+    default "192.168.1.100"
+
+config INTERCOM_AUDIO_PORT
+    int "Server UDP audio port"
+    default 40000
+
+config INTERCOM_CONTROL_PORT
+    int "Server WebSocket control port"
+    default 40001
+
+config INTERCOM_USER_ID
+    int "Client user ID"
+    default 50
+    range 1 65535
+
+config INTERCOM_CLIENT_UID
+    string "Stable client UID override"
+    default ""
+    help
+        Optional stable server enrollment identity. Leave blank to generate and
+        store a UUID-like identity in NVS on first boot. Set a fixed value only
+        for lab devices that should always enroll as the same hardware identity.
+
+choice INTERCOM_AUDIO_DIAGNOSTIC_MODE
+    prompt "Audio diagnostic mode"
+    default INTERCOM_AUDIO_DIAGNOSTIC_NORMAL
+    help
+        Normal connects to the intercom server. The diagnostic modes skip
+        Wi-Fi/control/UDP where possible so ES8388 and I2S hardware can be
+        validated without server configuration affecting the result.
+
+config INTERCOM_AUDIO_DIAGNOSTIC_NORMAL
+    bool "normal intercom client"
+
+config INTERCOM_AUDIO_DIAGNOSTIC_OUTPUT_TEST
+    bool "output-test: local repeated tone matrix"
+
+config INTERCOM_AUDIO_DIAGNOSTIC_CAPTURE_TEST
+    bool "capture-test: local mic/input meter sweep"
+
+config INTERCOM_AUDIO_DIAGNOSTIC_LOCAL_LOOPBACK
+    bool "local-loopback: mic directly to headphones"
+
+endchoice
+
+config INTERCOM_LISTEN_CHANNELS
+    string "Initial listen channels"
+    default "1"
+    help
+        Comma-separated channel IDs sent as startup defaults when the server has
+        no preconfigured client state for this user.
+
+config INTERCOM_TX_CHANNELS
+    string "Initial regular TX channels"
+    default "1"
+    help
+        Comma-separated channel IDs sent as startup defaults when the server has
+        no preconfigured client state for this user.
+
+config INTERCOM_I2C_SDA_GPIO
+    int "ES8388 I2C SDA GPIO"
+    default 33
+    range 0 48
+
+config INTERCOM_I2C_SCL_GPIO
+    int "ES8388 I2C SCL GPIO"
+    default 32
+    range 0 48
+
+config INTERCOM_I2S_MCLK_GPIO
+    int "I2S MCLK GPIO"
+    default 0
+    range -1 48
+
+config INTERCOM_I2S_BCLK_GPIO
+    int "I2S BCLK GPIO"
+    default 27
+    range 0 48
+
+config INTERCOM_I2S_WS_GPIO
+    int "I2S LRCK/WS GPIO"
+    default 25
+    range 0 48
+
+config INTERCOM_I2S_DOUT_GPIO
+    int "I2S data out GPIO"
+    default 26
+    range 0 48
+
+config INTERCOM_I2S_SWAP_WS_DOUT_PINS
+    bool "Swap I2S LRCK/WS and data out pins"
+    default n
+    help
+        Diagnostic option for ESP32-A1S / Audio Kit V2.2 board variants whose
+        silkscreen or examples report LRCK/DOUT as 26/25 instead of 25/26.
+        Leave disabled for the known Ai-Thinker pin map. Enable only if
+        output-test writes samples successfully but the headphone jack remains
+        silent across all OUT1/OUT2 and PA polarity profiles.
+
+config INTERCOM_I2S_DIN_GPIO
+    int "I2S data in GPIO"
+    default 35
+    range 0 48
+
+choice INTERCOM_I2S_FORMAT
+    prompt "I2S codec wire format"
+    default INTERCOM_I2S_FORMAT_PHILIPS
+    help
+        Wire format used between the ESP32 and ES8388. Philips is normal I2S
+        with a one-bit data delay. MSB is left-justified with no bit delay.
+        The last known working local config used the legacy I2S driver with
+        Philips/standard I2S framing, so Philips is the default for bring-up.
+
+config INTERCOM_I2S_FORMAT_PHILIPS
+    bool "Philips / standard I2S"
+
+config INTERCOM_I2S_FORMAT_MSB
+    bool "MSB / left-justified"
+
+endchoice
+
+choice INTERCOM_I2S_SLOT_WIDTH
+    prompt "I2S slot width"
+    default INTERCOM_I2S_SLOT_WIDTH_16
+    help
+        Total BCLK ticks per left/right slot. The ES8388 setup and firmware
+        DMA buffers currently use 16-bit sample words, so 16-bit slots are the
+        normal operating mode. Use 32-bit slots only as a diagnostic option
+        while validating codec framing with the output diagnostic.
+
+config INTERCOM_I2S_SLOT_WIDTH_16
+    bool "16-bit slots"
+
+config INTERCOM_I2S_SLOT_WIDTH_32
+    bool "32-bit slots"
+
+endchoice
+
+config INTERCOM_PA_ENABLE_GPIO
+    int "Speaker amplifier enable GPIO"
+    default 21
+    range -1 48
+
+choice INTERCOM_PA_POLARITY
+    prompt "Speaker/headphone output enable polarity"
+    default INTERCOM_PA_ACTIVE_HIGH
+    help
+        GPIO level used by the legacy ES8388 bring-up when enabling the board output gate.
+        Most Ai-Thinker ES8388 examples use GPIO21 as an output enable or mute
+        gate, but revisions disagree on polarity. If output-test writes tones
+        and ES8388 registers look correct but the headphones stay silent, try
+        the opposite polarity.
+
+config INTERCOM_PA_ACTIVE_HIGH
+    bool "Active high"
+
+config INTERCOM_PA_ACTIVE_LOW
+    bool "Active low / inverted"
+
+endchoice
+
+config INTERCOM_PTT_GPIO
+    int "Regular PTT GPIO"
+    default -1
+    range -1 48
+    help
+        Active-low momentary PTT input. Use -1 to disable until wired.
+
+config INTERCOM_BUTTON1_GPIO
+    int "Dedicated button 1 GPIO"
+    default -1
+    range -1 48
+
+config INTERCOM_BUTTON1_ID
+    string "Dedicated button 1 ID"
+    default "director"
+
+config INTERCOM_BUTTON1_LABEL
+    string "Dedicated button 1 label"
+    default "Director"
+
+config INTERCOM_BUTTON2_GPIO
+    int "Dedicated button 2 GPIO"
+    default -1
+    range -1 48
+
+config INTERCOM_BUTTON2_ID
+    string "Dedicated button 2 ID"
+    default "pa"
+
+config INTERCOM_BUTTON2_LABEL
+    string "Dedicated button 2 label"
+    default "PA"
+
+config INTERCOM_AUDIO_TASK_CORE
+    int "Audio task core"
+    default 1
+    range -1 1
+
+config INTERCOM_NET_TASK_CORE
+    int "Network task core"
+    default 0
+    range -1 1
+
+config INTERCOM_AUDIO_TX_QUEUE_PACKETS
+    int "Audio TX packet queue length"
+    default 12
+    range 2 64
+    help
+        Number of encoded microphone packets that may wait for the network
+        task. Capture drops when this queue is full instead of blocking the
+        audio core. Increase only if admin health shows TX drops during normal
+        Wi-Fi conditions.
+
+config INTERCOM_UDP_TASK_STACK_SIZE
+    int "UDP task stack size"
+    default 8192
+    range 4096 16384
+    help
+        Stack size for the UDP receive/transmit task. Audio packet buffers are
+        kept in static storage, but lwIP send/receive paths still need enough
+        stack headroom under Wi-Fi load.
+
+config INTERCOM_PLAYBACK_TASK_STACK_SIZE
+    int "Playback task stack size"
+    default 6144
+    range 3072 16384
+    help
+        Stack size for the I2S playback task. The high-rate pcm48 path uses
+        larger frames than pcm16, so keep this at 6144 or higher unless stack
+        high-water measurements prove a smaller value is safe.
+
+config INTERCOM_CAPTURE_TASK_STACK_SIZE
+    int "Capture task stack size"
+    default 6144
+    range 3072 16384
+    help
+        Stack size for the I2S microphone capture task. Frame buffers are kept
+        out of the task stack, but this guard leaves room for I2S and control
+        call frames when running pcm24 or pcm48.
+
+config INTERCOM_JITTER_FRAMES
+    int "Playback jitter buffer frames"
+    default 4
+    range 2 16
+
+config INTERCOM_PLAYBACK_PREFILL_FRAMES
+    int "Playback prefill frames after underrun"
+    default 2
+    range 1 8
+    help
+        Number of received audio frames to queue before resuming playback after
+        startup or underrun. A small prefill avoids rapid zero-to-audio edges
+        that are heard as headphone clicks.
+
+choice INTERCOM_INITIAL_CODEC
+    prompt "Initial PCM codec"
+    default INTERCOM_INITIAL_CODEC_PCM16
+    help
+        Codec used before the server has sent authoritative configuration.
+        The ESP32 I2S hardware sample rate follows this codec and later follows
+        the server-selected codec. Use pcm16 while gain-staging a new board,
+        then try pcm24 or pcm48 once capture health shows no clipping.
+
+config INTERCOM_INITIAL_CODEC_PCM16
+    bool "PCM16 / 16 kHz"
+
+config INTERCOM_INITIAL_CODEC_PCM24
+    bool "PCM24 / 24 kHz"
+
+config INTERCOM_INITIAL_CODEC_PCM48
+    bool "PCM48 / 48 kHz"
+
+endchoice
+
+choice INTERCOM_ES8388_ADC_INPUT
+    prompt "ES8388 ADC input"
+    default INTERCOM_ES8388_ADC_INPUT_DIFFERENCE
+    help
+        Select the ES8388 analog input routed into the ADC. The Ai-Thinker
+        Audio Kit board microphone should start with the differential input.
+
+config INTERCOM_ES8388_ADC_INPUT_DIFFERENCE
+    bool "Differential board mic"
+
+config INTERCOM_ES8388_ADC_INPUT_MIC1
+    bool "MIC1"
+
+config INTERCOM_ES8388_ADC_INPUT_MIC2
+    bool "MIC2"
+
+config INTERCOM_ES8388_ADC_INPUT_LINE1
+    bool "LINE1"
+
+config INTERCOM_ES8388_ADC_INPUT_LINE2
+    bool "LINE2"
+
+endchoice
+
+choice INTERCOM_ES8388_MIC_PGA_GAIN
+    prompt "ES8388 mic PGA gain"
+    default INTERCOM_ES8388_MIC_PGA_GAIN_9DB
+    help
+        Analog microphone preamp gain. Lower this before reducing software gain
+        if normal speech clips.
+
+config INTERCOM_ES8388_MIC_PGA_GAIN_0DB
+    bool "0 dB"
+
+config INTERCOM_ES8388_MIC_PGA_GAIN_3DB
+    bool "3 dB"
+
+config INTERCOM_ES8388_MIC_PGA_GAIN_6DB
+    bool "6 dB"
+
+config INTERCOM_ES8388_MIC_PGA_GAIN_9DB
+    bool "9 dB"
+
+config INTERCOM_ES8388_MIC_PGA_GAIN_12DB
+    bool "12 dB"
+
+config INTERCOM_ES8388_MIC_PGA_GAIN_15DB
+    bool "15 dB"
+
+config INTERCOM_ES8388_MIC_PGA_GAIN_18DB
+    bool "18 dB"
+
+config INTERCOM_ES8388_MIC_PGA_GAIN_21DB
+    bool "21 dB"
+
+config INTERCOM_ES8388_MIC_PGA_GAIN_24DB
+    bool "24 dB"
+
+endchoice
+
+choice INTERCOM_CAPTURE_CHANNEL
+    prompt "Capture channel"
+    default INTERCOM_CAPTURE_CHANNEL_LEFT
+    help
+        Select which I2S input channel is sent to the server. Use right or
+        average if capture health shows the other channel is cleaner.
+
+config INTERCOM_CAPTURE_CHANNEL_LEFT
+    bool "Left"
+
+config INTERCOM_CAPTURE_CHANNEL_RIGHT
+    bool "Right"
+
+config INTERCOM_CAPTURE_CHANNEL_AVERAGE
+    bool "Average left and right"
+
+endchoice
+
+config INTERCOM_CAPTURE_HIGH_PASS
+    bool "Capture high-pass/DC blocker"
+    default y
+    help
+        Apply a light one-pole DC blocker to captured mic audio before local
+        sidetone and UDP transmit.
+
+config INTERCOM_ES8388_ALC
+    bool "ES8388 automatic level control"
+    default n
+    help
+        Parsed for server/admin visibility, but not applied during the legacy
+        ES8388 bring-up path yet.
+
+config INTERCOM_ES8388_NOISE_GATE
+    bool "ES8388 ADC noise gate"
+    default n
+    depends on INTERCOM_ES8388_ALC
+    help
+        Parsed for server/admin visibility, but not applied during the legacy
+        ES8388 bring-up path yet.
+
+config INTERCOM_MIC_GAIN_PERCENT
+    int "Microphone software gain percent"
+    default 100
+    range 0 400
+
+config INTERCOM_SPEAKER_GAIN_PERCENT
+    int "Speaker codec output volume percent"
+    default 100
+    range 0 400
+    help
+        Runtime value maps to the ES8388 output driver registers. Any non-zero
+        value enables the output driver at 0 dB during legacy bring-up.
+
+config INTERCOM_NOTIFICATION_GAIN_PERCENT
+    int "Notification sound gain percent"
+    default 50
+    range 0 200
+    help
+        Gain applied only to local ESP32 connect, disconnect, and reconnect
+        notification tones. It does not change server playback, mic capture,
+        or sidetone levels.
+
+menu "Playback idle tuning"
+
+config INTERCOM_PLAYBACK_IDLE_FLOOR_ENABLED
+    bool "Keep tiny playback idle floor"
+    default y
+    help
+        Replaces exact digital zero with a very small constant PCM value after
+        the output de-clicker. This can prevent the ES8388/output amplifier
+        path from audibly settling or auto-muting after short notification
+        tones without adding broadband idle noise.
+
+config INTERCOM_PLAYBACK_IDLE_FLOOR_AMPLITUDE
+    int "Playback idle floor amplitude"
+    default 1
+    range 0 32
+    depends on INTERCOM_PLAYBACK_IDLE_FLOOR_ENABLED
+    help
+        Constant PCM sample value used for the idle floor. A value of 1 is the
+        quietest non-zero signed 16-bit value; try 2 or 3 only if the post-tone
+        pop returns.
+
+endmenu
+
+choice INTERCOM_SIDETONE_MODE
+    prompt "Local sidetone / self-monitor"
+    default INTERCOM_SIDETONE_OFF
+    help
+        Local monitor path for hearing this ESP32 client's own microphone.
+        Firmware sidetone mixes the captured mic into local playback with a
+        small buffer delay. ES8388 codec bypass is closer to zero latency, but
+        it is experimental and can cause feedback if the speaker is active.
+
+config INTERCOM_SIDETONE_OFF
+    bool "Off"
+
+config INTERCOM_SIDETONE_FIRMWARE
+    bool "Firmware mix into playback"
+
+config INTERCOM_SIDETONE_CODEC_BYPASS
+    bool "ES8388 line-bypass mixer (experimental, preserves server audio)"
+    help
+        Route the ES8388 analog line path into the output mixer while keeping
+        the normal DAC-to-output route enabled. This is the lowest latency
+        monitor path, but on the Ai-Thinker board mic it may not hear the same
+        differential mic path that feeds the ADC.
+
+endchoice
+
+config INTERCOM_SIDETONE_GAIN_PERCENT
+    int "Firmware sidetone gain percent"
+    default 25
+    range 0 200
+    depends on INTERCOM_SIDETONE_FIRMWARE
+    help
+        Local microphone monitor gain used only by the firmware sidetone mode.
+        Start low, especially when testing with speakers instead of headphones.
+
+config INTERCOM_SIDETONE_CODEC_BYPASS_GAIN_PERCENT
+    int "ES8388 line-bypass sidetone gain percent"
+    default 25
+    range 0 200
+    help
+        Analog monitor gain used only by the ES8388 line-bypass mode. Zero
+        keeps the DAC/server playback route enabled but disables the line
+        input bypass contribution. This controls LIN1/LIN2 and RIN1/RIN2
+        bypass sources.
+
+config INTERCOM_SIDETONE_MIC_BYPASS_GAIN_PERCENT
+    int "ES8388 mic-bypass sidetone gain percent"
+    default 100
+    range 0 400
+    help
+        Analog monitor gain used by the ES8388 codec-bypass mode when the ADC
+        input is mic1, mic2, or differential. This selects the ES8388 ADC P/N
+        path after the mic amplifier instead of the raw line bypass source.
+        Values up to 200% use the ES8388 mixer gain. Higher values also boost
+        the ES8388 output driver, which raises server playback too.
+        Start low because this path is effectively zero-latency and can feed
+        back immediately.
+
+endmenu

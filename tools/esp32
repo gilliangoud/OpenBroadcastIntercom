@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_DIR="$ROOT_DIR/clients/esp32"
+ESP_IDF_DIR="${ESP_IDF_DIR:-$HOME/.espressif/esp-idf}"
+ESP_IDF_REF="${ESP_IDF_REF:-release/v5.4}"
+
+usage() {
+    cat <<'EOF'
+Usage: tools/esp32 <command> [args]
+
+Commands:
+  setup                 Clone/install ESP-IDF for ESP32 into $ESP_IDF_DIR
+  doctor                Check whether ESP-IDF and the ESP32 project are usable
+  menuconfig            Open ESP-IDF menuconfig for clients/esp32
+  build                 Build the ESP32 firmware
+  flash [PORT]          Flash firmware. PORT may also be set with ESPPORT
+  monitor [PORT]        Open serial monitor
+  flash-monitor [PORT]  Flash then monitor
+  clean                 Remove ESP-IDF build artifacts for clients/esp32
+  reset-build           Delete clients/esp32/build when ESP-IDF fullclean refuses
+
+Environment:
+  ESP_IDF_DIR           ESP-IDF install dir. Default: ~/.espressif/esp-idf
+  ESP_IDF_REF           ESP-IDF branch/tag cloned by setup. Default: release/v5.4
+  IDF_PATH              Existing ESP-IDF checkout to use instead of ESP_IDF_DIR
+  ESPPORT               Serial port for flash/monitor commands
+
+Examples:
+  tools/esp32 setup
+  tools/esp32 menuconfig
+  tools/esp32 build
+  tools/esp32 flash /dev/cu.usbserial-0001
+  tools/esp32 flash-monitor /dev/cu.usbserial-0001
+EOF
+}
+
+die() {
+    echo "error: $*" >&2
+    exit 1
+}
+
+have() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+source_idf_export() {
+    if have idf.py; then
+        return 0
+    fi
+
+    if [ -n "${IDF_PATH:-}" ] && [ -f "$IDF_PATH/export.sh" ]; then
+        # shellcheck disable=SC1090
+        source "$IDF_PATH/export.sh" >/dev/null
+    elif [ -f "$ESP_IDF_DIR/export.sh" ]; then
+        # shellcheck disable=SC1090
+        source "$ESP_IDF_DIR/export.sh" >/dev/null
+    fi
+
+    have idf.py
+}
+
+require_idf() {
+    if ! source_idf_export; then
+        cat >&2 <<EOF
+ESP-IDF is not available in this shell.
+
+Run:
+  tools/esp32 setup
+
+Or install ESP-IDF yourself and either:
+  source /path/to/esp-idf/export.sh
+  export IDF_PATH=/path/to/esp-idf
+
+This wrapper will use IDF_PATH first, then ESP_IDF_DIR:
+  ESP_IDF_DIR=$ESP_IDF_DIR
+EOF
+        exit 1
+    fi
+}
+
+run_idf() {
+    require_idf
+    (cd "$PROJECT_DIR" && IDF_TARGET="${IDF_TARGET:-esp32}" idf.py "$@")
+}
+
+ensure_target() {
+    require_idf
+    if [ -f "$PROJECT_DIR/sdkconfig" ] &&
+        grep -q '^CONFIG_IDF_TARGET=' "$PROJECT_DIR/sdkconfig" &&
+        ! grep -q '^CONFIG_IDF_TARGET="esp32"' "$PROJECT_DIR/sdkconfig"; then
+        die "clients/esp32/sdkconfig targets something other than esp32; remove sdkconfig or set the target back to esp32"
+    fi
+}
+
+setup_idf() {
+    have git || die "git is required to clone ESP-IDF"
+
+    mkdir -p "$(dirname "$ESP_IDF_DIR")"
+    if [ ! -d "$ESP_IDF_DIR/.git" ]; then
+        echo "Cloning ESP-IDF $ESP_IDF_REF into $ESP_IDF_DIR"
+        git clone --recursive --branch "$ESP_IDF_REF" https://github.com/espressif/esp-idf.git "$ESP_IDF_DIR"
+    else
+        echo "Using existing ESP-IDF checkout at $ESP_IDF_DIR"
+        git -C "$ESP_IDF_DIR" submodule update --init --recursive
+    fi
+
+    (cd "$ESP_IDF_DIR" && ./install.sh esp32)
+    cat <<EOF
+
+ESP-IDF setup complete.
+
+You can now run:
+  tools/esp32 doctor
+  tools/esp32 menuconfig
+  tools/esp32 build
+
+This wrapper sources $ESP_IDF_DIR/export.sh automatically.
+EOF
+}
+
+doctor() {
+    echo "Project: $PROJECT_DIR"
+    [ -d "$PROJECT_DIR" ] || die "missing ESP32 project directory"
+
+    if source_idf_export; then
+        echo "idf.py: $(command -v idf.py)"
+        (cd "$PROJECT_DIR" && idf.py --version)
+    else
+        echo "idf.py: not found"
+        echo "Run tools/esp32 setup"
+        return 1
+    fi
+
+    echo "ESP_IDF_DIR: $ESP_IDF_DIR"
+    echo "IDF_PATH: ${IDF_PATH:-unset}"
+}
+
+run_idf_with_optional_port() {
+    local port="${ESPPORT:-}"
+    local idf_args=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+        idf_args+=("$1")
+        shift
+    done
+    if [ $# -gt 0 ] && [ "$1" = "--" ]; then
+        shift
+    fi
+    if [ $# -gt 0 ] && [[ "${1:-}" != -* ]]; then
+        port="$1"
+        shift
+    fi
+    if [ -n "$port" ]; then
+        run_idf -p "$port" "${idf_args[@]}" "$@"
+    else
+        run_idf "${idf_args[@]}" "$@"
+    fi
+}
+
+cmd="${1:-}"
+if [ -z "$cmd" ]; then
+    usage
+    exit 1
+fi
+shift || true
+
+case "$cmd" in
+    setup)
+        setup_idf
+        ;;
+    doctor)
+        doctor
+        ;;
+    menuconfig)
+        ensure_target
+        run_idf menuconfig
+        ;;
+    build)
+        ensure_target
+        run_idf build "$@"
+        ;;
+    flash)
+        ensure_target
+        run_idf_with_optional_port flash -- "$@"
+        ;;
+    monitor)
+        ensure_target
+        run_idf_with_optional_port monitor -- "$@"
+        ;;
+    flash-monitor|flash_monitor)
+        ensure_target
+        run_idf_with_optional_port flash monitor -- "$@"
+        ;;
+    clean)
+        require_idf
+        (cd "$PROJECT_DIR" && idf.py fullclean)
+        ;;
+    reset-build)
+        rm -rf "$PROJECT_DIR/build"
+        echo "Removed $PROJECT_DIR/build"
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        usage
+        die "unknown command: $cmd"
+        ;;
+esac

@@ -1,0 +1,43 @@
+{
+  "app_title": "Intercom Suite",
+  "server_profiles": [
+    {
+      "id": "example-studio|ws://192.0.2.10:40001",
+      "name": "Example Studio",
+      "server": "192.0.2.10:40000",
+      "control": "ws://192.0.2.10:40001",
+      "admin": "http://192.0.2.10:40002",
+      "auth": null,
+      "version": null,
+      "last_connected_ms": null,
+      "discovered": false
+    }
+  ],
+  "server": "127.0.0.1:40000",
+  "control": "ws://127.0.0.1:40001",
+  "user_id": 1,
+  "client_uid": null,
+  "identity_file": null,
+  "tx_channel": 1,
+  "listen_channel": 1,
+  "codec": "pcm16",
+  "opus_profile": "speech_24_standard",
+  "mic_gain": 1.0,
+  "input_limiter": false,
+  "input_transient_suppression": true,
+  "speaker_gain": 1.0,
+  "jitter_ms": 40,
+  "input_device": null,
+  "input_backend": "auto",
+  "input_channel": "average",
+  "output_device": null,
+  "debug_audio_dir": null,
+  "buttons": [],
+  "button_keys": [],
+  "local_ui_bind": "127.0.0.1:41002",
+  "local_ui_token": null,
+  "disable_local_ui": false,
+  "window_mode": "system_browser",
+  "ui_open_delay_ms": 750
+}
+

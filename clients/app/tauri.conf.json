@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Intercom Suite",
+  "version": "0.1.0",
+  "identifier": "com.intercomsuite.client",
+  "mainBinaryName": "app-native",
+  "build": {
+    "frontendDist": "tauri-assets"
+  },
+  "app": {
+    "windows": [],
+    "withGlobalTauri": true,
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "Intercom Suite",
+    "category": "Productivity",
+    "shortDescription": "Low-latency intercom operator client",
+    "longDescription": "Intercom Suite is a low-latency operator client for server-routed production and event intercom workflows.",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "iOS": {
+      "minimumSystemVersion": "15.0"
+    },
+    "android": {
+      "minSdkVersion": 26,
+      "versionCode": 1
+    }
+  }
+}

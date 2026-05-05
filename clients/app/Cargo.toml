@@ -1,0 +1,33 @@
+[package]
+name = "app"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+default-run = "app-native"
+
+[features]
+default = []
+native = ["dep:tauri", "tauri/tray-icon", "tauri/image-png"]
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "app-native"
+path = "src/bin/app_native.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+client-core.workspace = true
+common.workspace = true
+desktop = { path = "../desktop" }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", optional = true , features = [] }
+tokio.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+cc = "1.2"
+tauri-build = { version = "2", features = [] }

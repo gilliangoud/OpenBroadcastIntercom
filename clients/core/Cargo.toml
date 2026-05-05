@@ -1,0 +1,18 @@
+[package]
+name = "client-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+common.workspace = true
+futures-util.workspace = true
+opus = "0.3"
+rubato.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+uuid = { version = "1.23.1", features = ["v4"] }
