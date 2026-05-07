@@ -14,6 +14,10 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use clap::Parser;
+use client_core::{
+    default_audio_addr, derive_admin_url_from_control, ClientEndpointOverrides,
+    ClientServerEndpoint, DEFAULT_SERVER_HOST,
+};
 use common::{BridgeMode, Codec, OpusProfile};
 use cpal::traits::{DeviceTrait, HostTrait};
 use serde::{Deserialize, Serialize};
@@ -33,6 +37,8 @@ pub struct Args {
     #[arg(long)]
     pub bridge_bin: Option<PathBuf>,
     #[arg(long)]
+    pub server_host: Option<String>,
+    #[arg(long)]
     pub server: Option<SocketAddr>,
     #[arg(long)]
     pub control: Option<String>,
@@ -50,9 +56,11 @@ pub struct Args {
 #[serde(default)]
 struct BridgeAppConfig {
     app_title: String,
+    server_host: String,
     server: SocketAddr,
     control: String,
     admin: Option<String>,
+    advanced_endpoints: bool,
     bridge_bin: Option<PathBuf>,
     routes: Vec<BridgeRouteConfig>,
 }
@@ -61,9 +69,11 @@ impl Default for BridgeAppConfig {
     fn default() -> Self {
         Self {
             app_title: "Intercom Bridge App".to_string(),
-            server: "127.0.0.1:40000".parse().expect("valid default address"),
-            control: "ws://127.0.0.1:40001".to_string(),
+            server_host: DEFAULT_SERVER_HOST.to_string(),
+            server: default_audio_addr(),
+            control: ClientServerEndpoint::default().control_url(),
             admin: None,
+            advanced_endpoints: false,
             bridge_bin: None,
             routes: vec![BridgeRouteConfig {
                 id: "program-in".to_string(),
@@ -80,28 +90,53 @@ impl Default for BridgeAppConfig {
 }
 
 impl BridgeAppConfig {
+    fn endpoint_overrides(&self) -> ClientEndpointOverrides {
+        ClientEndpointOverrides::normalized(
+            &self.server_host,
+            self.server,
+            &self.control,
+            self.admin.clone(),
+            self.advanced_endpoints,
+        )
+    }
+
+    fn normalize_endpoints(&mut self) {
+        let endpoints = self.endpoint_overrides();
+        self.server_host = endpoints.server_host;
+        self.server = endpoints.server;
+        self.control = endpoints.control;
+        self.admin = endpoints.admin;
+        self.advanced_endpoints = endpoints.advanced_endpoints;
+    }
+
     fn merge_cli(&mut self, args: &Args) {
+        if let Some(server_host) = &args.server_host {
+            self.server_host = server_host.clone();
+            self.advanced_endpoints = false;
+        }
         if let Some(server) = args.server {
             self.server = server;
+            self.advanced_endpoints = true;
         }
         if let Some(control) = &args.control {
             self.control = control.clone();
+            self.advanced_endpoints = true;
         }
         if let Some(admin) = &args.admin {
             self.admin = Some(admin.clone());
+            self.advanced_endpoints = true;
         }
         if let Some(bridge_bin) = &args.bridge_bin {
             self.bridge_bin = Some(bridge_bin.clone());
         }
+        self.normalize_endpoints();
     }
 
     fn validate(&self) -> anyhow::Result<()> {
         if self.app_title.trim().is_empty() {
             bail!("app_title cannot be empty");
         }
-        if self.control.trim().is_empty() {
-            bail!("control URL cannot be empty");
-        }
+        self.endpoint_overrides().validate()?;
         let mut ids = std::collections::HashSet::new();
         let mut users = std::collections::HashSet::new();
         for route in &self.routes {
@@ -299,9 +334,17 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
 fn load_config(path: &Path) -> anyhow::Result<BridgeAppConfig> {
     match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text)
-            .with_context(|| format!("parse bridge app config from {}", path.display())),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(BridgeAppConfig::default()),
+        Ok(text) => {
+            let mut config: BridgeAppConfig = serde_json::from_str(&text)
+                .with_context(|| format!("parse bridge app config from {}", path.display()))?;
+            config.normalize_endpoints();
+            Ok(config)
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let mut config = BridgeAppConfig::default();
+            config.normalize_endpoints();
+            Ok(config)
+        }
         Err(err) => {
             Err(err).with_context(|| format!("read bridge app config from {}", path.display()))
         }
@@ -309,6 +352,8 @@ fn load_config(path: &Path) -> anyhow::Result<BridgeAppConfig> {
 }
 
 fn save_config(path: &Path, config: &BridgeAppConfig) -> anyhow::Result<()> {
+    let mut config = config.clone();
+    config.normalize_endpoints();
     config.validate()?;
     if let Some(parent) = path
         .parent()
@@ -317,7 +362,7 @@ fn save_config(path: &Path, config: &BridgeAppConfig) -> anyhow::Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("create bridge app config directory {}", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(config)?;
+    let json = serde_json::to_string_pretty(&config)?;
     let tmp_path = temp_config_path(path);
     fs::write(&tmp_path, format!("{json}\n"))
         .with_context(|| format!("write bridge app config to {}", tmp_path.display()))?;
@@ -364,8 +409,9 @@ async fn state_handler(State(state): State<Arc<AppState>>) -> Json<BridgeAppStat
 
 async fn config_handler(
     State(state): State<Arc<AppState>>,
-    Json(config): Json<BridgeAppConfig>,
+    Json(mut config): Json<BridgeAppConfig>,
 ) -> Result<Json<OkResponse>, BridgeAppError> {
+    config.normalize_endpoints();
     config.validate().map_err(BridgeAppError::bad_request)?;
     save_config(&state.config_file, &config).map_err(BridgeAppError::internal)?;
     *state.config.write().await = config;
@@ -575,11 +621,13 @@ fn audio_device_names(kind: AudioDeviceKind) -> anyhow::Result<Vec<String>> {
 async fn channel_options_for_config(
     config: &BridgeAppConfig,
 ) -> anyhow::Result<Vec<ChannelOption>> {
-    let admin_base = config
-        .admin
-        .clone()
-        .or_else(|| derive_admin_base_from_control(&config.control))
-        .context("no admin URL configured or derivable from control URL")?;
+    let admin_base = config.endpoint_overrides().effective_admin().or_else(|_| {
+        config
+            .admin
+            .clone()
+            .or_else(|| derive_admin_url_from_control(&config.control))
+            .context("no admin URL configured or derivable from control URL")
+    })?;
     let state_url = admin_state_url(&admin_base);
     let channels = tokio::time::timeout(
         std::time::Duration::from_millis(750),
@@ -700,6 +748,7 @@ fn admin_state_url(admin_base: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn derive_admin_base_from_control(control: &str) -> Option<String> {
     let rest = control.strip_prefix("ws://")?;
     let authority = rest.split('/').next()?;
@@ -797,11 +846,22 @@ fn default_bridge_bin_path() -> PathBuf {
 }
 
 fn bridge_args(config: &BridgeAppConfig, route: &BridgeRouteConfig) -> Vec<String> {
+    let endpoints = config.endpoint_overrides();
+    let server_host = endpoints.server_host.clone();
+    let server = endpoints
+        .effective_server()
+        .unwrap_or_else(|_| config.server)
+        .to_string();
+    let control = endpoints
+        .effective_control()
+        .unwrap_or_else(|_| config.control.clone());
     let mut args = vec![
+        "--server-host".to_string(),
+        server_host,
         "--server".to_string(),
-        config.server.to_string(),
+        server,
         "--control".to_string(),
-        config.control.clone(),
+        control,
         "--user-id".to_string(),
         route.user_id.to_string(),
         "--name".to_string(),
@@ -1024,6 +1084,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <div class="actions"><button id="refresh" type="button">Refresh</button><button id="start-all" type="button">Start Enabled</button><button id="stop-all" type="button">Stop All</button></div>
   </header>
   <main>
+    <section class="panel connection-panel">
+      <h1>Connection</h1>
+      <p class="muted">Use one server host for standard Intercom deployments. Custom ports and URLs stay in Advanced.</p>
+      <div class="grid">
+        <label>Server Host<input id="server-host" autocomplete="off" placeholder="192.168.1.10"></label>
+        <label class="check"><input id="advanced-endpoints" type="checkbox"> Advanced endpoints</label>
+        <label>Audio Address<input id="server" autocomplete="off" placeholder="192.168.1.10:40000"></label>
+        <label>Control WebSocket<input id="control" autocomplete="off" placeholder="ws://192.168.1.10:40001"></label>
+        <label>Admin URL<input id="admin" autocomplete="off" placeholder="http://192.168.1.10:40002"></label>
+      </div>
+      <p id="connection-summary" class="hint"></p>
+    </section>
     <section class="panel">
       <h1>Routes</h1>
       <p id="message" class="muted">Create one route per vMix bus, PA output, program input, or recorder feed.</p>
@@ -1047,6 +1119,14 @@ main{max-width:1480px;margin:0 auto;padding:16px}.panel,.route{background:#fff;b
 const APP_JS: &str = r#"const $ = id => document.getElementById(id);
 let state = null;
 function esc(value){return String(value ?? '').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
+const DEFAULT_HOST='127.0.0.1',AUDIO_PORT=40000,CONTROL_PORT=40001,ADMIN_PORT=40002;
+function normalizeHost(host){return String(host||'').trim().replace(/^\[(.*)\]$/,'$1');}
+function hostForUrl(host){const normalized=normalizeHost(host);return normalized.includes(':')?`[${normalized}]`:normalized;}
+function audioForHost(host){const normalized=normalizeHost(host)||DEFAULT_HOST;return `${hostForUrl(normalized)}:${AUDIO_PORT}`;}
+function controlForHost(host){const normalized=normalizeHost(host)||DEFAULT_HOST;return `ws://${hostForUrl(normalized)}:${CONTROL_PORT}`;}
+function adminForHost(host){const normalized=normalizeHost(host)||DEFAULT_HOST;return `http://${hostForUrl(normalized)}:${ADMIN_PORT}`;}
+function syncConnectionFields(){const advanced=$('advanced-endpoints').checked;for(const id of ['server','control','admin']){$(id).disabled=!advanced;}if(!advanced){const host=$('server-host').value.trim()||DEFAULT_HOST;$('server').value=audioForHost(host);$('control').value=controlForHost(host);$('admin').value=adminForHost(host);}$('connection-summary').textContent=`audio ${$('server').value} | control ${$('control').value} | admin ${$('admin').value || adminForHost($('server-host').value)}`;}
+function bindConnection(){const config=state.config||{};$('server-host').value=config.server_host||DEFAULT_HOST;$('advanced-endpoints').checked=!!config.advanced_endpoints;$('server').value=config.server||audioForHost($('server-host').value);$('control').value=config.control||controlForHost($('server-host').value);$('admin').value=config.admin||adminForHost($('server-host').value);$('server-host').oninput=syncConnectionFields;$('advanced-endpoints').onchange=syncConnectionFields;syncConnectionFields();}
 function routeStatus(id){return (state.routes || []).find(route=>route.id===id) || {};}
 function setMessage(text, kind='muted'){$('message').className=kind;$('message').textContent=text;}
 async function api(path, opts={}){const res=await fetch('/api'+path,{headers:{'content-type':'application/json'},...opts});if(!res.ok){let msg=res.statusText;try{msg=(await res.json()).error||msg;}catch{}throw new Error(msg);}return res.json();}
@@ -1079,8 +1159,8 @@ function routeHtml(route,index){const status=routeStatus(route.id);const running
   </div>
 </div>`;}
 function bindRoutes(){document.querySelectorAll('.route').forEach(card=>{const index=Number(card.dataset.index);const route=state.config.routes[index];card.querySelector('[data-field="mode"]').value=route.mode||'duplex';card.querySelector('[data-field="codec"]').value=route.codec||'pcm48';card.querySelector('[data-field="opus_profile"]').value=route.opus_profile||'speech_48_high';});document.querySelectorAll('[data-start]').forEach(button=>button.onclick=()=>startRoute(Number(button.dataset.start)));document.querySelectorAll('[data-stop]').forEach(button=>button.onclick=()=>stopRoute(Number(button.dataset.stop)));document.querySelectorAll('[data-remove]').forEach(button=>button.onclick=()=>removeRoute(Number(button.dataset.remove)));document.querySelectorAll('.multi-button').forEach(button=>button.onclick=event=>{event.stopPropagation();const dropdown=button.closest('.multi');document.querySelectorAll('.multi.open').forEach(open=>{if(open!==dropdown)open.classList.remove('open');});dropdown.classList.toggle('open');});document.querySelectorAll('[data-channel-dropdown] input').forEach(input=>input.onchange=()=>refreshChannelButtons(input.closest('.route')));refreshChannelButtons();}
-function render(){const running=(state.routes||[]).filter(route=>route.running).length;const warnings=(state.discovery_warnings||[]).length?` | ${(state.discovery_warnings||[]).length} discovery warning(s)`:'';$('summary').textContent=`${running}/${(state.config.routes||[]).length} routes running | bridge ${state.bridge_bin}${warnings}`;$('routes').innerHTML=(state.config.routes||[]).map(routeHtml).join('')||'<p class="muted">No routes configured.</p>';if((state.discovery_warnings||[]).length){setMessage(state.discovery_warnings.join(' | '),'muted');}bindRoutes();}
-function collect(){const routes=[...document.querySelectorAll('.route')].map(card=>{const field=name=>card.querySelector(`[data-field="${name}"]`);return {id:field('id').value.trim(),name:field('name').value.trim(),user_id:Number(field('user_id').value),mode:field('mode').value,tx_channels:selectedChannels(card,'tx_channels'),listen_channels:selectedChannels(card,'listen_channels'),input_device:field('input_device').value.trim()||null,output_device:field('output_device').value.trim()||null,codec:field('codec').value,opus_profile:field('opus_profile').value,input_gain:Number(field('input_gain').value)||1,output_gain:Number(field('output_gain').value)||1,stereo:field('stereo').checked,enabled:field('enabled').checked,note:field('note').value.trim()};});return {...state.config,routes};}
+function render(){const running=(state.routes||[]).filter(route=>route.running).length;const warnings=(state.discovery_warnings||[]).length?` | ${(state.discovery_warnings||[]).length} discovery warning(s)`:'';$('summary').textContent=`${running}/${(state.config.routes||[]).length} routes running | bridge ${state.bridge_bin}${warnings}`;$('routes').innerHTML=(state.config.routes||[]).map(routeHtml).join('')||'<p class="muted">No routes configured.</p>';if((state.discovery_warnings||[]).length){setMessage(state.discovery_warnings.join(' | '),'muted');}bindConnection();bindRoutes();}
+function collect(){syncConnectionFields();const routes=[...document.querySelectorAll('.route')].map(card=>{const field=name=>card.querySelector(`[data-field="${name}"]`);return {id:field('id').value.trim(),name:field('name').value.trim(),user_id:Number(field('user_id').value),mode:field('mode').value,tx_channels:selectedChannels(card,'tx_channels'),listen_channels:selectedChannels(card,'listen_channels'),input_device:field('input_device').value.trim()||null,output_device:field('output_device').value.trim()||null,codec:field('codec').value,opus_profile:field('opus_profile').value,input_gain:Number(field('input_gain').value)||1,output_gain:Number(field('output_gain').value)||1,stereo:field('stereo').checked,enabled:field('enabled').checked,note:field('note').value.trim()};});return {...state.config,server_host:normalizeHost($('server-host').value)||DEFAULT_HOST,server:$('server').value.trim(),control:$('control').value.trim(),admin:$('admin').value.trim()||null,advanced_endpoints:$('advanced-endpoints').checked,routes};}
 async function load(){state=await api('/state');render();}
 async function save(){try{state.config=collect();await api('/config',{method:'PUT',body:JSON.stringify(state.config)});setMessage('Configuration saved.','ok');await load();}catch(err){setMessage(err.message,'error');}}
 async function startRoute(index){try{await save();await api(`/routes/${encodeURIComponent(state.config.routes[index].id)}/start`,{method:'POST'});await load();}catch(err){setMessage(err.message,'error');}}
@@ -1138,6 +1218,9 @@ mod tests {
         };
 
         let args = bridge_args(&config, &route);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--server-host", "127.0.0.1"]));
         assert!(args.windows(2).any(|pair| pair == ["--mode", "output"]));
         assert!(args
             .windows(2)
@@ -1222,6 +1305,10 @@ mod tests {
 
     #[test]
     fn bridge_app_ui_uses_dropdown_controls_for_devices_and_channels() {
+        assert!(INDEX_HTML.contains("server-host"));
+        assert!(INDEX_HTML.contains("advanced-endpoints"));
+        assert!(APP_JS.contains("server_host"));
+        assert!(APP_JS.contains("advanced_endpoints"));
         assert!(APP_JS.contains("deviceSelect('input_device'"));
         assert!(APP_JS.contains("deviceSelect('output_device'"));
         assert!(APP_JS.contains("channelDropdown('tx_channels'"));

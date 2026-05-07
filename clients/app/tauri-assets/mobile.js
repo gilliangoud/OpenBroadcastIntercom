@@ -1,6 +1,10 @@
 const invoke = window.__TAURI__?.core?.invoke;
 const $ = id => document.getElementById(id);
 const CONTROLS_PAGE = 'client-controls.html';
+const DEFAULT_HOST = '127.0.0.1';
+const AUDIO_PORT = 40000;
+const CONTROL_PORT = 40001;
+const ADMIN_PORT = 40002;
 
 let current = null;
 let currentLocalUiUrl = null;
@@ -29,7 +33,7 @@ function serverProfileLabel(profile) {
   if (profile.discovered) badges.push('LAN');
   if (profile.last_connected_ms) badges.push('Recent');
   if (profile.auth === 'required') badges.push('Auth');
-  return `${profile.name || profile.control} - ${profile.server}${badges.length ? ` (${badges.join(', ')})` : ''}`;
+  return `${profile.name || profile.server_host || profile.control} - ${profile.server_host || profile.server}${badges.length ? ` (${badges.join(', ')})` : ''}`;
 }
 
 function setServerProfiles(profiles = []) {
@@ -58,7 +62,7 @@ function setServerProfiles(profiles = []) {
     option.textContent = serverProfileLabel(profile);
     picker.appendChild(option);
   }
-  const currentProfile = serverProfiles.find(profile => profile.control === $('control').value.trim());
+  const currentProfile = serverProfiles.find(profile => profile.control === $('control').value.trim() || profile.server_host === $('server_host').value.trim());
   if (currentProfile) picker.value = currentProfile.id;
   $('forget-server').disabled = !picker.value;
   $('server-list-status').textContent = `${serverProfiles.length} server${serverProfiles.length === 1 ? '' : 's'} available.`;
@@ -93,10 +97,51 @@ function numberOrNull(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function normalizeHost(host) {
+  return String(host || '').trim().replace(/^\[(.*)\]$/, '$1');
+}
+
+function hostForUrl(host) {
+  const normalized = normalizeHost(host);
+  return normalized.includes(':') ? `[${normalized}]` : normalized;
+}
+
+function audioForHost(host) {
+  const normalized = normalizeHost(host) || DEFAULT_HOST;
+  return `${hostForUrl(normalized)}:${AUDIO_PORT}`;
+}
+
+function controlForHost(host) {
+  const normalized = normalizeHost(host) || DEFAULT_HOST;
+  return `ws://${hostForUrl(normalized)}:${CONTROL_PORT}`;
+}
+
+function adminForHost(host) {
+  const normalized = normalizeHost(host) || DEFAULT_HOST;
+  return `http://${hostForUrl(normalized)}:${ADMIN_PORT}`;
+}
+
+function syncEndpointFields() {
+  const advanced = $('advanced_endpoints').checked;
+  $('advanced-connection').open = advanced;
+  for (const id of ['server', 'control', 'admin']) {
+    $(id).disabled = !advanced;
+  }
+  if (!advanced) {
+    const host = $('server_host').value.trim() || DEFAULT_HOST;
+    $('server').value = audioForHost(host);
+    $('control').value = controlForHost(host);
+    $('admin').value = adminForHost(host);
+  }
+}
+
 function fill(settings) {
   current = settings;
+  $('server_host').value = settings.server_host || DEFAULT_HOST;
   $('server').value = settings.server || '127.0.0.1:40000';
   $('control').value = settings.control || 'ws://127.0.0.1:40001';
+  $('admin').value = settings.admin || adminForHost(settings.server_host || DEFAULT_HOST);
+  $('advanced_endpoints').checked = !!settings.advanced_endpoints;
   $('user_id').value = settings.user_id ?? '';
   $('codec').value = settings.codec || 'pcm16';
   $('opus_profile').value = settings.opus_profile || 'speech_24_standard';
@@ -104,17 +149,23 @@ function fill(settings) {
   $('tx_channel').value = settings.tx_channel ?? 1;
   $('mic_gain').value = settings.mic_gain ?? 1;
   $('speaker_gain').value = settings.speaker_gain ?? 1;
+  $('button_count').value = settings.button_count ?? 6;
   $('buttons').value = csv(settings.buttons);
   $('button_keys').value = csv(settings.button_keys);
   setServerProfiles(settings.server_profiles || serverProfiles);
   renderCodecFields();
+  syncEndpointFields();
 }
 
 function collect() {
+  syncEndpointFields();
   return {
     ...(current || {}),
+    server_host: normalizeHost($('server_host').value) || DEFAULT_HOST,
     server: $('server').value.trim(),
     control: $('control').value.trim(),
+    admin: $('admin').value.trim() || null,
+    advanced_endpoints: $('advanced_endpoints').checked,
     user_id: numberOrNull($('user_id').value),
     codec: $('codec').value,
     opus_profile: $('opus_profile').value,
@@ -122,6 +173,7 @@ function collect() {
     tx_channel: Number($('tx_channel').value || 1),
     mic_gain: Number($('mic_gain').value || 1),
     speaker_gain: Number($('speaker_gain').value || 1),
+    button_count: Number($('button_count').value || 6),
     buttons: parseList($('buttons').value),
     button_keys: parseList($('button_keys').value),
     server_profiles: serverProfiles,
@@ -158,6 +210,8 @@ async function load() {
 }
 
 $('codec').addEventListener('change', renderCodecFields);
+$('server_host').addEventListener('input', syncEndpointFields);
+$('advanced_endpoints').addEventListener('change', syncEndpointFields);
 
 $('save').addEventListener('click', async event => {
   event.preventDefault();

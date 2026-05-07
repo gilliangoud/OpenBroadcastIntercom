@@ -11,16 +11,18 @@ use axum::extract::Request;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{Parser, ValueEnum};
 use client_core::{
-    bind_tcp_listener_with_port_fallback, load_or_create_client_uid, normalize_button_capabilities,
-    run_connection_cue_task, run_control_connection, samples_for_ms, send_control_message,
-    send_control_request, supported_codecs, AudioDecoder, AudioEncoder, ClientConfig,
-    ClientConnectionEvent, ControlRequest, PlaybackBuffer, PlaybackStats,
+    bind_tcp_listener_with_port_fallback, default_button_capabilities, load_or_create_client_uid,
+    merge_button_capabilities, run_connection_cue_task, run_control_connection, samples_for_ms,
+    send_control_message, send_control_request, supported_codecs, AudioDecoder, AudioEncoder,
+    ClientConfig, ClientConnectionEvent, ClientServerEndpoint, ControlRequest, PlaybackBuffer,
+    PlaybackStats, DEFAULT_CLIENT_BUTTON_COUNT, DEFAULT_CONTROL_PORT, DEFAULT_SERVER_HOST,
+    MAX_CLIENT_BUTTON_COUNT,
 };
 use common::{
     codec_samples_per_frame, AlertId, AlertStatus, AlertTarget, AudioPacket, ButtonCapability,
@@ -38,6 +40,8 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 struct Args {
+    #[arg(long)]
+    server_host: Option<String>,
     #[arg(long, default_value = "127.0.0.1:40000")]
     server: SocketAddr,
     #[arg(long, default_value = "ws://127.0.0.1:40001")]
@@ -68,6 +72,8 @@ struct Args {
     output_device: Option<String>,
     #[arg(long)]
     receive_only: bool,
+    #[arg(long, default_value_t = DEFAULT_CLIENT_BUTTON_COUNT, value_parser = clap::value_parser!(u16).range(0..=MAX_CLIENT_BUTTON_COUNT as i64))]
+    button_count: u16,
     #[arg(long = "button", value_name = "ID[=LABEL]")]
     buttons: Vec<ButtonArg>,
     #[arg(long, default_value = "0.0.0.0:41001")]
@@ -182,6 +188,11 @@ fn authorization_matches(headers: &HeaderMap, token: &str) -> bool {
         .is_some_and(|(_, password)| password == token)
 }
 
+const LOCAL_UI_HTML: &str = include_str!("../../shared-ui/talking/client-controls.html");
+const LOCAL_UI_CSS: &str = include_str!("../../shared-ui/talking/client-controls.css");
+const LOCAL_UI_JS: &str = include_str!("../../shared-ui/talking/client-controls.js");
+const LOCAL_UI_API_JS: &str = include_str!("../../shared-ui/talking/client-api-http.js");
+
 async fn require_local_auth(
     State(auth): State<LocalHttpAuth>,
     headers: HeaderMap,
@@ -249,7 +260,8 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("pi=info".parse()?))
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+    resolve_endpoint_args(&mut args)?;
     if args.list_devices {
         list_audio_devices()?;
         return Ok(());
@@ -258,7 +270,8 @@ async fn main() -> anyhow::Result<()> {
     let user_id = args.user_id.context("--user-id is required")?;
     let client_uid =
         load_or_create_client_uid(args.client_uid.as_deref(), args.identity_file.as_deref())?;
-    let advertised_buttons = normalize_button_capabilities(
+    let advertised_buttons = merge_button_capabilities(
+        default_button_capabilities(args.button_count),
         args.buttons
             .clone()
             .into_iter()
@@ -637,6 +650,21 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn resolve_endpoint_args(args: &mut Args) -> anyhow::Result<()> {
+    let Some(server_host) = args.server_host.as_deref() else {
+        return Ok(());
+    };
+    let endpoint = ClientServerEndpoint::new(server_host)?;
+    let default_control = format!("ws://{DEFAULT_SERVER_HOST}:{DEFAULT_CONTROL_PORT}");
+    if args.server == client_core::default_audio_addr() {
+        args.server = endpoint.resolve_audio_addr()?;
+    }
+    if args.control == default_control {
+        args.control = endpoint.control_url();
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct ApiState {
     config: Arc<Mutex<ClientConfig>>,
@@ -807,6 +835,13 @@ impl IntoResponse for ApiError {
 
 fn local_api_router(state: ApiState, auth: LocalHttpAuth) -> Router {
     Router::new()
+        .route("/", get(local_ui_index))
+        .route("/client-controls.js", get(local_ui_js))
+        .route("/client-controls.css", get(local_ui_css))
+        .route("/client-api.js", get(local_ui_api_js))
+        .route("/client-api-http.js", get(local_ui_api_js))
+        .route("/app.js", get(local_ui_js))
+        .route("/style.css", get(local_ui_css))
         .route("/health", get(health_handler))
         .route("/state", get(state_handler))
         .route("/config", put(config_handler))
@@ -831,6 +866,28 @@ fn local_api_router(state: ApiState, auth: LocalHttpAuth) -> Router {
         .route("/alerts/:id/cancel", post(alert_cancel_handler))
         .layer(middleware::from_fn_with_state(auth, require_local_auth))
         .with_state(state)
+}
+
+async fn local_ui_index() -> Html<&'static str> {
+    Html(LOCAL_UI_HTML)
+}
+
+async fn local_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript")],
+        LOCAL_UI_JS,
+    )
+}
+
+async fn local_ui_css() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/css")], LOCAL_UI_CSS)
+}
+
+async fn local_ui_api_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript")],
+        LOCAL_UI_API_JS,
+    )
 }
 
 async fn health_handler() -> Json<OkResponse> {
@@ -1701,6 +1758,7 @@ mod tests {
         config.buttons = vec![TalkButtonConfig {
             id: "director".to_string(),
             label: "Director".to_string(),
+            color: None,
             mode: common::TalkButtonMode::Momentary,
             actions: vec![common::TalkButtonAction::Transmit {
                 channels: vec![2, 3],
@@ -1791,6 +1849,24 @@ mod tests {
         assert_eq!(response.lockout, ClientLockoutPolicy::default());
         assert_eq!(response.playback.available_samples, 0);
         assert_eq!(response.playback.underflows, 0);
+    }
+
+    #[test]
+    fn local_ui_uses_shared_operator_console_assets() {
+        assert!(LOCAL_UI_HTML.contains("Operator Console"));
+        assert!(LOCAL_UI_HTML.contains("client-api.js"));
+        assert!(LOCAL_UI_HTML.contains("id=\"client-title\" hidden"));
+        assert!(LOCAL_UI_HTML.contains("route-editor"));
+        assert!(LOCAL_UI_HTML.contains("bottom-special"));
+        assert!(LOCAL_UI_JS.contains("function renderButtons()"));
+        assert!(LOCAL_UI_JS.contains("function renderCapabilityPanels()"));
+        assert!(LOCAL_UI_JS.contains("data-requires-gain"));
+        assert!(!LOCAL_UI_JS.contains("clientApi?.name || 'client'} controls"));
+        assert!(LOCAL_UI_JS.contains("'Hold Talk to transmit'"));
+        assert!(!LOCAL_UI_JS.contains("fetch("));
+        assert!(LOCAL_UI_API_JS.contains("fetch("));
+        assert!(LOCAL_UI_CSS.contains(".phone-shell"));
+        assert!(LOCAL_UI_CSS.contains("--dock-height"));
     }
 
     #[tokio::test]

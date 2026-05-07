@@ -423,6 +423,7 @@ async fn admin_api_preconfigures_client_before_connect() {
             buttons: vec![common::TalkButtonConfig {
                 id: "director".to_string(),
                 label: "Director".to_string(),
+                color: None,
                 mode: common::TalkButtonMode::Momentary,
                 actions: vec![common::TalkButtonAction::Transmit {
                     channels: vec![8],
@@ -473,6 +474,7 @@ async fn admin_api_preconfigures_client_before_connect() {
             buttons: vec![common::TalkButtonConfig {
                 id: "director".to_string(),
                 label: "Director".to_string(),
+                color: None,
                 mode: common::TalkButtonMode::Momentary,
                 actions: vec![common::TalkButtonAction::Transmit {
                     channels: vec![8],

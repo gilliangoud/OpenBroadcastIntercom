@@ -26,6 +26,9 @@ control, and admin addresses from the server TXT metadata. Manual audio/control
 entry remains the fallback when local-network permission is denied or Bonjour is
 not available on the LAN.
 
+Visual references for the mobile setup page and packaged Tauri operator console
+are in [Client UI Screenshots](client-ui-screenshots.md).
+
 ## Permissions
 
 iOS:

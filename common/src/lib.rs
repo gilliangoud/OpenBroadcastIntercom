@@ -1045,6 +1045,8 @@ pub struct AlertRecipientStatus {
 pub struct AlertStatus {
     pub id: AlertId,
     pub sender: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
     pub target: AlertTarget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -1115,6 +1117,8 @@ pub struct TalkButtonConfig {
     pub id: ButtonId,
     #[serde(default)]
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     #[serde(default)]
     pub mode: TalkButtonMode,
     pub actions: Vec<TalkButtonAction>,
@@ -1164,7 +1168,11 @@ impl StereoConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectCallStatus {
     pub caller: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_name: Option<String>,
     pub target: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_name: Option<String>,
     pub active: bool,
     #[serde(default)]
     pub duck: bool,
@@ -2181,6 +2189,7 @@ mod tests {
         let button = TalkButtonConfig {
             id: "pa".to_string(),
             label: "PA".to_string(),
+            color: Some("#123abc".to_string()),
             mode: TalkButtonMode::Latching,
             actions: vec![
                 TalkButtonAction::Transmit {
@@ -2237,6 +2246,7 @@ mod tests {
         let status = AlertStatus {
             id: 11,
             sender: 4,
+            sender_name: Some("Director".to_string()),
             target: AlertTarget::Channel(2),
             message: None,
             created_at_ms: 1234,
@@ -2249,6 +2259,11 @@ mod tests {
         };
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(serde_json::from_str::<AlertStatus>(&json).unwrap(), status);
+        let legacy = serde_json::from_str::<AlertStatus>(
+            r#"{"id":12,"sender":4,"target":{"kind":"channel","id":2},"created_at_ms":1234,"recipients":[],"cancelled":false}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.sender_name, None);
         assert!(status.active_for(9));
         assert!(!status.active_for(10));
     }

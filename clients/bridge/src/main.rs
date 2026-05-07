@@ -9,7 +9,8 @@ use clap::{Parser, ValueEnum};
 use client_core::{
     load_or_create_client_uid, run_connection_cue_task, run_control_connection,
     send_control_request, supported_codecs, AudioDecoder, AudioEncoder, AudioSettings,
-    ClientConfig, ClientConnectionEvent, ControlRequest, PlaybackBuffer,
+    ClientConfig, ClientConnectionEvent, ClientServerEndpoint, ControlRequest, PlaybackBuffer,
+    DEFAULT_CONTROL_PORT, DEFAULT_SERVER_HOST,
 };
 use common::{
     codec_samples_per_frame, AudioPacket, BridgeStatus, ClientLockoutPolicy, ClientRole, Codec,
@@ -25,6 +26,8 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(about = "Generic audio-device bridge for PA, vMix, and production audio feeds")]
 struct Args {
+    #[arg(long)]
+    server_host: Option<String>,
     #[arg(long, default_value = "127.0.0.1:40000")]
     server: SocketAddr,
     #[arg(long, default_value = "ws://127.0.0.1:40001")]
@@ -145,12 +148,28 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("bridge=info".parse()?))
         .init();
-    let args = Args::parse();
+    let mut args = Args::parse();
     if args.list_devices {
         list_audio_devices()?;
         return Ok(());
     }
+    resolve_endpoint_args(&mut args)?;
     run(args).await
+}
+
+fn resolve_endpoint_args(args: &mut Args) -> anyhow::Result<()> {
+    let Some(server_host) = args.server_host.as_deref() else {
+        return Ok(());
+    };
+    let endpoint = ClientServerEndpoint::new(server_host)?;
+    let default_control = format!("ws://{DEFAULT_SERVER_HOST}:{DEFAULT_CONTROL_PORT}");
+    if args.server == client_core::default_audio_addr() {
+        args.server = endpoint.resolve_audio_addr()?;
+    }
+    if args.control == default_control {
+        args.control = endpoint.control_url();
+    }
+    Ok(())
 }
 
 async fn run(args: Args) -> anyhow::Result<()> {

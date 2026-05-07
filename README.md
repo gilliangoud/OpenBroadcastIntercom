@@ -742,6 +742,9 @@ in use, the client automatically tries the next ports and logs the actual URL.
 Channel rows are collapsed by default; tap a channel to fold out the live roster
 for that channel. Roster rows show each present client by configured name plus
 ID and mark whether that client is currently transmitting into that channel.
+Current screenshots for the mobile setup, Tauri/native client, desktop local
+UI, Pi browser UI, and bridge app are in
+[Client UI Screenshots](docs/client-ui-screenshots.md).
 
 The local desktop UI/API has no authentication unless `--local-ui-token` or
 `INTERCOM_LOCAL_UI_TOKEN` is set. The default bind is localhost; if you bind it

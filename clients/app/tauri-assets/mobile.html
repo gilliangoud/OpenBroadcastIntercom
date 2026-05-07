@@ -39,12 +39,8 @@
 
         <form id="mobile-form" class="config-form">
           <label class="wide">
-            Server Audio
-            <input id="server" autocomplete="off" inputmode="numeric" placeholder="192.168.1.10:40000" />
-          </label>
-          <label class="wide">
-            Control WebSocket
-            <input id="control" autocomplete="off" inputmode="url" placeholder="ws://192.168.1.10:40001" />
+            Server Host
+            <input id="server_host" autocomplete="off" inputmode="url" placeholder="192.168.1.10" />
           </label>
           <label>
             User ID
@@ -84,6 +80,10 @@
             Speaker Gain
             <input id="speaker_gain" type="number" min="0" max="8" step="0.05" inputmode="decimal" />
           </label>
+          <label>
+            Button Count
+            <input id="button_count" type="number" min="0" max="24" step="1" inputmode="numeric" />
+          </label>
           <label class="wide">
             Buttons
             <input id="buttons" autocomplete="off" placeholder="director=Director,pa=PA" />
@@ -92,6 +92,25 @@
             Button Keys
             <input id="button_keys" autocomplete="off" placeholder="director=d" />
           </label>
+          <label class="check wide">
+            <input id="advanced_endpoints" type="checkbox" />
+            Use custom endpoint URLs
+          </label>
+          <details id="advanced-connection" class="wide">
+            <summary>Advanced Connection</summary>
+            <label class="wide">
+              Custom Audio Address
+              <input id="server" autocomplete="off" inputmode="url" placeholder="192.168.1.10:40000" />
+            </label>
+            <label class="wide">
+              Custom Control WebSocket
+              <input id="control" autocomplete="off" inputmode="url" placeholder="ws://192.168.1.10:40001" />
+            </label>
+            <label class="wide">
+              Custom Admin URL
+              <input id="admin" autocomplete="off" inputmode="url" placeholder="http://192.168.1.10:40002" />
+            </label>
+          </details>
         </form>
       </section>
 

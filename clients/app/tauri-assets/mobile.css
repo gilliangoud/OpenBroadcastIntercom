@@ -225,6 +225,28 @@ select {
   background: var(--brand);
 }
 
+details.wide {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+details.wide[open] {
+  padding-bottom: 12px;
+}
+
+details.wide summary {
+  cursor: pointer;
+  font-weight: 900;
+}
+
+details.wide label {
+  margin-top: 10px;
+}
+
 @media (max-width: 470px) {
   .phone-shell {
     padding-top: 14px;

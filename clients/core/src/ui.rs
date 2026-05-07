@@ -93,6 +93,7 @@ pub trait ClientAudioBackend: Send + Sync {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClientRuntimeConfig {
+    pub server_host: String,
     pub server: SocketAddr,
     pub control: String,
     pub user_id: Option<u16>,
@@ -112,6 +113,7 @@ pub struct ClientRuntimeConfig {
     pub input_channel: ClientInputChannelMode,
     pub output_device: Option<String>,
     pub debug_audio_dir: Option<PathBuf>,
+    pub button_count: u16,
     pub buttons: Vec<String>,
     pub button_keys: Vec<String>,
     pub local_ui_bind: SocketAddr,

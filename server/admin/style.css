@@ -74,6 +74,7 @@ fieldset{border:1px solid var(--line);border-radius:8px;padding:12px;display:gri
 legend{font-weight:800;padding:0 4px}
 .config-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;max-height:calc(100vh - 138px);overflow:auto;padding-right:4px}
 .button-row{border:1px solid var(--line);border-radius:8px;padding:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:10px;background:#fbfdff}
+.button-row input[type=color]{height:39px;padding:3px}
 .pan-row{display:grid;grid-template-columns:minmax(130px,1fr) minmax(180px,2fr) 90px;gap:10px;align-items:center;border:1px solid #e5e9ef;border-radius:8px;padding:10px;background:#fbfdff}
 .pan-slider-wrap{position:relative;display:block}
 .pan-slider-wrap::after{content:"";position:absolute;left:50%;top:50%;width:2px;height:20px;background:#52606d;border-radius:2px;transform:translate(-50%,-50%);pointer-events:none;opacity:.7}

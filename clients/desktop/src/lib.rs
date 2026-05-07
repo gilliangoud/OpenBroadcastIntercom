@@ -19,14 +19,15 @@ use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{Parser, ValueEnum};
 use client_core::{
-    bind_tcp_listener_with_port_fallback, format_button_ids, format_buttons, format_channels,
-    format_codec, format_volumes, load_or_create_client_uid, normalize_button_capabilities,
-    parse_channels, parse_volumes, run_connection_cue_task, run_control_connection, samples_for_ms,
-    send_control_request, supported_codecs, AlertRequest, AudioDecoder, AudioEncoder,
-    AudioSettings, ClientAudioBackend, ClientAudioBackendKind, ClientConfig, ClientConnectionEvent,
-    ClientControlApi, CodecRequest, ControlRequest, FullConfigRequest, GainRequest,
-    InputBackendState, MacosMicrophoneModeStatus, OkResponse, PlaybackBuffer, StateResponse,
-    TalkModeRequest,
+    bind_tcp_listener_with_port_fallback, default_button_capabilities, format_button_ids,
+    format_buttons, format_channels, format_codec, format_volumes, load_or_create_client_uid,
+    merge_button_capabilities, parse_channels, parse_volumes, run_connection_cue_task,
+    run_control_connection, samples_for_ms, send_control_request, supported_codecs, AlertRequest,
+    AudioDecoder, AudioEncoder, AudioSettings, ClientAudioBackend, ClientAudioBackendKind,
+    ClientConfig, ClientConnectionEvent, ClientControlApi, ClientServerEndpoint, CodecRequest,
+    ControlRequest, FullConfigRequest, GainRequest, InputBackendState, MacosMicrophoneModeStatus,
+    OkResponse, PlaybackBuffer, StateResponse, TalkModeRequest, DEFAULT_CLIENT_BUTTON_COUNT,
+    DEFAULT_CONTROL_PORT, DEFAULT_SERVER_HOST, MAX_CLIENT_BUTTON_COUNT,
 };
 use common::{
     codec_samples_per_frame, AlertId, AudioPacket, ButtonCapability, ButtonId,
@@ -51,6 +52,8 @@ mod macos_voice;
 
 #[derive(Debug, Parser)]
 pub struct Args {
+    #[arg(long)]
+    pub server_host: Option<String>,
     #[arg(long, default_value = "127.0.0.1:40000")]
     pub server: SocketAddr,
     #[arg(long, default_value = "ws://127.0.0.1:40001")]
@@ -89,6 +92,8 @@ pub struct Args {
     pub output_device: Option<String>,
     #[arg(long)]
     pub debug_audio_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = DEFAULT_CLIENT_BUTTON_COUNT, value_parser = clap::value_parser!(u16).range(0..=MAX_CLIENT_BUTTON_COUNT as i64))]
+    pub button_count: u16,
     #[arg(long = "button", value_name = "ID[=LABEL]")]
     pub buttons: Vec<ButtonArg>,
     #[arg(long = "button-key", value_name = "ID=KEY")]
@@ -428,10 +433,11 @@ pub async fn run_until_shutdown(
 }
 
 pub async fn run_until_shutdown_with_local_api(
-    args: Args,
+    mut args: Args,
     shutdown: impl Future<Output = ()> + Send,
     local_api_tx: Option<std::sync::mpsc::Sender<LocalClientApi>>,
 ) -> anyhow::Result<()> {
+    resolve_endpoint_args(&mut args)?;
     if args.list_devices {
         list_audio_devices()?;
         return Ok(());
@@ -442,7 +448,8 @@ pub async fn run_until_shutdown_with_local_api(
     let client_uid =
         load_or_create_client_uid(args.client_uid.as_deref(), args.identity_file.as_deref())?;
     let control_url = args.control.clone();
-    let advertised_buttons = normalize_button_capabilities(
+    let advertised_buttons = merge_button_capabilities(
+        default_button_capabilities(args.button_count),
         args.buttons
             .clone()
             .into_iter()
@@ -864,6 +871,21 @@ pub async fn run_until_shutdown_with_local_api(
     Ok(())
 }
 
+fn resolve_endpoint_args(args: &mut Args) -> anyhow::Result<()> {
+    let Some(server_host) = args.server_host.as_deref() else {
+        return Ok(());
+    };
+    let endpoint = ClientServerEndpoint::new(server_host)?;
+    let default_control = format!("ws://{DEFAULT_SERVER_HOST}:{DEFAULT_CONTROL_PORT}");
+    if args.server == client_core::default_audio_addr() {
+        args.server = endpoint.resolve_audio_addr()?;
+    }
+    if args.control == default_control {
+        args.control = endpoint.control_url();
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct LocalClientApi {
     config: Arc<Mutex<ClientConfig>>,
@@ -1264,6 +1286,10 @@ async fn run_local_ui(
 fn local_ui_router(state: ApiState, auth: LocalHttpAuth) -> Router {
     Router::new()
         .route("/", get(local_ui_index))
+        .route("/client-controls.js", get(local_ui_js))
+        .route("/client-controls.css", get(local_ui_css))
+        .route("/client-api.js", get(local_ui_api_js))
+        .route("/client-api-http.js", get(local_ui_api_js))
         .route("/app.js", get(local_ui_js))
         .route("/style.css", get(local_ui_css))
         .route("/health", get(health_handler))
@@ -1310,6 +1336,13 @@ async fn local_ui_js() -> impl IntoResponse {
 
 async fn local_ui_css() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/css")], LOCAL_UI_CSS)
+}
+
+async fn local_ui_api_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript")],
+        LOCAL_UI_API_JS,
+    )
 }
 
 async fn health_handler() -> Json<OkResponse> {
@@ -1644,246 +1677,10 @@ async fn forward_control_message(
     }
 }
 
-const LOCAL_UI_HTML: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Intercom Client</title>
-  <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-  <main class="phone-shell">
-    <header class="topbar">
-      <div>
-        <h1 id="client-title">Client</h1>
-      </div>
-      <div class="top-actions">
-        <button id="stats-open" type="button">Stats</button>
-        <button id="settings-open" type="button">Settings</button>
-        <button id="mobile-setup-open" type="button" hidden>Setup</button>
-      </div>
-    </header>
-
-    <section id="alerts-panel" class="alerts-panel" hidden>
-      <div class="section-title">
-        <h2>Alerts</h2>
-        <span id="alerts-summary" class="muted"></span>
-      </div>
-      <div id="alerts" class="alert-list"></div>
-    </section>
-
-    <section id="cue-panel" class="cue-panel" hidden>
-      <div class="section-title">
-        <h2>IFB / Calls</h2>
-        <span id="cue-summary" class="muted"></span>
-      </div>
-      <div id="cue-list" class="cue-list"></div>
-    </section>
-
-    <section class="channels-panel">
-      <div class="section-title">
-        <h2>Channels</h2>
-        <span id="route-summary" class="muted"></span>
-      </div>
-      <div id="channel-list" class="channel-list"></div>
-    </section>
-
-    <p id="message"></p>
-    <div class="bottom-dock">
-      <div id="bottom-special" class="bottom-special" hidden>
-        <div id="buttons" class="special-buttons"></div>
-      </div>
-      <div class="bottom-controls">
-        <button id="mute" class="control-button mute-button" type="button">Mute</button>
-        <button id="talk" class="control-button talk-button-main" type="button">Talk</button>
-      </div>
-    </div>
-
-    <div id="stats-modal" class="modal" hidden>
-      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="stats-title">
-        <div class="modal-head">
-          <h2 id="stats-title">Stats</h2>
-          <button id="stats-close" type="button">Close</button>
-        </div>
-        <section class="stats-grid">
-          <div><span>User</span><strong id="user"></strong></div>
-          <div><span>Name</span><strong id="name-label"></strong></div>
-          <div><span>Listen</span><strong id="listen-label"></strong></div>
-          <div><span>TX</span><strong id="tx-label"></strong></div>
-          <div><span>Playback</span><strong id="playback-label"></strong></div>
-          <div><span>Drops</span><strong id="playback-drops-label"></strong></div>
-          <div><span>Supported</span><strong id="supported-label"></strong></div>
-          <div><span>Active Buttons</span><strong id="active-buttons-label"></strong></div>
-          <div><span>Direct Calls</span><strong id="active-calls-label"></strong></div>
-          <div><span>Last Caller</span><strong id="last-caller-label"></strong></div>
-          <div><span>Input Backend</span><strong id="input-backend-label"></strong></div>
-          <div><span>Input Note</span><strong id="input-backend-note-label"></strong></div>
-          <div><span>macOS Mic Mode</span><strong id="macos-mic-mode-label"></strong><button id="macos-mic-mode-open" type="button" hidden>Open Controls</button></div>
-          <div><span>macOS Mic Note</span><strong id="macos-mic-mode-note-label"></strong></div>
-          <div><span>Locked</span><strong id="lockout-label"></strong></div>
-        </section>
-        <p id="ifb"></p>
-      </div>
-    </div>
-
-    <div id="settings-modal" class="modal" hidden>
-      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <div class="modal-head">
-          <h2 id="settings-title">Settings</h2>
-          <button id="settings-close" type="button">Close</button>
-        </div>
-        <form id="settings-form">
-          <fieldset>
-            <legend>Audio</legend>
-            <label>Mic Gain <output id="mic-gain-value"></output><input id="mic-gain-input" type="range" min="0" max="4" step="0.05"></label>
-            <label>Speaker Gain <output id="speaker-gain-value"></output><input id="speaker-gain-input" type="range" min="0" max="4" step="0.05"></label>
-            <button id="save-gain" type="button">Apply Gain</button>
-          </fieldset>
-          <fieldset>
-            <legend>Routing</legend>
-            <div class="inline-editor">
-              <label>Channel<input id="route-channel-input" type="number" min="1" max="65535" inputmode="numeric" placeholder="1"></label>
-              <div class="inline-actions">
-                <button id="route-add-listen" type="button">Add Listen</button>
-                <button id="route-add-tx" type="button">Add TX</button>
-              </div>
-            </div>
-            <div id="route-editor" class="config-list"></div>
-          </fieldset>
-          <fieldset>
-            <legend>Talker Gains</legend>
-            <div class="inline-editor two">
-              <label>Talker ID<input id="talker-id-input" type="number" min="1" max="65535" inputmode="numeric" placeholder="12"></label>
-              <label>Gain<input id="talker-gain-input" type="number" min="0" max="4" step="0.05" value="1"></label>
-              <button id="talker-add" type="button">Add Gain</button>
-            </div>
-            <div id="talker-gain-editor" class="config-list"></div>
-          </fieldset>
-          <fieldset>
-            <legend>Mode</legend>
-            <label>Codec<select id="codec-input"><option value="pcm16">PCM Low CPU (16 kHz)</option><option value="pcm24">PCM Balanced (24 kHz)</option><option value="pcm48">PCM High Quality (48 kHz)</option><option value="opus">Opus</option></select></label>
-            <label id="opus-profile-field">Opus Profile<select id="opus-profile-input"><option value="speech_16_low">Opus Speech 16 Low</option><option value="speech_24_standard">Opus Speech 24 Standard</option><option value="speech_48_high">Opus Speech 48 High</option><option value="music_48">Opus Music 48</option></select></label>
-            <label>Talk Mode<select id="talk-mode-input"><option value="muted">muted</option><option value="ptt">ptt</option><option value="open">open</option></select></label>
-            <label class="check"><input id="priority-input" type="checkbox"> Priority</label>
-            <div class="segmented" id="codecs"></div>
-          </fieldset>
-          <fieldset>
-            <legend>IFB</legend>
-            <label class="check"><input id="ifb-enabled" type="checkbox"> Enabled</label>
-            <div class="inline-editor">
-              <label>Channel<input id="ifb-channel-input" type="number" min="1" max="65535" inputmode="numeric" placeholder="9"></label>
-              <div class="inline-actions">
-                <button id="ifb-add-program" type="button">Add Program</button>
-                <button id="ifb-add-interrupt" type="button">Add Interrupt</button>
-              </div>
-            </div>
-            <label>Duck Gain <output id="ifb-duck-gain-value"></output><input id="ifb-duck-gain" type="range" min="0" max="1" step="0.01" value="0.125"></label>
-            <div id="ifb-editor" class="config-list"></div>
-          </fieldset>
-          <button id="save-config" class="save-button" type="button">Apply Settings</button>
-        </form>
-      </div>
-    </div>
-  </main>
-  <script src="/app.js"></script>
-</body>
-</html>"#;
-
-const LOCAL_UI_CSS: &str = r#"*{box-sizing:border-box}html{background:#dbe2ea}body{margin:0;min-height:100vh;background:#dbe2ea;color:#17212b;font:15px/1.35 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input,select{font:inherit}button{border:1px solid #a7b1bd;background:#fff;border-radius:8px;padding:10px 12px;cursor:pointer}button:hover{background:#eef3f7}button:disabled,input:disabled,select:disabled{opacity:.48;cursor:not-allowed;background:#eef2f6}h1,h2,p{margin:0}.phone-shell{width:min(100%,430px);min-height:100vh;margin:0 auto;background:#f7f9fb;padding:12px 12px 220px}.topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:10px 2px 14px}.eyebrow{font-size:11px;text-transform:uppercase;color:#667789;font-weight:800;letter-spacing:.04em}h1{font-size:24px;line-height:1.08}h2{font-size:15px}.top-actions{display:flex;gap:8px;flex-shrink:0}.top-actions button{padding:8px 10px}.stats-grid div{background:#fff;border:1px solid #d8e0e8;border-radius:8px;padding:10px}.stats-grid span{display:block;color:#667789;font-size:11px;text-transform:uppercase;font-weight:800}.stats-grid strong{display:block;overflow-wrap:anywhere}.channels-panel,.alerts-panel,.cue-panel{background:#fff;border:1px solid #d8e0e8;border-radius:8px;padding:14px;margin-bottom:12px}.cue-panel{background:#f0f9ff;border-color:#bae6fd}.section-title,.modal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}.channel-list,.alert-list,.cue-list{display:grid;gap:8px}.channel-row,.alert-row,.cue-row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;border:1px solid #e4eaf0;border-radius:8px;padding:10px}.channel-row{width:100%;text-align:left}.channel-row.expanded{border-color:#9cc4d8;background:#f8fcff}.channel-foldout{display:grid;gap:6px;border:1px solid #e4eaf0;border-radius:8px;padding:8px;background:#fbfdff}.member-row{display:flex;align-items:center;justify-content:space-between;gap:10px}.member-name{font-weight:800}.alert-row{background:#fff7ed;border-color:#fed7aa}.cue-row{background:#fff;border-color:#7dd3fc}.channel-name{font-weight:800}.channel-tags{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.tag{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;background:#edf2f7;color:#465668;font-size:12px;font-weight:800}.tag.listen{background:#e0f2fe;color:#075985}.tag.talk{background:#dcfce7;color:#166534}.tag.offline{background:#f1f5f9;color:#64748b}.special-buttons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.button-card{display:grid;gap:6px}.special-talk{width:100%;min-height:64px;font-weight:900;font-size:18px;background:#eef6ff;border-color:#8eb5d1;color:#12344d}.special-talk.active{background:#d9f99d;border-color:#65a30d;color:#244008;box-shadow:0 0 0 3px rgba(101,163,13,.18)}.button-meta{font-size:12px;color:#667789}.bottom-dock{position:fixed;left:50%;bottom:0;transform:translateX(-50%);width:min(100%,430px);display:grid;gap:10px;background:rgba(247,249,251,.97);border-top:1px solid #d8e0e8;padding:12px 12px 18px}.bottom-special[hidden]{display:none}.bottom-controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.control-button{min-height:68px;font-size:20px;font-weight:900}.mute-button{background:#fee2e2;border-color:#fca5a5;color:#991b1b}.talk-button-main{background:#dcfce7;border-color:#86efac;color:#166534}.talk-button-main.active{box-shadow:0 0 0 3px rgba(34,197,94,.22)}#message{min-height:22px;margin:8px 2px}.muted{color:#667789}.error{color:#991b1b}.ok{color:#166534}.modal{position:fixed;inset:0;background:rgba(15,23,42,.48);display:flex;align-items:flex-end;justify-content:center;padding:12px;z-index:10}.modal[hidden]{display:none}.modal-panel{width:min(100%,430px);max-height:88vh;overflow:auto;background:#fff;border:1px solid #cbd5e1;border-radius:8px;padding:14px;box-shadow:0 -16px 40px rgba(15,23,42,.22)}.stats-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:12px}form{display:grid;gap:12px}fieldset{border:1px solid #d8e0e8;border-radius:8px;padding:12px;display:grid;gap:10px}legend{font-weight:900;padding:0 4px}label{display:grid;gap:5px;font-weight:750}.check{display:flex;align-items:center;gap:8px}input,select{width:100%;border:1px solid #aeb9c5;border-radius:8px;padding:10px;background:#fff}.inline-editor{display:grid;grid-template-columns:1fr;gap:8px}.inline-editor.two{grid-template-columns:1fr 1fr}.inline-editor.two button{grid-column:1/-1}.inline-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.config-list{display:grid;gap:8px}.config-row{display:grid;gap:8px;border:1px solid #e4eaf0;border-radius:8px;padding:10px;background:#fbfdff}.config-row-head{display:flex;align-items:center;justify-content:space-between;gap:10px}.config-title{font-weight:900}.config-controls{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:end}.config-controls.three{grid-template-columns:1fr 1fr auto}.mini-button{padding:7px 9px}.pill-toggle{display:flex;align-items:center;gap:7px;border:1px solid #d8e0e8;border-radius:999px;padding:7px 9px;background:#fff;font-weight:800}.pill-toggle input{width:auto}.segmented{display:flex;gap:8px;flex-wrap:wrap}.segmented button.active{background:#d9f99d;border-color:#65a30d}.save-button{min-height:48px;font-weight:900;background:#17212b;color:#fff;border-color:#17212b}@media(min-width:760px){body{padding:20px}.phone-shell{min-height:calc(100vh - 40px);border:1px solid #bdc7d1;border-radius:8px;box-shadow:0 20px 50px rgba(15,23,42,.18)}.bottom-dock{bottom:20px;border:1px solid #d8e0e8;border-radius:0 0 8px 8px}.modal{align-items:center}}"#;
-
-const LOCAL_UI_JS: &str = r#"let state=null;let draft=null;let dirty=false;let heldButtons=new Set();let expandedChannels=new Set();
-const $=id=>document.getElementById(id);
-async function api(path,opts={}){const res=await fetch(path,{headers:{'content-type':'application/json'},...opts});if(!res.ok){let msg=res.statusText;try{msg=(await res.json()).error||msg}catch{}throw new Error(msg)}return res.json()}
-function csv(values){return (values||[]).join(',')||'-'}
-function parseCsv(text){return text.trim()?text.split(',').map(v=>Number(v.trim())).filter(v=>Number.isInteger(v)&&v>0):[]}
-function fmtVol(vol){return Object.entries(vol||{}).map(([k,v])=>`${k}=${v}`).join(',')}
-function parseVol(text){const out={};if(!text.trim())return out;for(const part of text.split(',')){const [ch,gain]=part.split('=');if(!ch||!gain)throw new Error('Volume entries must be channel=gain');out[Number(ch.trim())]=Number(gain.trim())}return out}
-function codecName(codec){return{pcm16:'PCM Low CPU',pcm24:'PCM Balanced',pcm48:'PCM High Quality',opus:'Opus'}[codec]||codec||'PCM Low CPU'}
-function normalizeOpusProfile(profile){return{speech_low:'speech_16_low',speech_standard:'speech_24_standard',speech_high:'speech_48_high',music_high:'music_48'}[profile]||profile||'speech_24_standard'}
-function opusProfileName(profile){return{speech_16_low:'Speech 16 Low',speech_24_standard:'Speech 24 Standard',speech_48_high:'Speech 48 High',music_48:'Music 48'}[normalizeOpusProfile(profile)]||profile||'Speech 24 Standard'}
-function message(text,kind='ok'){$('message').className=kind;$('message').textContent=text}
-function mobileShell(){return new URLSearchParams(location.search).get('mobile')==='1'}
-function openMobileSetup(){if(history.length>1){history.back()}else{message('Open the iOS setup page from the app launcher.','error')}}
-function locks(){return state?.lockout||{}}
-function allowed(key){return locks()[key]!==false&&locks().allow_local_api!==false}
-function lockedLabels(){const l=locks();const labels=[];if(l.allow_local_api===false)labels.push('local controls');if(l.allow_channels===false)labels.push('channels');if(l.allow_volumes===false)labels.push('volumes');if(l.allow_codec===false)labels.push('codec');if(l.allow_talk_mode===false)labels.push('talk mode');if(l.allow_priority===false)labels.push('priority');if(l.allow_buttons===false)labels.push('buttons');if(l.allow_ifb===false)labels.push('IFB');if(l.allow_device_selection===false)labels.push('devices');return labels}
-function setControl(id,enabled,title='Locked by admin'){const el=$(id);if(!el)return;el.disabled=!enabled;el.title=enabled?'':title}
-async function refresh(){try{state=await api('/state');render()}catch(err){message(err.message,'error')}}
-function regularTalkActive(){return state?.talk_mode==='open'||(state?.talk_mode==='ptt'&&state?.regular_talk_active)}
-function transmitActions(button){return (button.actions||[]).filter(a=>a.type==='transmit')}
-function activeTalkChannels(){const channels=new Set();if(regularTalkActive())for(const ch of state.tx||[])channels.add(ch);const active=new Set(state?.active_buttons||[]);for(const button of state?.buttons||[])if(active.has(button.id))for(const action of transmitActions(button))for(const ch of action.channels||[])channels.add(ch);return channels}
-function directCallSummary(){return(state?.active_direct_calls||[]).filter(c=>c.active).map(c=>`${c.caller}->${c.target}${c.duck?' duck':''}`).join(',')||'-'}
-function backendName(value){return value==='voice_processing'?'macOS voice processing':value==='raw'?'raw':value==='auto'?'auto':value||'-'}
-function macosMicModeName(value){return{standard:'Standard',wide_spectrum:'Wide Spectrum',voice_isolation:'Voice Isolation',unsupported:'Unsupported'}[value]||value||'-'}
-function buttonActionSummary(button){return (button.actions||[]).map(a=>a.type==='transmit'?`TX ch ${csv(a.channels)} users ${csv(a.users)}${a.duck?' duck':''}`:a.type==='alert'?`alert ${(a.targets||[]).length}`:a.type==='apply_preset'?`preset ${a.preset_id}`:a.type==='set_talk_mode'?`talk ${a.mode}`:a.type==='route_edit'?'route edit':a.type).join(' | ')||'no actions'}
-function allRouteChannels(){const ids=new Set([...(state?.listen||[]),...(state?.tx||[])]);for(const button of state?.buttons||[])for(const action of transmitActions(button))for(const ch of action.channels||[])ids.add(ch);const ifb=state?.ifb||{};for(const ch of ifb.program||[])ids.add(ch);for(const ch of ifb.interrupt||[])ids.add(ch);return [...ids].sort((a,b)=>a-b)}
-function rosterForChannel(id){return(state?.channel_rosters||[]).find(r=>r.channel_id===id)}
-function render(){if(!state)return;const title=state.name?`${state.user_id} ${state.name}`:`Client ${state.user_id}`;$('client-title').textContent=title;$('user').textContent=state.user_id;$('name-label').textContent=state.name||'-';$('listen-label').textContent=csv(state.listen);$('tx-label').textContent=csv(state.tx);$('supported-label').textContent=(state.supported_codecs||[]).map(codecName).join(',')||'-';$('active-buttons-label').textContent=csv(state.active_buttons);$('active-calls-label').textContent=directCallSummary();$('last-caller-label').textContent=state.last_direct_caller||'-';$('input-backend-label').textContent=`${backendName(state.active_input_backend)} (requested ${backendName(state.requested_input_backend)})`;$('input-backend-note-label').textContent=state.input_backend_note||'-';const mm=state.macos_microphone_mode;$('macos-mic-mode-label').textContent=mm?`${macosMicModeName(mm.active)} (preferred ${macosMicModeName(mm.preferred)})`:'-';$('macos-mic-mode-note-label').textContent=mm?.note||'-';$('macos-mic-mode-open').hidden=!mm?.system_ui_available;$('lockout-label').textContent=lockedLabels().join(', ')||'none';$('route-summary').textContent=`${(state.listen||[]).length} listen / ${activeTalkChannels().size} talking`;renderAlerts();renderCuePanel();renderPlayback();renderChannels();if(!dirty)fillForms();renderCodecs();if(!heldButtons.size)renderButtons();renderIfb();renderTalkControls();renderLockout()}
-function sortedNumbers(values){return [...new Set((values||[]).map(Number).filter(v=>Number.isInteger(v)&&v>0))].sort((a,b)=>a-b)}
-function cloneDraftFromState(){const ifb=state?.ifb||{enabled:false,program:[],interrupt:[],duck_gain:0.125};draft={listen:sortedNumbers(state?.listen),tx:sortedNumbers(state?.tx),vol:{...(state?.vol||{})},talker_vol:{...(state?.talker_vol||{})},ifb:{enabled:!!ifb.enabled,program:sortedNumbers(ifb.program),interrupt:sortedNumbers(ifb.interrupt),duck_gain:ifb.duck_gain??0.125}}}
-function ensureDraft(){if(!draft)cloneDraftFromState();return draft}
-function markDirty(){dirty=true}
-function addNumberTo(list,value){const n=Number(value);if(Number.isInteger(n)&&n>0&&!list.includes(n))list.push(n);list.sort((a,b)=>a-b);markDirty()}
-function removeNumberFrom(list,value){const n=Number(value);const index=list.indexOf(n);if(index>=0)list.splice(index,1);markDirty()}
-function allDraftChannels(){const d=ensureDraft();const ids=new Set([...d.listen,...d.tx,...Object.keys(d.vol).map(Number),...d.ifb.program,...d.ifb.interrupt]);for(const button of state?.buttons||[])for(const action of transmitActions(button))for(const ch of action.channels||[])ids.add(ch);return sortedNumbers([...ids])}
-function fillForms(){cloneDraftFromState();$('codec-input').value=state.codec;$('opus-profile-input').value=normalizeOpusProfile(state.opus_profile);updateOpusProfileVisibility();$('talk-mode-input').value=state.talk_mode||'ptt';$('priority-input').checked=!!state.priority;$('mic-gain-input').value=state.mic_gain??1;$('speaker-gain-input').value=state.speaker_gain??1;$('ifb-enabled').checked=!!draft.ifb.enabled;$('ifb-duck-gain').value=draft.ifb.duck_gain;showGainValues();renderConfigEditor()}
-function updateOpusProfileVisibility(){const show=$('codec-input').value==='opus';$('opus-profile-field').hidden=!show}
-function renderConfigEditor(){renderRouteEditor();renderTalkerGainEditor();renderIfbEditor();showIfbDuckGain()}
-function renderRouteEditor(){const d=ensureDraft();const box=$('route-editor');const channels=allDraftChannels();if(!channels.length){box.innerHTML='<span class="muted">No routing channels configured.</span>';return}box.innerHTML='';for(const ch of channels){const row=document.createElement('div');row.className='config-row';row.innerHTML=`<div class="config-row-head"><span class="config-title">Channel ${ch}</span><button class="mini-button" data-route-remove="${ch}" type="button">Remove</button></div><div class="config-controls"><label class="pill-toggle"><input data-route-listen="${ch}" type="checkbox" ${d.listen.includes(ch)?'checked':''}> Listen</label><label class="pill-toggle"><input data-route-tx="${ch}" type="checkbox" ${d.tx.includes(ch)?'checked':''}> Regular TX</label><label>Receive Gain<input data-route-gain="${ch}" type="number" min="0" max="4" step="0.05" value="${d.vol[ch]??1}"></label></div>`;box.appendChild(row)}box.querySelectorAll('[data-route-listen]').forEach(input=>input.onchange=()=>{const ch=Number(input.dataset.routeListen);input.checked?addNumberTo(d.listen,ch):removeNumberFrom(d.listen,ch);renderRouteEditor()});box.querySelectorAll('[data-route-tx]').forEach(input=>input.onchange=()=>{const ch=Number(input.dataset.routeTx);input.checked?addNumberTo(d.tx,ch):removeNumberFrom(d.tx,ch);renderRouteEditor()});box.querySelectorAll('[data-route-gain]').forEach(input=>input.oninput=()=>{d.vol[input.dataset.routeGain]=Number(input.value);markDirty()});box.querySelectorAll('[data-route-remove]').forEach(button=>button.onclick=()=>{const ch=Number(button.dataset.routeRemove);removeNumberFrom(d.listen,ch);removeNumberFrom(d.tx,ch);delete d.vol[ch];removeNumberFrom(d.ifb.program,ch);removeNumberFrom(d.ifb.interrupt,ch);renderConfigEditor()})}
-function renderTalkerGainEditor(){const d=ensureDraft();const box=$('talker-gain-editor');const talkers=sortedNumbers(Object.keys(d.talker_vol));if(!talkers.length){box.innerHTML='<span class="muted">No per-talker gain overrides.</span>';return}box.innerHTML='';for(const id of talkers){const row=document.createElement('div');row.className='config-row';row.innerHTML=`<div class="config-row-head"><span class="config-title">Talker ${id}</span><button class="mini-button" data-talker-remove="${id}" type="button">Remove</button></div><label>Gain<input data-talker-gain="${id}" type="number" min="0" max="4" step="0.05" value="${d.talker_vol[id]??1}"></label>`;box.appendChild(row)}box.querySelectorAll('[data-talker-gain]').forEach(input=>input.oninput=()=>{d.talker_vol[input.dataset.talkerGain]=Number(input.value);markDirty()});box.querySelectorAll('[data-talker-remove]').forEach(button=>button.onclick=()=>{delete d.talker_vol[button.dataset.talkerRemove];markDirty();renderTalkerGainEditor()})}
-function renderIfbEditor(){const d=ensureDraft();const box=$('ifb-editor');const channels=sortedNumbers([...d.ifb.program,...d.ifb.interrupt]);if(!channels.length){box.innerHTML='<span class="muted">No IFB program or interrupt channels.</span>';return}box.innerHTML='';for(const ch of channels){const row=document.createElement('div');row.className='config-row';row.innerHTML=`<div class="config-row-head"><span class="config-title">Channel ${ch}</span><button class="mini-button" data-ifb-remove="${ch}" type="button">Remove</button></div><div class="config-controls"><label class="pill-toggle"><input data-ifb-program="${ch}" type="checkbox" ${d.ifb.program.includes(ch)?'checked':''}> Program</label><label class="pill-toggle"><input data-ifb-interrupt="${ch}" type="checkbox" ${d.ifb.interrupt.includes(ch)?'checked':''}> Interrupt</label></div>`;box.appendChild(row)}box.querySelectorAll('[data-ifb-program]').forEach(input=>input.onchange=()=>{const ch=Number(input.dataset.ifbProgram);input.checked?addNumberTo(d.ifb.program,ch):removeNumberFrom(d.ifb.program,ch);renderIfbEditor()});box.querySelectorAll('[data-ifb-interrupt]').forEach(input=>input.onchange=()=>{const ch=Number(input.dataset.ifbInterrupt);input.checked?addNumberTo(d.ifb.interrupt,ch):removeNumberFrom(d.ifb.interrupt,ch);renderIfbEditor()});box.querySelectorAll('[data-ifb-remove]').forEach(button=>button.onclick=()=>{const ch=Number(button.dataset.ifbRemove);removeNumberFrom(d.ifb.program,ch);removeNumberFrom(d.ifb.interrupt,ch);renderIfbEditor()})}
-function setControls(selector,enabled,title='Locked by admin'){document.querySelectorAll(selector).forEach(el=>{el.disabled=!enabled;el.title=enabled?'':title})}
-function renderLockout(){const labels=lockedLabels();for(const id of ['mic-gain-input','speaker-gain-input','save-gain'])setControl(id,locks().allow_local_api!==false);setControls('#route-editor input,#route-editor button,#route-channel-input,#route-add-listen,#route-add-tx',allowed('allow_channels'),'Channels locked by admin');setControls('#route-editor [data-route-gain],#talker-gain-editor input,#talker-gain-editor button,#talker-id-input,#talker-gain-input,#talker-add',allowed('allow_volumes'),'Volumes locked by admin');for(const id of ['codec-input','opus-profile-input'])setControl(id,allowed('allow_codec'));setControl('talk-mode-input',allowed('allow_talk_mode'));setControl('priority-input',allowed('allow_priority'));setControls('#ifb-enabled,#ifb-channel-input,#ifb-add-program,#ifb-add-interrupt,#ifb-duck-gain,#ifb-editor input,#ifb-editor button',allowed('allow_ifb'),'IFB locked by admin');setControl('save-config',locks().allow_local_api!==false);if(labels.length&&document.activeElement?.id!=='message')message(`Locked by admin: ${labels.join(', ')}`,'error')}
-function configBody(){const d=ensureDraft();return{listen:sortedNumbers(d.listen),tx:sortedNumbers(d.tx),vol:d.vol,talker_vol:d.talker_vol,codec:$('codec-input').value,opus_profile:$('opus-profile-input').value,talk_mode:$('talk-mode-input').value,priority:$('priority-input').checked,priority_channels:state.priority_channels||[],ifb:{enabled:$('ifb-enabled').checked,program:sortedNumbers(d.ifb.program),interrupt:sortedNumbers(d.ifb.interrupt),duck_gain:Number($('ifb-duck-gain').value)}}}
-async function saveConfig(){try{await api('/config',{method:'PUT',body:JSON.stringify(configBody())});dirty=false;message('Config submitted to server');await refresh()}catch(err){message(err.message,'error')}}
-function showGainValues(){$('mic-gain-value').textContent=Number($('mic-gain-input').value).toFixed(2);$('speaker-gain-value').textContent=Number($('speaker-gain-input').value).toFixed(2)}
-function showIfbDuckGain(){$('ifb-duck-gain-value').textContent=Number($('ifb-duck-gain').value).toFixed(2)}
-async function saveGain(){try{await api('/gain',{method:'POST',body:JSON.stringify({mic_gain:Number($('mic-gain-input').value),speaker_gain:Number($('speaker-gain-input').value)})});message('Gain updated');await refresh()}catch(err){message(err.message,'error')}}
-function renderCodecs(){const box=$('codecs');box.innerHTML='';for(const codec of state.supported_codecs||[]){const button=document.createElement('button');button.textContent=codecName(codec);button.className=codec===state.codec?'active':'';button.disabled=!allowed('allow_codec');button.title=button.disabled?'Codec locked by admin':'';button.onclick=()=>api('/codec',{method:'POST',body:JSON.stringify({codec})}).then(refresh).catch(alert);box.appendChild(button)}}
-function renderChannels(){const box=$('channel-list');box.innerHTML='';const talking=activeTalkChannels();const ids=allRouteChannels();if(!ids.length){box.innerHTML='<span class="muted">No channels configured.</span>';return}for(const id of ids){const listening=(state.listen||[]).includes(id);const regularTx=(state.tx||[]).includes(id);const activeTalk=talking.has(id);const roster=rosterForChannel(id);const item=document.createElement('div');const row=document.createElement('button');row.type='button';row.className=`channel-row ${expandedChannels.has(id)?'expanded':''}`;row.setAttribute('aria-expanded',expandedChannels.has(id)?'true':'false');row.innerHTML=`<div><div class="channel-name">Channel ${id}</div><div class="muted">${state.vol?.[id]&&state.vol[id]!==1?`gain ${state.vol[id]}`:'normal gain'}${roster?.members?.length?` | ${roster.members.length} present`:''}</div></div><div class="channel-tags">${listening?'<span class="tag listen">listening</span>':''}${regularTx?'<span class="tag">regular tx</span>':''}${activeTalk?'<span class="tag talk">talking</span>':''}</div>`;row.onclick=()=>{expandedChannels.has(id)?expandedChannels.delete(id):expandedChannels.add(id);renderChannels()};item.appendChild(row);if(expandedChannels.has(id)){const foldout=document.createElement('div');foldout.className='channel-foldout';const members=roster?.members||[];foldout.innerHTML=members.length?members.map(m=>`<div class="member-row"><span><span class="member-name">${m.name||'Client'} ${m.user_id}</span> <span class="muted">${m.present?'present':'offline'}</span></span><span class="channel-tags">${m.transmitting?'<span class="tag talk">transmitting</span>':''}${!m.present?'<span class="tag offline">offline</span>':''}</span></div>`).join(''):'<span class="muted">No clients present.</span>';item.appendChild(foldout)}box.appendChild(item)}}
-function alertTargetLabel(target){return !target?'-':target.kind==='user'?`user ${target.id}`:`channel ${target.id}`}
-async function ackAlert(id){await api(`/alerts/${id}/ack`,{method:'POST'});await refresh()}
-function renderAlerts(){const alerts=state.active_alerts||[];const emergency=state.emergency;const show=alerts.length||emergency?.active;$('alerts-panel').hidden=!show;$('alerts-summary').textContent=emergency?.active?'emergency':alerts.length?`${alerts.length} active`:'';const box=$('alerts');box.innerHTML='';if(emergency?.active){const row=document.createElement('div');row.className='alert-row';row.innerHTML=`<div><div class="channel-name">Emergency from ${emergency.source}</div><div class="muted">${emergency.mute_others?'Normal audio muted':'Normal audio ducked'} for ${csv(emergency.recipients)}.</div></div>`;box.appendChild(row)}for(const alert of alerts){const row=document.createElement('div');row.className='alert-row';row.innerHTML=`<div><div class="channel-name">From ${alert.sender} to ${alertTargetLabel(alert.target)}</div><div class="muted">${alert.message||'Call alert'}</div></div><button type="button" data-ack="${alert.id}">Ack</button>`;box.appendChild(row)}box.querySelectorAll('[data-ack]').forEach(button=>button.onclick=()=>ackAlert(button.dataset.ack).catch(err=>message(err.message,'error')))}
-function activeIfbSources(){const ifb=state.ifb||{};const sources=[];for(const ch of ifb.interrupt||[]){const roster=rosterForChannel(ch);for(const member of roster?.members||[]){if(member.transmitting&&member.user_id!==state.user_id)sources.push(`${member.name||'Client'} ${member.user_id} on ch ${ch}`)}}return sources}
-function renderCuePanel(){const ifb=state.ifb||{};const ifbSources=activeIfbSources();const activeCalls=(state.active_direct_calls||[]).filter(call=>call.active);const hasReply=!!state.last_direct_caller;const show=(ifb.enabled&&ifbSources.length)||activeCalls.length||hasReply;$('cue-panel').hidden=!show;$('cue-summary').textContent=ifbSources.length?'interrupt active':activeCalls.length?'direct call':hasReply?'reply available':'';const box=$('cue-list');box.innerHTML='';for(const source of ifbSources){const row=document.createElement('div');row.className='cue-row';row.innerHTML=`<div><div class="channel-name">Interrupt: ${source}</div><div class="muted">Program ${csv(ifb.program)} ducks to ${ifb.duck_gain ?? 0.125}.</div></div><span class="tag talk">IFB</span>`;box.appendChild(row)}for(const call of activeCalls){const row=document.createElement('div');row.className='cue-row';row.innerHTML=`<div><div class="channel-name">Direct call ${call.caller} -> ${call.target}</div><div class="muted">${call.duck?'Ducking other audio':'Normal mix'}.</div></div><span class="tag talk">call</span>`;box.appendChild(row)}if(hasReply){const row=document.createElement('div');row.className='cue-row';row.innerHTML=`<div><div class="channel-name">Reply target: user ${state.last_direct_caller}</div><div class="muted">Use a configured Reply button or command to talk back.</div></div><span class="tag">reply</span>`;box.appendChild(row)}}
-async function sendButton(id,act,refreshAfter=true){await api(`/buttons/${encodeURIComponent(id)}/${act}`,{method:'POST'});if(refreshAfter)await refresh()}
-function renderButtons(){const box=$('buttons');const wrap=$('bottom-special');box.innerHTML='';const buttons=state.buttons||[];wrap.hidden=!buttons.length;if(!buttons.length)return;for(const b of buttons){const active=(state.active_buttons||[]).includes(b.id);const mode=b.mode||'momentary';const card=document.createElement('div');card.className='button-card';const button=document.createElement('button');button.type='button';button.className=`special-talk ${active?'active':''}`;button.textContent=b.label||b.id;button.disabled=!allowed('allow_buttons');button.title=button.disabled?'Buttons locked by admin':mode==='latching'?'Click to toggle this latched action.':'Hold to run this action; release to stop transmit actions.';const meta=document.createElement('div');meta.className='button-meta';meta.textContent=`${mode} | ${buttonActionSummary(b)}`;card.appendChild(button);card.appendChild(meta);if(mode==='latching'){button.onclick=()=>sendButton(b.id,'toggle').catch(alert)}else{let down=false;const press=async()=>{if(down||button.disabled)return;down=true;heldButtons.add(b.id);button.classList.add('active');try{await sendButton(b.id,'down',false)}catch(err){down=false;heldButtons.delete(b.id);button.classList.remove('active');alert(err)}};const release=async()=>{if(!down)return;down=false;heldButtons.delete(b.id);button.classList.remove('active');try{await sendButton(b.id,'up')}catch(err){alert(err)}};button.onpointerdown=e=>{e.preventDefault();button.setPointerCapture?.(e.pointerId);press()};button.onpointerup=e=>{e.preventDefault();release()};button.onpointercancel=release;button.onlostpointercapture=release;button.onkeydown=e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();press()}};button.onkeyup=e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();release()}}}box.appendChild(card)}}
-function renderIfb(){const ifb=state.ifb||{enabled:false,program:[],interrupt:[],duck_gain:0.125};$('ifb').innerHTML=ifb.enabled?`Program ${csv(ifb.program)} ducks to ${ifb.duck_gain} while interrupt ${csv(ifb.interrupt)} is active`:'<span class="muted">Disabled</span>'}
-function renderPlayback(){const p=state.playback||{};$('playback-label').textContent=`${p.available_samples??0}/${p.capacity_samples??0}`;$('playback-drops-label').textContent=`U ${p.underflows??0} / O ${p.overflows??0}`}
-function renderTalkControls(){const muted=state.talk_mode==='muted';$('mute').textContent=muted?'Unmute':'Mute';$('mute').classList.toggle('active',muted);$('talk').hidden=muted;$('talk').textContent=state.talk_mode==='open'?'Open Mic':'Talk';$('talk').classList.toggle('active',regularTalkActive());setControl('mute',allowed('allow_talk_mode'),'Talk mode locked by admin');setControl('talk',locks().allow_local_api!==false,'Local controls locked by admin')}
-function openModal(id){$(id).hidden=false}
-function closeModal(id){$(id).hidden=true}
-document.querySelectorAll('#settings-form input,#settings-form select').forEach(el=>el.addEventListener('input',()=>{dirty=true}));
-document.querySelectorAll('#mic-gain-input,#speaker-gain-input').forEach(el=>el.addEventListener('input',showGainValues));
-$('codec-input').addEventListener('change',updateOpusProfileVisibility);
-$('ifb-duck-gain').addEventListener('input',()=>{ensureDraft().ifb.duck_gain=Number($('ifb-duck-gain').value);showIfbDuckGain();markDirty()});
-$('route-add-listen').onclick=e=>{e.preventDefault();addNumberTo(ensureDraft().listen,$('route-channel-input').value);$('route-channel-input').value='';renderConfigEditor()};
-$('route-add-tx').onclick=e=>{e.preventDefault();addNumberTo(ensureDraft().tx,$('route-channel-input').value);$('route-channel-input').value='';renderConfigEditor()};
-$('talker-add').onclick=e=>{e.preventDefault();const id=Number($('talker-id-input').value);if(Number.isInteger(id)&&id>0){ensureDraft().talker_vol[id]=Number($('talker-gain-input').value);$('talker-id-input').value='';$('talker-gain-input').value='1';markDirty();renderTalkerGainEditor()}};
-$('ifb-add-program').onclick=e=>{e.preventDefault();addNumberTo(ensureDraft().ifb.program,$('ifb-channel-input').value);$('ifb-channel-input').value='';renderIfbEditor()};
-$('ifb-add-interrupt').onclick=e=>{e.preventDefault();addNumberTo(ensureDraft().ifb.interrupt,$('ifb-channel-input').value);$('ifb-channel-input').value='';renderIfbEditor()};
-$('ifb-enabled').addEventListener('change',()=>{ensureDraft().ifb.enabled=$('ifb-enabled').checked;markDirty()});
-$('save-config').onclick=e=>{e.preventDefault();saveConfig()};
-$('save-gain').onclick=e=>{e.preventDefault();saveGain()};
-$('mute').onclick=()=>api(state?.talk_mode==='muted'?'/unmute':'/mute',{method:'POST'}).then(refresh).catch(alert);
-let regularTalkDown=false;
-async function regularTalkPress(){if(regularTalkDown||state?.talk_mode!=='ptt')return;regularTalkDown=true;$('talk').classList.add('active');try{await api('/talk/down',{method:'POST'})}catch(err){regularTalkDown=false;$('talk').classList.remove('active');alert(err)}}
-async function regularTalkRelease(){if(!regularTalkDown)return;regularTalkDown=false;$('talk').classList.remove('active');try{await api('/talk/up',{method:'POST'});await refresh()}catch(err){alert(err)}}
-$('talk').onpointerdown=e=>{e.preventDefault();if(state?.talk_mode==='open')return;regularTalkPress()};
-$('talk').onpointerup=e=>{e.preventDefault();regularTalkRelease()};
-$('talk').onpointercancel=regularTalkRelease;
-$('talk').onlostpointercapture=regularTalkRelease;
-$('stats-open').onclick=()=>openModal('stats-modal');
-$('stats-close').onclick=()=>closeModal('stats-modal');
-$('macos-mic-mode-open').onclick=()=>api('/macos/microphone-modes',{method:'POST'}).then(()=>message('Opened macOS microphone mode controls')).catch(err=>message(err.message,'error'));
-$('settings-open').onclick=()=>openModal('settings-modal');
-$('settings-close').onclick=()=>closeModal('settings-modal');
-if($('mobile-setup-open')){$('mobile-setup-open').hidden=!mobileShell();$('mobile-setup-open').onclick=openMobileSetup}
-$('stats-modal').onclick=e=>{if(e.target.id==='stats-modal')closeModal('stats-modal')};
-$('settings-modal').onclick=e=>{if(e.target.id==='settings-modal')closeModal('settings-modal')};
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeModal('stats-modal');closeModal('settings-modal')}});
-refresh();setInterval(refresh,1000);"#;
+const LOCAL_UI_HTML: &str = include_str!("../../shared-ui/talking/client-controls.html");
+const LOCAL_UI_CSS: &str = include_str!("../../shared-ui/talking/client-controls.css");
+const LOCAL_UI_JS: &str = include_str!("../../shared-ui/talking/client-controls.js");
+const LOCAL_UI_API_JS: &str = include_str!("../../shared-ui/talking/client-api-http.js");
 
 async fn run_command_loop(
     control_tx: mpsc::Sender<ControlRequest>,
@@ -3699,6 +3496,7 @@ mod tests {
             TalkButtonConfig {
                 id: "director".to_string(),
                 label: "Director".to_string(),
+                color: None,
                 mode: common::TalkButtonMode::Momentary,
                 actions: vec![common::TalkButtonAction::Transmit {
                     channels: vec![2, 3],
@@ -3709,6 +3507,7 @@ mod tests {
             TalkButtonConfig {
                 id: "pa".to_string(),
                 label: "PA".to_string(),
+                color: None,
                 mode: common::TalkButtonMode::Latching,
                 actions: vec![common::TalkButtonAction::Transmit {
                     channels: vec![9],
@@ -4193,6 +3992,13 @@ mod tests {
 
     #[test]
     fn local_ui_contains_full_config_controls() {
+        assert!(LOCAL_UI_HTML.contains("Operator Console"));
+        assert!(LOCAL_UI_HTML.contains("client-api.js"));
+        assert!(LOCAL_UI_HTML.contains("id=\"client-title\" hidden"));
+        assert!(LOCAL_UI_API_JS.contains("fetch("));
+        assert!(!LOCAL_UI_JS.contains("fetch("));
+        assert!(!LOCAL_UI_JS.contains("clientApi?.name || 'client'} controls"));
+        assert!(LOCAL_UI_JS.contains("'Hold Talk to transmit'"));
         assert!(LOCAL_UI_HTML.contains("route-editor"));
         assert!(LOCAL_UI_HTML.contains("talker-gain-editor"));
         assert!(LOCAL_UI_HTML.contains("ifb-editor"));
@@ -4202,13 +4008,12 @@ mod tests {
         assert!(LOCAL_UI_JS.contains("function renderTalkerGainEditor()"));
         assert!(LOCAL_UI_JS.contains("function renderIfbEditor()"));
         assert!(LOCAL_UI_JS.contains("function saveConfig()"));
-        assert!(LOCAL_UI_JS.contains("const buttons=state.buttons||[]"));
-        assert!(LOCAL_UI_JS.contains("mode==='latching'"));
+        assert!(LOCAL_UI_JS.contains("const buttons = state.buttons || []"));
+        assert!(LOCAL_UI_JS.contains("mode === 'latching'"));
         assert!(LOCAL_UI_JS.contains("Hold to run this action; release to stop transmit actions."));
         assert!(LOCAL_UI_HTML.contains("id=\"opus-profile-field\""));
         assert!(LOCAL_UI_JS.contains("function updateOpusProfileVisibility()"));
-        assert!(LOCAL_UI_JS
-            .contains("$('codec-input').addEventListener('change',updateOpusProfileVisibility)"));
+        assert!(LOCAL_UI_JS.contains("addEventListener('change', updateOpusProfileVisibility)"));
         assert!(LOCAL_UI_JS.contains("heldButtons"));
         assert!(LOCAL_UI_HTML.contains("alerts-panel"));
         assert!(LOCAL_UI_JS.contains("function renderAlerts()"));
@@ -4216,7 +4021,9 @@ mod tests {
         assert!(LOCAL_UI_HTML.contains("cue-panel"));
         assert!(LOCAL_UI_JS.contains("function activeIfbSources()"));
         assert!(LOCAL_UI_JS.contains("function renderCuePanel()"));
-        assert!(LOCAL_UI_JS.contains("Reply target"));
+        assert!(LOCAL_UI_JS.contains("data-reply-direct-call"));
+        assert!(LOCAL_UI_JS.contains("Call from"));
+        assert!(LOCAL_UI_JS.contains("Alert from"));
         assert!(LOCAL_UI_HTML.contains("bottom-special"));
         assert!(
             LOCAL_UI_HTML.find("id=\"buttons\"").unwrap()
@@ -4228,7 +4035,7 @@ mod tests {
         assert!(LOCAL_UI_HTML.contains("macos-mic-mode-open"));
         assert!(LOCAL_UI_JS.contains("macos_microphone_mode"));
         assert!(LOCAL_UI_JS.contains("/macos/microphone-modes"));
-        assert!(LOCAL_UI_HTML.contains("mobile-setup-open"));
+        assert!(LOCAL_UI_HTML.contains("setup-open"));
         assert!(LOCAL_UI_JS.contains("function mobileShell()"));
         assert!(LOCAL_UI_JS.contains("history.back()"));
         assert!(!LOCAL_UI_HTML.contains("special-panel"));
@@ -4257,6 +4064,7 @@ mod tests {
                 buttons: vec![TalkButtonConfig {
                     id: "director".to_string(),
                     label: "Director".to_string(),
+                    color: None,
                     mode: common::TalkButtonMode::Momentary,
                     actions: vec![common::TalkButtonAction::Transmit {
                         channels: vec![5],

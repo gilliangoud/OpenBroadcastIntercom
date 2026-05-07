@@ -7,7 +7,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use clap::{Parser, ValueEnum};
-use client_core::{ClientAudioBackendKind, ClientInputChannelMode, ClientRuntimeConfig};
+use client_core::{
+    default_audio_addr, derive_admin_url_from_control, ClientAudioBackendKind,
+    ClientEndpointOverrides, ClientInputChannelMode, ClientRuntimeConfig, ClientServerEndpoint,
+    DEFAULT_CLIENT_BUTTON_COUNT, DEFAULT_SERVER_HOST, MAX_CLIENT_BUTTON_COUNT,
+};
 use common::{Codec, OpusProfile};
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +27,8 @@ pub struct AppArgs {
     pub print_config: bool,
     #[arg(long)]
     pub print_launch_plan: bool,
+    #[arg(long)]
+    pub server_host: Option<String>,
     #[arg(long)]
     pub server: Option<SocketAddr>,
     #[arg(long)]
@@ -61,6 +67,8 @@ pub struct AppArgs {
     pub output_device: Option<String>,
     #[arg(long)]
     pub debug_audio_dir: Option<PathBuf>,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(0..=MAX_CLIENT_BUTTON_COUNT as i64))]
+    pub button_count: Option<u16>,
     #[arg(long = "button", value_name = "ID[=LABEL]")]
     pub buttons: Vec<String>,
     #[arg(long = "button-key", value_name = "ID=KEY")]
@@ -138,8 +146,11 @@ pub enum AppWindowMode {
 pub struct AppSettings {
     pub app_title: String,
     pub server_profiles: Vec<MobileServerProfile>,
+    pub server_host: String,
     pub server: SocketAddr,
     pub control: String,
+    pub admin: Option<String>,
+    pub advanced_endpoints: bool,
     pub user_id: Option<u16>,
     pub client_uid: Option<String>,
     pub identity_file: Option<PathBuf>,
@@ -157,6 +168,7 @@ pub struct AppSettings {
     pub input_channel: desktop::InputChannelMode,
     pub output_device: Option<String>,
     pub debug_audio_dir: Option<PathBuf>,
+    pub button_count: u16,
     pub buttons: Vec<String>,
     pub button_keys: Vec<String>,
     pub local_ui_bind: SocketAddr,
@@ -171,6 +183,7 @@ pub struct AppSettings {
 pub struct MobileServerProfile {
     pub id: String,
     pub name: String,
+    pub server_host: String,
     pub server: String,
     pub control: String,
     pub admin: Option<String>,
@@ -185,6 +198,7 @@ impl Default for MobileServerProfile {
         Self {
             id: String::new(),
             name: String::new(),
+            server_host: String::new(),
             server: String::new(),
             control: String::new(),
             admin: None,
@@ -201,8 +215,11 @@ impl Default for AppSettings {
         Self {
             app_title: "Intercom Suite".to_string(),
             server_profiles: Vec::new(),
-            server: "127.0.0.1:40000".parse().expect("valid default address"),
-            control: "ws://127.0.0.1:40001".to_string(),
+            server_host: DEFAULT_SERVER_HOST.to_string(),
+            server: default_audio_addr(),
+            control: ClientServerEndpoint::default().control_url(),
+            admin: None,
+            advanced_endpoints: false,
             user_id: Some(1),
             client_uid: None,
             identity_file: None,
@@ -220,6 +237,7 @@ impl Default for AppSettings {
             input_channel: desktop::InputChannelMode::Average,
             output_device: None,
             debug_audio_dir: None,
+            button_count: DEFAULT_CLIENT_BUTTON_COUNT,
             buttons: Vec::new(),
             button_keys: Vec::new(),
             local_ui_bind: "127.0.0.1:41002".parse().expect("valid default address"),
@@ -232,12 +250,54 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub fn endpoint_overrides(&self) -> ClientEndpointOverrides {
+        ClientEndpointOverrides::normalized(
+            &self.server_host,
+            self.server,
+            &self.control,
+            self.admin.clone(),
+            self.advanced_endpoints,
+        )
+    }
+
+    pub fn normalize_endpoints(&mut self) {
+        let endpoints = self.endpoint_overrides();
+        self.server_host = endpoints.server_host;
+        self.server = endpoints.server;
+        self.control = endpoints.control;
+        self.admin = endpoints.admin;
+        self.advanced_endpoints = endpoints.advanced_endpoints;
+        self.server_profiles = self
+            .server_profiles
+            .drain(..)
+            .map(normalize_mobile_profile)
+            .collect();
+    }
+
+    pub fn effective_server(&self) -> anyhow::Result<SocketAddr> {
+        self.endpoint_overrides().effective_server()
+    }
+
+    pub fn effective_control(&self) -> anyhow::Result<String> {
+        self.endpoint_overrides().effective_control()
+    }
+
+    pub fn effective_admin(&self) -> anyhow::Result<String> {
+        self.endpoint_overrides().effective_admin()
+    }
+
     pub fn merge_cli(&mut self, args: &AppArgs) {
+        if let Some(server_host) = &args.server_host {
+            self.server_host = server_host.clone();
+            self.advanced_endpoints = false;
+        }
         if let Some(server) = args.server {
             self.server = server;
+            self.advanced_endpoints = true;
         }
         if let Some(control) = &args.control {
             self.control = control.clone();
+            self.advanced_endpoints = true;
         }
         if let Some(user_id) = args.user_id {
             self.user_id = Some(user_id);
@@ -290,6 +350,9 @@ impl AppSettings {
         if let Some(debug_audio_dir) = &args.debug_audio_dir {
             self.debug_audio_dir = Some(debug_audio_dir.clone());
         }
+        if let Some(button_count) = args.button_count {
+            self.button_count = button_count;
+        }
         if !args.buttons.is_empty() {
             self.buttons = args.buttons.clone();
         }
@@ -317,13 +380,16 @@ impl AppSettings {
         if let Some(ui_open_delay_ms) = args.ui_open_delay_ms {
             self.ui_open_delay_ms = ui_open_delay_ms;
         }
+        self.normalize_endpoints();
     }
 
     pub fn client_runtime_config(&self, list_devices: bool) -> anyhow::Result<ClientRuntimeConfig> {
         self.validate()?;
+        let endpoints = self.endpoint_overrides();
         Ok(ClientRuntimeConfig {
-            server: self.server,
-            control: self.control.clone(),
+            server_host: endpoints.server_host.clone(),
+            server: endpoints.effective_server()?,
+            control: endpoints.effective_control()?,
             user_id: self.user_id,
             client_uid: self.client_uid.clone(),
             identity_file: self.identity_file.clone(),
@@ -341,6 +407,7 @@ impl AppSettings {
             input_channel: app_input_channel_to_core(self.input_channel),
             output_device: self.output_device.clone(),
             debug_audio_dir: self.debug_audio_dir.clone(),
+            button_count: self.button_count,
             buttons: self.buttons.clone(),
             button_keys: self.button_keys.clone(),
             local_ui_bind: self.local_ui_bind,
@@ -353,6 +420,7 @@ impl AppSettings {
     pub fn desktop_args(&self, list_devices: bool) -> anyhow::Result<desktop::Args> {
         let runtime = self.client_runtime_config(list_devices)?;
         Ok(desktop::Args {
+            server_host: Some(runtime.server_host),
             server: runtime.server,
             control: runtime.control,
             user_id: runtime.user_id,
@@ -372,6 +440,7 @@ impl AppSettings {
             input_channel: core_input_channel_to_desktop(runtime.input_channel),
             output_device: runtime.output_device,
             debug_audio_dir: runtime.debug_audio_dir,
+            button_count: runtime.button_count,
             buttons: runtime
                 .buttons
                 .iter()
@@ -392,9 +461,7 @@ impl AppSettings {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.control.trim().is_empty() {
-            bail!("control URL cannot be empty");
-        }
+        self.endpoint_overrides().validate()?;
         if self.app_title.trim().is_empty() {
             bail!("app_title cannot be empty");
         }
@@ -403,6 +470,9 @@ impl AppSettings {
         }
         if self.ui_open_delay_ms > 30_000 {
             bail!("ui_open_delay_ms must be between 0 and 30000");
+        }
+        if self.button_count > MAX_CLIENT_BUTTON_COUNT {
+            bail!("button_count must be between 0 and {MAX_CLIENT_BUTTON_COUNT}");
         }
         validate_gain("mic_gain", self.mic_gain)?;
         validate_gain("speaker_gain", self.speaker_gain)?;
@@ -427,14 +497,24 @@ impl AppSettings {
 
 pub fn load_settings(path: &Path) -> anyhow::Result<AppSettings> {
     match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text)
-            .with_context(|| format!("parse app settings from {}", path.display())),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(AppSettings::default()),
+        Ok(text) => {
+            let mut settings: AppSettings = serde_json::from_str(&text)
+                .with_context(|| format!("parse app settings from {}", path.display()))?;
+            settings.normalize_endpoints();
+            Ok(settings)
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let mut settings = AppSettings::default();
+            settings.normalize_endpoints();
+            Ok(settings)
+        }
         Err(err) => Err(err).with_context(|| format!("read app settings from {}", path.display())),
     }
 }
 
 pub fn save_settings(path: &Path, settings: &AppSettings) -> anyhow::Result<()> {
+    let mut settings = settings.clone();
+    settings.normalize_endpoints();
     settings.validate()?;
     if let Some(parent) = path
         .parent()
@@ -443,7 +523,7 @@ pub fn save_settings(path: &Path, settings: &AppSettings) -> anyhow::Result<()> 
         fs::create_dir_all(parent)
             .with_context(|| format!("create app settings directory {}", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(settings)?;
+    let json = serde_json::to_string_pretty(&settings)?;
     let tmp_path = temp_settings_path(path);
     fs::write(&tmp_path, format!("{json}\n"))
         .with_context(|| format!("write app settings to {}", tmp_path.display()))?;
@@ -466,6 +546,7 @@ fn mobile_profile_id(name: &str, control: &str) -> String {
 #[allow(dead_code)]
 fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerProfile {
     profile.name = profile.name.trim().to_string();
+    profile.server_host = profile.server_host.trim().to_string();
     profile.server = profile.server.trim().to_string();
     profile.control = profile.control.trim().to_string();
     profile.admin = profile
@@ -480,6 +561,40 @@ fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerPro
         .version
         .map(|version| version.trim().to_string())
         .filter(|version| !version.is_empty());
+    if profile.server_host.is_empty() {
+        if let Ok(server) = profile.server.parse::<SocketAddr>() {
+            let endpoints = ClientEndpointOverrides::normalized(
+                "",
+                server,
+                &profile.control,
+                profile.admin.clone(),
+                false,
+            );
+            if !endpoints.advanced_endpoints {
+                let admin = endpoints.effective_admin().unwrap_or_else(|_| {
+                    derive_admin_url_from_control(&endpoints.control).unwrap_or_default()
+                });
+                profile.server_host = endpoints.server_host;
+                profile.server = endpoints.server.to_string();
+                profile.control = endpoints.control;
+                profile.admin = Some(admin).filter(|admin| !admin.is_empty());
+            } else {
+                profile.server_host = endpoints.server_host;
+            }
+        }
+    } else if let Ok(endpoint) = ClientServerEndpoint::new(&profile.server_host) {
+        if profile.server.is_empty() {
+            if let Ok(server) = endpoint.resolve_audio_addr() {
+                profile.server = server.to_string();
+            }
+        }
+        if profile.control.is_empty() {
+            profile.control = endpoint.control_url();
+        }
+        if profile.admin.is_none() {
+            profile.admin = Some(endpoint.admin_url());
+        }
+    }
     if profile.id.trim().is_empty() {
         profile.id = mobile_profile_id(&profile.name, &profile.control);
     }
@@ -683,7 +798,7 @@ mod mobile {
     use std::thread::JoinHandle;
 
     use anyhow::Context;
-    use client_core::{ClientAudioBackend, ClientRuntimePhase};
+    use client_core::{ClientAudioBackend, ClientEndpointOverrides, ClientRuntimePhase};
     use common::{AlertId, ButtonId, Codec, TalkMode};
     use serde::Serialize;
     use tauri::Manager;
@@ -821,6 +936,7 @@ mod mobile {
         let mut settings = AppSettings::default();
         settings.window_mode = AppWindowMode::Native;
         settings.disable_local_ui = true;
+        settings.normalize_endpoints();
         settings
     }
 
@@ -874,8 +990,18 @@ mod mobile {
 
         let path = mobile_settings_path(&app)?;
         let mut settings = load_settings(&path).map_err(|err| err.to_string())?;
+        let endpoints = ClientEndpointOverrides::normalized(
+            &profile.server_host,
+            server,
+            &profile.control,
+            profile.admin.clone(),
+            false,
+        );
+        settings.server_host = endpoints.server_host;
         settings.server = server;
         settings.control = profile.control.clone();
+        settings.admin = profile.admin.clone();
+        settings.advanced_endpoints = endpoints.advanced_endpoints;
         remember_mobile_profile(&mut settings, profile);
         prepare_mobile_settings(&mut settings);
         save_settings(&path, &settings).map_err(|err| err.to_string())?;
@@ -1299,7 +1425,15 @@ mod mobile {
         settings: &AppSettings,
         last_connected_ms: Option<u64>,
     ) -> MobileServerProfile {
-        let control = settings.control.clone();
+        let endpoints = settings.endpoint_overrides();
+        let control = endpoints
+            .effective_control()
+            .unwrap_or_else(|_| settings.control.clone());
+        let server = endpoints
+            .effective_server()
+            .map(|server| server.to_string())
+            .unwrap_or_else(|_| settings.server.to_string());
+        let admin = endpoints.effective_admin().ok();
         let existing = settings
             .server_profiles
             .iter()
@@ -1315,9 +1449,10 @@ mod mobile {
         MobileServerProfile {
             id,
             name,
-            server: settings.server.to_string(),
+            server_host: endpoints.server_host,
+            server,
             control,
-            admin: existing.and_then(|profile| profile.admin.clone()),
+            admin: existing.and_then(|profile| profile.admin.clone()).or(admin),
             auth: existing.and_then(|profile| profile.auth.clone()),
             version: existing.and_then(|profile| profile.version.clone()),
             last_connected_ms,
@@ -1427,6 +1562,7 @@ mod mobile {
     fn prepare_mobile_settings(settings: &mut AppSettings) {
         settings.window_mode = AppWindowMode::Native;
         settings.disable_local_ui = true;
+        settings.normalize_endpoints();
     }
 
     fn mobile_controls_url() -> String {
@@ -1524,6 +1660,7 @@ mod tests {
             init_config: false,
             print_config: false,
             print_launch_plan: false,
+            server_host: None,
             server: None,
             control: None,
             user_id: None,
@@ -1543,6 +1680,7 @@ mod tests {
             input_channel: None,
             output_device: None,
             debug_audio_dir: None,
+            button_count: None,
             buttons: Vec::new(),
             button_keys: Vec::new(),
             local_ui_bind: None,
@@ -1561,8 +1699,10 @@ mod tests {
         let settings = AppSettings::default();
 
         assert_eq!(settings.user_id, Some(1));
+        assert_eq!(settings.server_host, "127.0.0.1");
         assert_eq!(settings.server, "127.0.0.1:40000".parse().unwrap());
         assert_eq!(settings.control, "ws://127.0.0.1:40001");
+        assert!(!settings.advanced_endpoints);
         assert_eq!(settings.tx_channel, 1);
         assert_eq!(settings.listen_channel, 1);
         assert_eq!(settings.codec, Codec::Pcm16);
@@ -1573,10 +1713,42 @@ mod tests {
         assert_eq!(settings.input_channel, desktop::InputChannelMode::Average);
         assert_eq!(settings.local_ui_bind, "127.0.0.1:41002".parse().unwrap());
         assert_eq!(settings.local_ui_token, None);
+        assert_eq!(settings.button_count, DEFAULT_CLIENT_BUTTON_COUNT);
         assert_eq!(settings.app_title, "Intercom Suite");
         assert_eq!(settings.window_mode, AppWindowMode::SystemBrowser);
         assert_eq!(settings.ui_open_delay_ms, 750);
         assert!(settings.server_profiles.is_empty());
+    }
+
+    #[test]
+    fn server_host_derives_runtime_endpoints() {
+        let settings = AppSettings {
+            server_host: "192.168.12.84".to_string(),
+            ..AppSettings::default()
+        };
+
+        let runtime = settings.client_runtime_config(false).unwrap();
+        assert_eq!(runtime.server_host, "192.168.12.84");
+        assert_eq!(runtime.server, "192.168.12.84:40000".parse().unwrap());
+        assert_eq!(runtime.control, "ws://192.168.12.84:40001");
+    }
+
+    #[test]
+    fn legacy_default_port_settings_migrate_to_server_host() {
+        let mut settings = AppSettings {
+            server_host: String::new(),
+            server: "192.168.1.20:40000".parse().unwrap(),
+            control: "ws://192.168.1.20:40001".to_string(),
+            admin: Some("http://192.168.1.20:40002".to_string()),
+            ..AppSettings::default()
+        };
+
+        settings.normalize_endpoints();
+        assert_eq!(settings.server_host, "192.168.1.20");
+        assert!(!settings.advanced_endpoints);
+        assert_eq!(settings.server, "192.168.1.20:40000".parse().unwrap());
+        assert_eq!(settings.control, "ws://192.168.1.20:40001");
+        assert_eq!(settings.admin, None);
     }
 
     #[test]
@@ -1585,6 +1757,7 @@ mod tests {
             codec: Codec::Opus,
             input_backend: desktop::AudioInputBackend::VoiceProcessing,
             input_channel: desktop::InputChannelMode::Left,
+            button_count: 8,
             buttons: vec!["director=Director".to_string()],
             ..AppSettings::default()
         };
@@ -1597,6 +1770,7 @@ mod tests {
             ClientAudioBackendKind::VoiceProcessing
         );
         assert_eq!(runtime.input_channel, ClientInputChannelMode::Left);
+        assert_eq!(runtime.button_count, 8);
         assert_eq!(runtime.buttons, vec!["director=Director"]);
         assert!(!runtime.list_devices);
     }
@@ -1616,6 +1790,7 @@ mod tests {
         args.codec = Some(AppCodec::Pcm48);
         args.opus_profile = Some(AppOpusProfile::Speech48High);
         args.input_backend = Some(desktop::AudioInputBackend::Raw);
+        args.button_count = Some(4);
         args.buttons = vec!["director=Director".to_string()];
         args.local_ui_token = Some("secret".to_string());
         args.enable_local_ui = true;
@@ -1630,6 +1805,7 @@ mod tests {
         assert_eq!(settings.codec, Codec::Pcm48);
         assert_eq!(settings.opus_profile, OpusProfile::Speech48High);
         assert_eq!(settings.input_backend, desktop::AudioInputBackend::Raw);
+        assert_eq!(settings.button_count, 4);
         assert_eq!(settings.buttons, vec!["director=Director"]);
         assert_eq!(settings.local_ui_token.as_deref(), Some("secret"));
         assert!(!settings.disable_local_ui);
@@ -1736,6 +1912,8 @@ mod tests {
         let args = settings.desktop_args(false).unwrap();
 
         assert_eq!(args.user_id, Some(1));
+        assert_eq!(args.server_host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(args.button_count, DEFAULT_CLIENT_BUTTON_COUNT);
         assert_eq!(args.buttons.len(), 1);
         assert_eq!(args.button_keys.len(), 1);
     }
@@ -1762,6 +1940,19 @@ mod tests {
 
         settings.app_title = "Intercom Suite".to_string();
         settings.ui_open_delay_ms = 30_001;
+        assert!(settings.validate().is_err());
+
+        settings.ui_open_delay_ms = 750;
+        settings.button_count = MAX_CLIENT_BUTTON_COUNT + 1;
+        assert!(settings.validate().is_err());
+
+        settings.button_count = DEFAULT_CLIENT_BUTTON_COUNT;
+        settings.server_host = "http://127.0.0.1".to_string();
+        assert!(settings.validate().is_err());
+
+        settings.server_host = "127.0.0.1".to_string();
+        settings.advanced_endpoints = true;
+        settings.control = "http://127.0.0.1:40001".to_string();
         assert!(settings.validate().is_err());
     }
 
@@ -1906,6 +2097,10 @@ mod tests {
             "tauri-assets/mobile.html",
             "tauri-assets/mobile.css",
             "tauri-assets/mobile.js",
+            "tauri-assets/client-controls.html",
+            "tauri-assets/client-controls.css",
+            "tauri-assets/client-controls.js",
+            "tauri-assets/client-api.js",
             "tauri-assets/settings.html",
             "tauri-assets/settings.css",
             "tauri-assets/settings.js",
@@ -1940,8 +2135,18 @@ mod tests {
         let controls_html =
             fs::read_to_string(root.join("tauri-assets/client-controls.html")).unwrap();
         let controls_js = fs::read_to_string(root.join("tauri-assets/client-controls.js")).unwrap();
+        let controls_api = fs::read_to_string(root.join("tauri-assets/client-api.js")).unwrap();
         let controls_css =
             fs::read_to_string(root.join("tauri-assets/client-controls.css")).unwrap();
+        let shared_controls_root = root.join("../shared-ui/talking");
+        let shared_controls_html =
+            fs::read_to_string(shared_controls_root.join("client-controls.html")).unwrap();
+        let shared_controls_js =
+            fs::read_to_string(shared_controls_root.join("client-controls.js")).unwrap();
+        let shared_controls_css =
+            fs::read_to_string(shared_controls_root.join("client-controls.css")).unwrap();
+        let shared_tauri_api =
+            fs::read_to_string(shared_controls_root.join("client-api-tauri.js")).unwrap();
         let ios_dev_script = fs::read_to_string(root.join("scripts/ios-dev.sh")).unwrap();
         let ios_config = fs::read_to_string(root.join("tauri.ios.conf.json")).unwrap();
         let ios_clean_script =
@@ -1956,13 +2161,25 @@ mod tests {
         let android_manifest =
             fs::read_to_string(root.join("gen/android/app/src/main/AndroidManifest.xml")).unwrap();
         assert!(settings_html.contains("input_backend"));
+        assert!(settings_html.contains("button_count"));
+        assert!(settings_html.contains("server_host"));
+        assert!(settings_html.contains("advanced_endpoints"));
         assert!(settings_js.contains("input_backend"));
+        assert!(settings_js.contains("button_count"));
+        assert!(settings_js.contains("server_host"));
+        assert!(settings_js.contains("advanced_endpoints"));
         assert!(settings_js.contains("invoke("));
         assert!(!settings_js.contains("fetch("));
         assert!(mobile_html.contains("mobile-form"));
         assert!(mobile_html.contains("server-picker"));
         assert!(mobile_html.contains("scan-servers"));
+        assert!(mobile_html.contains("button_count"));
+        assert!(mobile_html.contains("server_host"));
+        assert!(mobile_html.contains("advanced_endpoints"));
         assert!(mobile_js.contains("invoke("));
+        assert!(mobile_js.contains("button_count"));
+        assert!(mobile_js.contains("server_host"));
+        assert!(mobile_js.contains("advanced_endpoints"));
         assert!(mobile_js.contains("mobile_start_client"));
         assert!(mobile_js.contains("mobile_open_controls"));
         assert!(mobile_js.contains("mobile_discover_servers"));
@@ -1973,13 +2190,24 @@ mod tests {
         assert!(!mobile_js.contains("fetch("));
         assert!(mobile_css.contains(".phone-shell"));
         assert!(mobile_css.contains(".server-panel"));
+        assert_eq!(controls_html, shared_controls_html);
+        assert_eq!(controls_js, shared_controls_js);
+        assert_eq!(controls_css, shared_controls_css);
+        assert_eq!(controls_api, shared_tauri_api);
+        assert!(controls_html.contains("client-api.js"));
         assert!(controls_html.contains("client-controls.js"));
-        assert!(controls_js.contains("invoke("));
-        assert!(controls_js.contains("client_state"));
-        assert!(controls_js.contains("client_talk_down"));
-        assert!(controls_js.contains("client_config"));
+        assert!(controls_html.contains("id=\"client-title\" hidden"));
+        assert!(controls_api.contains("invoke("));
+        assert!(controls_api.contains("client_state"));
+        assert!(controls_api.contains("client_talk_down"));
+        assert!(controls_api.contains("client_config"));
+        assert!(controls_js.contains("applyButtonColor"));
+        assert!(!controls_js.contains("clientApi?.name || 'client'} controls"));
+        assert!(controls_js.contains("'Hold Talk to transmit'"));
         assert!(!controls_js.contains("fetch("));
+        assert!(!controls_api.contains("fetch("));
         assert!(controls_css.contains(".phone-shell"));
+        assert!(controls_css.contains("--dock-height"));
         assert!(ios_dev_script.contains("simctl bootstatus"));
         assert!(ios_dev_script.contains("cargo tauri ios dev"));
         assert!(ios_dev_script.contains("--features=\"${TAURI_IOS_FEATURES:-native}\""));

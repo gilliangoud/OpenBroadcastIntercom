@@ -542,6 +542,7 @@ impl RuntimeAlert {
         AlertStatus {
             id: self.id,
             sender: self.sender,
+            sender_name: None,
             target: self.target,
             message: self.message.clone(),
             created_at_ms: self.created_at_ms,
@@ -576,6 +577,24 @@ impl RuntimeAlert {
     }
 }
 
+fn session_display_name(sessions: &HashMap<UserId, Session>, user_id: UserId) -> Option<String> {
+    sessions
+        .get(&user_id)
+        .map(|session| session.name.trim())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn alert_status_with_sessions(
+    alert: &RuntimeAlert,
+    sessions: &HashMap<UserId, Session>,
+) -> AlertStatus {
+    let mut status = alert.status();
+    status.sender_name = session_display_name(sessions, alert.sender);
+    status
+}
+
+#[cfg(test)]
 fn alert_statuses_for_user(
     alerts: &[RuntimeAlert],
     user_id: UserId,
@@ -595,18 +614,41 @@ fn alert_statuses_for_user(
     (active, recent)
 }
 
-fn admin_alert_statuses(alerts: &[RuntimeAlert]) -> (Vec<AlertStatus>, Vec<AlertStatus>) {
+fn alert_statuses_for_user_with_sessions(
+    alerts: &[RuntimeAlert],
+    user_id: UserId,
+    sessions: &HashMap<UserId, Session>,
+) -> (Vec<AlertStatus>, Vec<AlertStatus>) {
+    let active = alerts
+        .iter()
+        .filter(|alert| alert.active_for(user_id))
+        .map(|alert| alert_status_with_sessions(alert, sessions))
+        .collect::<Vec<_>>();
+    let recent = alerts
+        .iter()
+        .filter(|alert| alert.relevant_for(user_id) && !alert.active_for(user_id))
+        .rev()
+        .take(20)
+        .map(|alert| alert_status_with_sessions(alert, sessions))
+        .collect::<Vec<_>>();
+    (active, recent)
+}
+
+fn admin_alert_statuses_with_sessions(
+    alerts: &[RuntimeAlert],
+    sessions: &HashMap<UserId, Session>,
+) -> (Vec<AlertStatus>, Vec<AlertStatus>) {
     let active = alerts
         .iter()
         .filter(|alert| alert.active())
-        .map(RuntimeAlert::status)
+        .map(|alert| alert_status_with_sessions(alert, sessions))
         .collect::<Vec<_>>();
     let recent = alerts
         .iter()
         .filter(|alert| !alert.active())
         .rev()
         .take(50)
-        .map(RuntimeAlert::status)
+        .map(|alert| alert_status_with_sessions(alert, sessions))
         .collect::<Vec<_>>();
     (active, recent)
 }
@@ -683,7 +725,9 @@ fn active_direct_call_statuses_for_user(
             if caller == user_id || target == user_id {
                 calls.push(DirectCallStatus {
                     caller,
+                    caller_name: session_display_name(sessions, caller),
                     target,
+                    target_name: session_display_name(sessions, target),
                     active: true,
                     duck: call.duck,
                 });
@@ -699,7 +743,9 @@ fn active_direct_call_statuses_for_user(
                         if caller == user_id || target == user_id {
                             calls.push(DirectCallStatus {
                                 caller,
+                                caller_name: session_display_name(sessions, caller),
                                 target,
+                                target_name: session_display_name(sessions, target),
                                 active: true,
                                 duck: *duck,
                             });
@@ -1118,6 +1164,7 @@ fn producer_template_client() -> ClientTemplateClientConfig {
             TalkButtonConfig {
                 id: "alert-talent".to_string(),
                 label: "Alert Talent".to_string(),
+                color: None,
                 mode: TalkButtonMode::Momentary,
                 actions: vec![TalkButtonAction::Alert {
                     targets: vec![AlertTarget::User(USER_TALENT)],
@@ -1182,6 +1229,7 @@ fn referee_template_client() -> ClientTemplateClientConfig {
             TalkButtonConfig {
                 id: "alert-director".to_string(),
                 label: "Alert Director".to_string(),
+                color: None,
                 mode: TalkButtonMode::Momentary,
                 actions: vec![TalkButtonAction::Alert {
                     targets: vec![AlertTarget::User(USER_DIRECTOR)],
@@ -1230,6 +1278,7 @@ fn transmit_button(
     TalkButtonConfig {
         id: id.to_string(),
         label: label.to_string(),
+        color: None,
         mode: TalkButtonMode::Momentary,
         actions: vec![TalkButtonAction::Transmit {
             channels,
@@ -3093,7 +3142,8 @@ async fn admin_send_alert_handler(
             let Some(alert) = alerts.last() else {
                 return Err(AdminApiError::Internal("alert was not created".to_string()));
             };
-            Ok(Json(alert.status()))
+            let sessions = state.sessions.read().await;
+            Ok(Json(alert_status_with_sessions(alert, &sessions)))
         }
         ControlResponse::Error { message } => Err(AdminApiError::BadRequest(message)),
         other => Err(AdminApiError::BadRequest(format!(
@@ -3147,11 +3197,12 @@ async fn upsert_admin_client(
 async fn admin_state_snapshot(state: &ServerState) -> AdminStateResponse {
     let (sessions, metrics) = status_snapshot(state).await;
     let admin_state = state.admin_state.read().await.clone();
+    let sessions_guard = state.sessions.read().await;
     let alerts = state.alerts.read().await;
-    let (active_alerts, recent_alerts) = admin_alert_statuses(&alerts);
+    let (active_alerts, recent_alerts) =
+        admin_alert_statuses_with_sessions(&alerts, &sessions_guard);
     let emergency = state.emergency.read().await;
     let emergency = {
-        let sessions_guard = state.sessions.read().await;
         emergency.as_ref().map(|emergency| {
             emergency.status(emergency_recipients_for_sessions(
                 emergency,
@@ -4921,6 +4972,7 @@ async fn create_runtime_alert(
         })
         .collect::<Vec<_>>();
     let alert = {
+        let sessions = state.sessions.read().await;
         let mut alerts = state.alerts.write().await;
         let alert = RuntimeAlert {
             id: alert_id,
@@ -4932,7 +4984,7 @@ async fn create_runtime_alert(
             cancelled: false,
             cancelled_at_ms: None,
         };
-        let status = alert.status();
+        let status = alert_status_with_sessions(&alert, &sessions);
         alerts.push(alert);
         trim_alert_history(&mut alerts);
         status
@@ -5472,9 +5524,18 @@ fn normalize_button_capabilities(mut buttons: Vec<ButtonCapability>) -> Vec<Butt
             button.label = button.label.trim().to_string();
         }
     }
-    buttons.sort_by(|left, right| left.id.cmp(&right.id));
+    buttons.sort_by(|left, right| compare_button_ids(&left.id, &right.id));
     buttons.dedup_by(|left, right| left.id == right.id);
     buttons
+}
+
+fn compare_button_ids(left: &str, right: &str) -> std::cmp::Ordering {
+    match (left.parse::<u16>(), right.parse::<u16>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Err(_)) => left.cmp(right),
+    }
 }
 
 fn normalize_talker_volumes(
@@ -5501,11 +5562,29 @@ fn normalize_button_configs(mut buttons: Vec<TalkButtonConfig>) -> Vec<TalkButto
         } else {
             button.label = button.label.trim().to_string();
         }
+        button.color = normalize_button_color(button.color.take());
         button.actions = normalize_button_actions(std::mem::take(&mut button.actions));
     }
-    buttons.sort_by(|left, right| left.id.cmp(&right.id));
+    buttons.sort_by(|left, right| compare_button_ids(&left.id, &right.id));
     buttons.dedup_by(|left, right| left.id == right.id);
     buttons
+}
+
+fn normalize_button_color(color: Option<String>) -> Option<String> {
+    let color = color?.trim().to_string();
+    if is_hex_button_color(&color) {
+        Some(color)
+    } else {
+        None
+    }
+}
+
+fn is_hex_button_color(color: &str) -> bool {
+    let bytes = color.as_bytes();
+    if bytes.first() != Some(&b'#') || (bytes.len() != 4 && bytes.len() != 7) {
+        return false;
+    }
+    bytes[1..].iter().all(u8::is_ascii_hexdigit)
 }
 
 fn sorted_buttons(buttons: &[TalkButtonConfig]) -> Vec<TalkButtonConfig> {
@@ -6091,7 +6170,8 @@ async fn config_event_snapshot(state: &ServerState, user_id: UserId) -> Option<C
     let sessions = state.sessions.read().await;
     let session = sessions.get(&user_id)?;
     let alerts = state.alerts.read().await;
-    let (active_alerts, recent_alerts) = alert_statuses_for_user(&alerts, user_id);
+    let (active_alerts, recent_alerts) =
+        alert_statuses_for_user_with_sessions(&alerts, user_id, &sessions);
     let emergency = emergency_status_for_user(emergency.as_ref(), &sessions, user_id);
     Some(session.control_event(
         user_id,
@@ -6929,7 +7009,8 @@ async fn status_snapshot(state: &ServerState) -> (Vec<SessionStatus>, StatusMetr
             active_buttons.sort();
             let active_direct_calls = active_direct_call_statuses_for_user(user_id, &sessions);
             let direct_call_history = direct_call_history_entries(&session.direct_call_history);
-            let (active_alerts, recent_alerts) = alert_statuses_for_user(&alerts, user_id);
+            let (active_alerts, recent_alerts) =
+                alert_statuses_for_user_with_sessions(&alerts, user_id, &sessions);
             let emergency = emergency_status_for_user(emergency.as_ref(), &sessions, user_id);
             let mut priority_channels = session
                 .priority_channels
@@ -11143,6 +11224,7 @@ mod tests {
         assert!(ADMIN_JS.contains("data-editor-vol"));
         assert!(ADMIN_JS.contains("data-ifb-program"));
         assert!(ADMIN_JS.contains("data-button-tx-users"));
+        assert!(ADMIN_JS.contains("data-button-color"));
         assert!(ADMIN_JS.contains("data-button-alert-id"));
         assert!(ADMIN_JS.contains("function clampPanUi"));
         assert!(ADMIN_JS.contains("ArrowLeft"));
@@ -11238,6 +11320,7 @@ mod tests {
                 TalkButtonConfig {
                     id: "director".to_string(),
                     label: "Director".to_string(),
+                    color: None,
                     mode: TalkButtonMode::Momentary,
                     actions: vec![TalkButtonAction::Transmit {
                         channels: vec![2, 3],
@@ -11248,6 +11331,7 @@ mod tests {
                 TalkButtonConfig {
                     id: "pa".to_string(),
                     label: "PA".to_string(),
+                    color: None,
                     mode: TalkButtonMode::Latching,
                     actions: vec![TalkButtonAction::Transmit {
                         channels: vec![3, 4],
@@ -11317,6 +11401,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn normalize_button_configs_keeps_only_safe_hex_colors() {
+        let buttons = normalize_button_configs(vec![
+            TalkButtonConfig {
+                id: " 10 ".to_string(),
+                label: " ".to_string(),
+                color: Some(" #f0a ".to_string()),
+                mode: TalkButtonMode::Momentary,
+                actions: Vec::new(),
+            },
+            TalkButtonConfig {
+                id: "2".to_string(),
+                label: "Two".to_string(),
+                color: Some("url(javascript:bad)".to_string()),
+                mode: TalkButtonMode::Momentary,
+                actions: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(buttons[0].id, "2");
+        assert_eq!(buttons[0].color, None);
+        assert_eq!(buttons[1].id, "10");
+        assert_eq!(buttons[1].label, "10");
+        assert_eq!(buttons[1].color.as_deref(), Some("#f0a"));
+    }
+
     #[tokio::test]
     async fn clear_active_buttons_removes_stuck_routes() {
         let state = ServerState::default();
@@ -11324,6 +11434,7 @@ mod tests {
         session.buttons = vec![TalkButtonConfig {
             id: "pa".to_string(),
             label: "PA".to_string(),
+            color: None,
             mode: TalkButtonMode::Latching,
             actions: vec![TalkButtonAction::Transmit {
                 channels: vec![9],
@@ -11560,6 +11671,7 @@ mod tests {
             buttons: vec![TalkButtonConfig {
                 id: "director".to_string(),
                 label: "Director".to_string(),
+                color: None,
                 mode: TalkButtonMode::Momentary,
                 actions: vec![
                     TalkButtonAction::Transmit {
@@ -11635,6 +11747,9 @@ mod tests {
             assert!(targets.contains(&AudioTarget::Channel(5)));
             assert!(targets.contains(&AudioTarget::Direct(2)));
             assert_eq!(sessions.get(&2).unwrap().last_direct_caller, Some(1));
+            let active_calls = active_direct_call_statuses_for_user(2, &sessions);
+            assert_eq!(active_calls[0].caller_name.as_deref(), Some("Ref"));
+            assert_eq!(active_calls[0].target_name.as_deref(), Some("Director"));
         }
         {
             let desired = desired_client(&state, 2).await.unwrap();
@@ -11644,8 +11759,10 @@ mod tests {
         }
         {
             let alerts = state.alerts.read().await;
-            let (active, _) = alert_statuses_for_user(&alerts, 2);
+            let sessions = state.sessions.read().await;
+            let (active, _) = alert_statuses_for_user_with_sessions(&alerts, 2, &sessions);
             assert_eq!(active.len(), 1);
+            assert_eq!(active[0].sender_name.as_deref(), Some("Ref"));
             assert_eq!(active[0].message.as_deref(), Some("Director calling"));
         }
 
@@ -11837,6 +11954,7 @@ mod tests {
                     buttons: vec![TalkButtonConfig {
                         id: "director".to_string(),
                         label: "Director".to_string(),
+                        color: None,
                         mode: TalkButtonMode::Momentary,
                         actions: vec![TalkButtonAction::Transmit {
                             channels: vec![9],
@@ -11903,6 +12021,7 @@ mod tests {
                 buttons: vec![TalkButtonConfig {
                     id: "director".to_string(),
                     label: "Director".to_string(),
+                    color: None,
                     mode: TalkButtonMode::Momentary,
                     actions: vec![TalkButtonAction::Transmit {
                         channels: vec![2],
@@ -12154,6 +12273,7 @@ mod tests {
                 buttons: vec![TalkButtonConfig {
                     id: "director".to_string(),
                     label: "Director".to_string(),
+                    color: None,
                     mode: TalkButtonMode::Momentary,
                     actions: vec![TalkButtonAction::Transmit {
                         channels: vec![5],

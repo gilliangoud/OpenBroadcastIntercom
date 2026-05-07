@@ -995,7 +995,11 @@ function advertisedButtonHtml(live, cfg) {
   if (!buttons.length) return '<span class="muted">No advertised buttons from this connected client.</span>';
   return buttons.map((button) => `<button class="pill" data-add-advertised="${esc(button.id)}" data-label="${esc(button.label || button.id)}" type="button">${esc(button.id)}: ${esc(button.label || button.id)}${configured.has(button.id) ? ' configured' : ' available'}</button>`).join('');
 }
-function buttonRowHtml(button = { id: '', label: '', mode: 'momentary', actions: [] }) {
+function buttonColor(value) {
+  const color = String(value || '').trim();
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color) ? color : '#2f7dd3';
+}
+function buttonRowHtml(button = { id: '', label: '', color: '#2f7dd3', mode: 'momentary', actions: [] }) {
   const tx = (button.actions || []).find((action) => action.type === 'transmit') || {};
   const alert = (button.actions || []).find((action) => action.type === 'alert') || {};
   const alertTarget = (alert.targets || [])[0] || {};
@@ -1005,6 +1009,7 @@ function buttonRowHtml(button = { id: '', label: '', mode: 'momentary', actions:
   return `<div class="button-row">
     <label>ID<input data-button-id value="${esc(button.id)}" placeholder="director"></label>
     <label>Label<input data-button-label value="${esc(button.label || button.id)}" placeholder="Director"></label>
+    <label>Color<input data-button-color type="color" value="${buttonColor(button.color)}"></label>
     <label>Mode<select data-button-mode><option value="momentary">Momentary</option><option value="latching">Latching</option></select></label>
     <button data-remove-button type="button" class="danger">Remove</button>
     <label>TX Channels<input data-button-tx-channels value="${csv(tx.channels)}" placeholder="1,4"></label>
@@ -1212,7 +1217,8 @@ function readButtons() {
       tx_toggle: parseCsv(row.querySelector('[data-route-tx-toggle]').value),
     };
     if (Object.entries(route).some(([key, value]) => key !== 'users' && value.length)) actions.push({ type: 'route_edit', ...route });
-    return { id, label: row.querySelector('[data-button-label]').value.trim() || id, mode: row.querySelector('[data-button-mode]').value, actions };
+    const color = buttonColor(row.querySelector('[data-button-color]').value);
+    return { id, label: row.querySelector('[data-button-label]').value.trim() || id, color, mode: row.querySelector('[data-button-mode]').value, actions };
   }).filter((button) => button.id);
 }
 function lockoutBody() {
