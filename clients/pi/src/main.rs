@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use axum::extract::Request;
@@ -17,19 +17,20 @@ use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{Parser, ValueEnum};
 use client_core::{
-    bind_tcp_listener_with_port_fallback, default_button_capabilities, load_or_create_client_uid,
-    merge_button_capabilities, run_connection_cue_task, run_control_connection, samples_for_ms,
-    send_control_message, send_control_request, supported_codecs, AudioDecoder, AudioEncoder,
-    ClientConfig, ClientConnectionEvent, ClientServerEndpoint, ControlRequest, PlaybackBuffer,
-    PlaybackStats, DEFAULT_CLIENT_BUTTON_COUNT, DEFAULT_CONTROL_PORT, DEFAULT_SERVER_HOST,
+    basic_client_telemetry, bind_tcp_listener_with_port_fallback, default_button_capabilities,
+    load_or_create_client_uid, merge_button_capabilities, run_connection_cue_task,
+    run_control_connection, samples_for_ms, send_control_message, send_control_request,
+    supported_codecs, AudioDecoder, AudioEncoder, ClientConfig, ClientConnectionEvent,
+    ClientServerEndpoint, ClientTelemetryCounters, ControlRequest, PlaybackBuffer, PlaybackStats,
+    DEFAULT_CLIENT_BUTTON_COUNT, DEFAULT_CONTROL_PORT, DEFAULT_SERVER_HOST,
     MAX_CLIENT_BUTTON_COUNT,
 };
 use common::{
     codec_samples_per_frame, AlertId, AlertStatus, AlertTarget, AudioPacket, ButtonCapability,
-    ButtonId, ChannelPresenceRoster, ClientLockoutPolicy, ClientRole, Codec, ControlMessage,
-    ControlResponse, DirectCallHistoryEntry, DirectCallStatus, EmergencyStatus, Esp32AudioConfig,
-    IfbConfig, OpusProfile, ProcessingConfig, StereoConfig, TalkButtonConfig, TalkMode,
-    MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
+    ButtonId, CaptureHealthStatus, ChannelPresenceRoster, ClientLockoutPolicy, ClientRole, Codec,
+    ControlMessage, ControlResponse, DirectCallHistoryEntry, DirectCallStatus, EmergencyStatus,
+    Esp32AudioConfig, IfbConfig, OpusProfile, ProcessingConfig, StereoConfig, TalkButtonConfig,
+    TalkMode, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -323,6 +324,8 @@ async fn main() -> anyhow::Result<()> {
         jitter_samples + MIX_SAMPLES_PER_FRAME * 12,
         jitter_samples,
     )));
+    let telemetry_counters = ClientTelemetryCounters::default();
+    let latest_telemetry = Arc::new(Mutex::new(None));
 
     let (control_tx, control_rx) = mpsc::channel::<ControlRequest>(16);
     let (connection_event_tx, connection_event_rx) = mpsc::channel::<ClientConnectionEvent>(8);
@@ -393,6 +396,7 @@ async fn main() -> anyhow::Result<()> {
             config: Arc::clone(&runtime_config),
             control_tx: control_tx.clone(),
             playback: Arc::clone(&playback),
+            latest_telemetry: Arc::clone(&latest_telemetry),
         };
         let local_api_bind = args.local_api_bind;
         tokio::spawn(async move {
@@ -468,7 +472,46 @@ async fn main() -> anyhow::Result<()> {
 
     let (mic_tx, mut mic_rx) = mpsc::channel::<Vec<i16>>(8);
 
-    let input_stream = build_input_stream(mic_tx, args.mic_gain, args.input_device.as_deref())?;
+    let telemetry_control_tx = control_tx.clone();
+    let telemetry_config = Arc::clone(&runtime_config);
+    let telemetry_playback = Arc::clone(&playback);
+    let telemetry_counters_task = telemetry_counters.clone();
+    let telemetry_latest = Arc::clone(&latest_telemetry);
+    let telemetry_started_at = Instant::now();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let user_id = telemetry_config.lock().unwrap().user_id;
+            let mut health = basic_client_telemetry(
+                "pi",
+                telemetry_playback.lock().unwrap().stats(),
+                telemetry_counters_task.snapshot(),
+            );
+            health.uptime_ms = telemetry_started_at
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            *telemetry_latest.lock().unwrap() = Some(health.clone());
+            if let Err(err) = send_control_message(
+                &telemetry_control_tx,
+                ControlMessage::CaptureHealth { user_id, health },
+            )
+            .await
+            {
+                tracing::debug!(%err, "could not report pi client telemetry");
+            }
+        }
+    });
+
+    let input_stream = build_input_stream(
+        mic_tx,
+        args.mic_gain,
+        args.input_device.as_deref(),
+        telemetry_counters.clone(),
+    )?;
     let output_stream = build_output_stream(
         Arc::clone(&playback),
         args.speaker_gain,
@@ -479,6 +522,7 @@ async fn main() -> anyhow::Result<()> {
 
     let send_socket = Arc::clone(&socket);
     let send_config = Arc::clone(&runtime_config);
+    let send_telemetry = telemetry_counters.clone();
     let send_task = tokio::spawn(async move {
         let seq = AtomicU16::new(0);
         let timestamp = AtomicU32::new(0);
@@ -530,6 +574,7 @@ async fn main() -> anyhow::Result<()> {
             let payload = match audio_encoder.encode(&frame) {
                 Ok(payload) => payload,
                 Err(err) => {
+                    send_telemetry.record_codec_drop();
                     tracing::warn!(codec = ?current_codec, %err, "failed to encode mic frame");
                     continue;
                 }
@@ -548,17 +593,20 @@ async fn main() -> anyhow::Result<()> {
                     payload: payload.clone(),
                 };
                 if let Err(err) = packet.encode(&mut encoded) {
+                    send_telemetry.record_payload_decode_error();
                     tracing::warn!(%err, "failed to encode audio packet");
                     continue;
                 }
                 match send_socket.send(&encoded).await {
                     Ok(_) => {
+                        send_telemetry.record_tx_packet();
                         if send_error_logged {
                             tracing::info!("audio UDP send recovered");
                             send_error_logged = false;
                         }
                     }
                     Err(err) => {
+                        send_telemetry.record_tx_send_failure();
                         if !send_error_logged {
                             tracing::warn!(%err, "audio UDP send failed; keeping client alive");
                             send_error_logged = true;
@@ -576,6 +624,7 @@ async fn main() -> anyhow::Result<()> {
     let recv_socket = Arc::clone(&socket);
     let recv_playback = Arc::clone(&playback);
     let recv_config = Arc::clone(&runtime_config);
+    let recv_telemetry = telemetry_counters.clone();
     let recv_task = tokio::spawn(async move {
         let mut buf = vec![0_u8; common::MAX_PACKET_BYTES];
         let mut audio_decoder = AudioDecoder::default();
@@ -599,8 +648,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let packet = match AudioPacket::decode(&buf[..len]) {
-                Ok(packet) => packet,
+                Ok(packet) => {
+                    recv_telemetry.record_udp_rx_packet();
+                    packet
+                }
                 Err(err) => {
+                    recv_telemetry.record_malformed_packet();
                     tracing::warn!(%err, "dropped malformed incoming packet");
                     continue;
                 }
@@ -624,6 +677,7 @@ async fn main() -> anyhow::Result<()> {
             ) {
                 Ok(samples) => samples,
                 Err(err) => {
+                    recv_telemetry.record_decode_error();
                     tracing::warn!(codec = ?packet.codec, %err, "dropped invalid audio payload");
                     continue;
                 }
@@ -670,6 +724,7 @@ struct ApiState {
     config: Arc<Mutex<ClientConfig>>,
     control_tx: mpsc::Sender<ControlRequest>,
     playback: Arc<Mutex<PlaybackBuffer>>,
+    latest_telemetry: Arc<Mutex<Option<CaptureHealthStatus>>>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -713,10 +768,15 @@ struct StateResponse {
     lockout: ClientLockoutPolicy,
     stereo: StereoConfig,
     playback: PlaybackStats,
+    telemetry: Option<CaptureHealthStatus>,
 }
 
 impl StateResponse {
-    fn from_state(config: &ClientConfig, playback: PlaybackStats) -> Self {
+    fn from_state(
+        config: &ClientConfig,
+        playback: PlaybackStats,
+        telemetry: Option<CaptureHealthStatus>,
+    ) -> Self {
         Self {
             user_id: config.user_id,
             client_uid: config.client_uid.clone(),
@@ -747,6 +807,7 @@ impl StateResponse {
             lockout: config.lockout.clone(),
             stereo: config.stereo.clone(),
             playback,
+            telemetry,
         }
     }
 }
@@ -897,7 +958,8 @@ async fn health_handler() -> Json<OkResponse> {
 async fn state_handler(State(state): State<ApiState>) -> Json<StateResponse> {
     let snapshot = state.config.lock().unwrap().clone();
     let playback = state.playback.lock().unwrap().stats();
-    Json(StateResponse::from_state(&snapshot, playback))
+    let telemetry = state.latest_telemetry.lock().unwrap().clone();
+    Json(StateResponse::from_state(&snapshot, playback, telemetry))
 }
 
 async fn config_handler(
@@ -1360,6 +1422,7 @@ fn build_input_stream(
     tx: mpsc::Sender<Vec<i16>>,
     mic_gain: f32,
     input_device: Option<&str>,
+    telemetry: ClientTelemetryCounters,
 ) -> anyhow::Result<cpal::Stream> {
     let host = cpal::default_host();
     let device = select_input_device(&host, input_device)?;
@@ -1370,7 +1433,7 @@ fn build_input_stream(
     let sample_rate = config.sample_rate.0;
     tracing::info!(device = %device.name()?, ?config, ?sample_format, "opened input device");
 
-    let mut capture = CaptureAdapter::new(tx, sample_rate, channels, mic_gain);
+    let mut capture = CaptureAdapter::new(tx, sample_rate, channels, mic_gain, telemetry);
     let err_fn = |err| tracing::error!(%err, "input stream error");
 
     match sample_format {
@@ -1469,10 +1532,17 @@ struct CaptureAdapter {
     smoothed_mono: f32,
     has_previous: bool,
     mic_gain: f32,
+    telemetry: ClientTelemetryCounters,
 }
 
 impl CaptureAdapter {
-    fn new(tx: mpsc::Sender<Vec<i16>>, input_rate: u32, channels: usize, mic_gain: f32) -> Self {
+    fn new(
+        tx: mpsc::Sender<Vec<i16>>,
+        input_rate: u32,
+        channels: usize,
+        mic_gain: f32,
+        telemetry: ClientTelemetryCounters,
+    ) -> Self {
         Self {
             tx,
             frame: Vec::with_capacity(MIX_SAMPLES_PER_FRAME),
@@ -1485,6 +1555,7 @@ impl CaptureAdapter {
             smoothed_mono: 0.0,
             has_previous: false,
             mic_gain: mic_gain.max(0.0),
+            telemetry,
         }
     }
 
@@ -1535,6 +1606,7 @@ impl CaptureAdapter {
                 std::mem::replace(&mut self.frame, Vec::with_capacity(MIX_SAMPLES_PER_FRAME));
             if self.tx.try_send(full_frame).is_err() {
                 tracing::warn!("dropped mic frame because network queue is full");
+                self.telemetry.record_tx_queue_drop();
             }
         }
     }
@@ -1692,6 +1764,7 @@ mod tests {
                     SAMPLES_PER_FRAME * 4,
                     SAMPLES_PER_FRAME,
                 ))),
+                latest_telemetry: Arc::new(Mutex::new(None)),
             },
             control_rx,
         )

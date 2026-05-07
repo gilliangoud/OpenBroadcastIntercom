@@ -74,6 +74,12 @@ function backendName(value) {
   return value || '-';
 }
 
+function levelText(level) {
+  const n = Number(level);
+  if (!Number.isFinite(n) || n <= 0) return '-';
+  return `${(20 * Math.log10(n)).toFixed(1)} dBFS`;
+}
+
 function locks() {
   return state?.lockout || {};
 }
@@ -332,6 +338,14 @@ function renderStatus() {
   setText('tx-label', csv(state.tx));
   setText('playback-label', `${state.playback?.available_samples ?? 0}/${state.playback?.capacity_samples ?? 0}`);
   setText('playback-drops-label', `U ${state.playback?.underflows ?? 0} / O ${state.playback?.overflows ?? 0}`);
+  const telemetry = state.telemetry || {};
+  const runtime = telemetry.runtime || {};
+  const audio = telemetry.audio || {};
+  const playbackTelemetry = telemetry.playback || {};
+  const transportTelemetry = telemetry.client_transport || {};
+  setText('telemetry-runtime-label', telemetry.runtime ? `${runtime.client_kind || 'client'} ${runtime.phase || 'running'}` : '-');
+  setText('telemetry-audio-label', telemetry.audio ? `${audio.backend || '-'} ${levelText(audio.input?.rms)}` : '-');
+  setText('telemetry-transport-label', telemetry.client_transport ? `RX ${transportTelemetry.udp_rx_packets || 0} TX ${transportTelemetry.tx_packets || 0} drop ${(transportTelemetry.malformed_packets || 0) + (transportTelemetry.decode_errors || 0) + (transportTelemetry.tx_queue_drops || 0) + (transportTelemetry.tx_send_failures || 0)}` : `U/O ${playbackTelemetry.underflows || 0}/${playbackTelemetry.overflows || 0}`);
   setText('codec-label', codecName(state.codec));
   setText('supported-label', (state.supported_codecs || []).map(codecName).join(', ') || '-');
   setText('active-buttons-label', csv(state.active_buttons));

@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use common::{
     AlertId, AlertStatus, AlertTarget, BuildInfo, ButtonCapability, ButtonId,
-    ChannelPresenceRoster, ClientLockoutPolicy, Codec, ControlMessage, DirectCallHistoryEntry,
-    DirectCallStatus, EmergencyStatus, IfbConfig, OpusProfile, ProcessingConfig, StereoConfig,
-    TalkButtonConfig, TalkMode,
+    ChannelPresenceRoster, ClientLockoutPolicy, ClientTelemetryStatus, Codec, ControlMessage,
+    DirectCallHistoryEntry, DirectCallStatus, EmergencyStatus, IfbConfig, OpusProfile,
+    ProcessingConfig, StereoConfig, TalkButtonConfig, TalkMode,
 };
 use serde::{Deserialize, Serialize};
 
@@ -181,6 +181,7 @@ pub struct StateResponse {
     pub input_backend_note: Option<String>,
     pub macos_microphone_mode: Option<MacosMicrophoneModeStatus>,
     pub playback: PlaybackStats,
+    pub telemetry: Option<ClientTelemetryStatus>,
 }
 
 impl StateResponse {
@@ -190,6 +191,7 @@ impl StateResponse {
         input_backend: InputBackendState,
         macos_microphone_mode: Option<MacosMicrophoneModeStatus>,
         playback: PlaybackStats,
+        telemetry: Option<ClientTelemetryStatus>,
     ) -> Self {
         Self {
             build: common::current_build_info(),
@@ -228,6 +230,7 @@ impl StateResponse {
             input_backend_note: input_backend.note,
             macos_microphone_mode,
             playback,
+            telemetry,
         }
     }
 }

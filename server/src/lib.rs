@@ -3594,9 +3594,15 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
                 ),
             });
         }
-        return warnings;
     }
-    if capture.raw_clipped_samples > 0 || capture.software_clipped_samples > 0 {
+    let is_esp32 = capture.codec_config.is_some()
+        || capture.wifi.is_some()
+        || capture.memory.is_some()
+        || capture.task_stack_high_water_bytes.is_some()
+        || capture.display.is_some()
+        || capture.battery.is_some()
+        || (capture.runtime.is_none() && capture.desktop.is_none());
+    if is_esp32 && (capture.raw_clipped_samples > 0 || capture.software_clipped_samples > 0) {
         warnings.push(AdminWarning {
             user_id,
             message: format!(
@@ -3605,7 +3611,7 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.playback_underflows > 0 {
+    if is_esp32 && capture.playback_underflows > 0 {
         warnings.push(AdminWarning {
             user_id,
             message: format!(
@@ -3614,7 +3620,7 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.playback_overflows > 0 {
+    if is_esp32 && capture.playback_overflows > 0 {
         warnings.push(AdminWarning {
             user_id,
             message: format!(
@@ -3623,9 +3629,10 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.playback_i2s_gap_warnings > 0
-        || capture.playback_i2s_slow_warnings > 0
-        || capture.playback_i2s_short_warnings > 0
+    if is_esp32
+        && (capture.playback_i2s_gap_warnings > 0
+            || capture.playback_i2s_slow_warnings > 0
+            || capture.playback_i2s_short_warnings > 0)
     {
         warnings.push(AdminWarning {
             user_id,
@@ -3637,7 +3644,7 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.min_free_heap_bytes > 0 && capture.min_free_heap_bytes < 16 * 1024 {
+    if is_esp32 && capture.min_free_heap_bytes > 0 && capture.min_free_heap_bytes < 16 * 1024 {
         warnings.push(AdminWarning {
             user_id,
             message: format!(
@@ -3646,13 +3653,13 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.selected.peak > 0.92 && capture.raw_clipped_samples == 0 {
+    if is_esp32 && capture.selected.peak > 0.92 && capture.raw_clipped_samples == 0 {
         warnings.push(AdminWarning {
             user_id,
             message: "ESP32 capture is close to clipping; lower ES8388 PGA gain before using software gain".to_string(),
         });
     }
-    if capture.selected.rms < 0.003 && capture.selected.peak < 0.02 {
+    if is_esp32 && capture.selected.rms < 0.003 && capture.selected.peak < 0.02 {
         warnings.push(AdminWarning {
             user_id,
             message:
@@ -3660,13 +3667,17 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
                     .to_string(),
         });
     }
-    if capture.adc_input == "difference" && capture.capture_channel == "average" {
+    if is_esp32 && capture.adc_input == "difference" && capture.capture_channel == "average" {
         warnings.push(AdminWarning {
             user_id,
             message: "ESP32 differential mic is using average capture; this can cancel voice. Use left or right, then compare capture health.".to_string(),
         });
     }
-    if !capture.alc_enabled && capture.selected.rms < 0.02 && capture.selected.peak < 0.12 {
+    if is_esp32
+        && !capture.alc_enabled
+        && capture.selected.rms < 0.02
+        && capture.selected.peak < 0.12
+    {
         warnings.push(AdminWarning {
             user_id,
             message:
@@ -3674,7 +3685,7 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
                     .to_string(),
         });
     }
-    if capture.selected.dc_offset.abs() > 0.08 {
+    if is_esp32 && capture.selected.dc_offset.abs() > 0.08 {
         warnings.push(AdminWarning {
             user_id,
             message: format!(
@@ -3683,7 +3694,8 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.capture_channel == "left"
+    if is_esp32
+        && capture.capture_channel == "left"
         && capture.right.rms > 0.02
         && capture.left.rms < capture.right.rms * 0.35
     {
@@ -3692,7 +3704,8 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             message: "ESP32 right input is much stronger than selected left channel; try capture channel `right` or `average`".to_string(),
         });
     }
-    if capture.capture_channel == "right"
+    if is_esp32
+        && capture.capture_channel == "right"
         && capture.left.rms > 0.02
         && capture.right.rms < capture.left.rms * 0.35
     {
@@ -3700,6 +3713,46 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             user_id,
             message: "ESP32 left input is much stronger than selected right channel; try capture channel `left` or `average`".to_string(),
         });
+    }
+    if let Some(playback) = &capture.playback {
+        if playback.underflows > 0 {
+            warnings.push(AdminWarning {
+                user_id,
+                message: format!(
+                    "Client playback underflowed {} times; increase jitter/prefill or check network jitter",
+                    playback.underflows
+                ),
+            });
+        }
+        if playback.overflows > 0 {
+            warnings.push(AdminWarning {
+                user_id,
+                message: format!(
+                    "Client playback overflowed {} times; reduce jitter buffer delay or check bursty delivery",
+                    playback.overflows
+                ),
+            });
+        }
+    }
+    if let Some(transport) = &capture.client_transport {
+        if transport.malformed_packets > 0 || transport.decode_errors > 0 {
+            warnings.push(AdminWarning {
+                user_id,
+                message: format!(
+                    "Client dropped audio packets: malformed {}, decode errors {}",
+                    transport.malformed_packets, transport.decode_errors
+                ),
+            });
+        }
+        if transport.tx_queue_drops > 0 || transport.tx_send_failures > 0 {
+            warnings.push(AdminWarning {
+                user_id,
+                message: format!(
+                    "Client transmit path dropped audio: queue drops {}, send failures {}",
+                    transport.tx_queue_drops, transport.tx_send_failures
+                ),
+            });
+        }
     }
     warnings
 }
@@ -11171,6 +11224,10 @@ mod tests {
             dc_offset: selected_dc_offset,
         };
         CaptureHealthStatus {
+            runtime: None,
+            audio: None,
+            playback: None,
+            client_transport: None,
             codec_config: None,
             desktop: None,
             uptime_ms: 0,

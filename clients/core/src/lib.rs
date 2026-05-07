@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
 use std::net::{Ipv6Addr, SocketAddr, ToSocketAddrs};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1846,6 +1846,195 @@ pub struct PlaybackStats {
     pub dropped_samples: u64,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct ClientTelemetryCounters {
+    inner: Arc<ClientTelemetryCountersInner>,
+}
+
+#[derive(Debug, Default)]
+struct ClientTelemetryCountersInner {
+    udp_rx_packets: AtomicU64,
+    malformed_packets: AtomicU64,
+    decode_errors: AtomicU64,
+    codec_drops: AtomicU64,
+    payload_decode_errors: AtomicU64,
+    tx_packets: AtomicU64,
+    tx_send_failures: AtomicU64,
+    tx_queue_drops: AtomicU64,
+}
+
+impl ClientTelemetryCounters {
+    pub fn record_udp_rx_packet(&self) {
+        self.inner.udp_rx_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_malformed_packet(&self) {
+        self.inner.malformed_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_decode_error(&self) {
+        self.inner.decode_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_codec_drop(&self) {
+        self.inner.codec_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_payload_decode_error(&self) {
+        self.inner
+            .payload_decode_errors
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tx_packet(&self) {
+        self.inner.tx_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tx_send_failure(&self) {
+        self.inner.tx_send_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tx_queue_drop(&self) {
+        self.inner.tx_queue_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> common::ClientTelemetryTransportStatus {
+        common::ClientTelemetryTransportStatus {
+            udp_rx_packets: self.inner.udp_rx_packets.load(Ordering::Relaxed),
+            malformed_packets: self.inner.malformed_packets.load(Ordering::Relaxed),
+            decode_errors: self.inner.decode_errors.load(Ordering::Relaxed),
+            codec_drops: self.inner.codec_drops.load(Ordering::Relaxed),
+            payload_decode_errors: self.inner.payload_decode_errors.load(Ordering::Relaxed),
+            tx_packets: self.inner.tx_packets.load(Ordering::Relaxed),
+            tx_send_failures: self.inner.tx_send_failures.load(Ordering::Relaxed),
+            tx_queue_drops: self.inner.tx_queue_drops.load(Ordering::Relaxed),
+        }
+    }
+}
+
+pub fn playback_telemetry_from_stats(
+    stats: PlaybackStats,
+) -> common::ClientTelemetryPlaybackStatus {
+    common::ClientTelemetryPlaybackStatus {
+        available_samples: stats.available_samples as u64,
+        capacity_samples: stats.capacity_samples as u64,
+        prebuffer_samples: stats.prebuffer_samples as u64,
+        queue_depth: stats.available_samples as u64,
+        channels: stats.channels.try_into().unwrap_or(u16::MAX),
+        started: stats.started,
+        underflows: stats.underflows,
+        overflows: stats.overflows,
+        dropped_samples: stats.dropped_samples,
+    }
+}
+
+pub fn capture_health_with_client_telemetry(
+    mut health: common::CaptureHealthStatus,
+    client_kind: impl Into<String>,
+    playback: PlaybackStats,
+    transport: common::ClientTelemetryTransportStatus,
+    phase: impl Into<String>,
+    last_error: Option<String>,
+) -> common::CaptureHealthStatus {
+    let client_kind = client_kind.into();
+    let phase = phase.into();
+    let playback_telemetry = playback_telemetry_from_stats(playback);
+    health.runtime = Some(common::ClientTelemetryRuntimeStatus {
+        client_kind,
+        phase,
+        last_error,
+    });
+    health.playback_queue_depth = playback_telemetry
+        .queue_depth
+        .try_into()
+        .unwrap_or(u16::MAX);
+    health.playback_underflows = playback_telemetry.underflows.try_into().unwrap_or(u32::MAX);
+    health.playback_overflows = playback_telemetry.overflows.try_into().unwrap_or(u32::MAX);
+    health.playback = Some(playback_telemetry);
+    health.client_transport = Some(transport);
+
+    if health.audio.is_none() {
+        health.audio = health
+            .desktop
+            .as_ref()
+            .map(desktop_capture_audio_telemetry)
+            .or_else(|| {
+                Some(common::ClientTelemetryAudioStatus {
+                    backend: health
+                        .codec_config
+                        .as_ref()
+                        .map(|config| config.audio_backend.clone())
+                        .filter(|backend| !backend.is_empty())
+                        .unwrap_or_else(|| health.adc_input.clone()),
+                    input_device: None,
+                    output_device: None,
+                    sample_format: String::new(),
+                    sample_rate_hz: health
+                        .codec_config
+                        .as_ref()
+                        .map_or(0, |config| config.hardware_sample_rate_hz),
+                    channels: health
+                        .codec_config
+                        .as_ref()
+                        .map_or(0, |config| u16::from(config.hardware_channels)),
+                    channel_mode: health.capture_channel.clone(),
+                    mic_gain: Some(f32::from(health.software_gain_percent) / 100.0),
+                    speaker_gain: None,
+                    input: health.selected.clone(),
+                    pre_gain: health.selected.clone(),
+                    post_gain: health.selected.clone(),
+                    pre_gain_clipped_samples: health.raw_clipped_samples,
+                    post_gain_clipped_samples: health.software_clipped_samples,
+                    dropped_frames: 0,
+                })
+            });
+    }
+
+    health
+}
+
+pub fn basic_client_telemetry(
+    client_kind: impl Into<String>,
+    playback: PlaybackStats,
+    transport: common::ClientTelemetryTransportStatus,
+) -> common::CaptureHealthStatus {
+    let client_kind = client_kind.into();
+    capture_health_with_client_telemetry(
+        common::CaptureHealthStatus {
+            adc_input: client_kind.clone(),
+            capture_channel: "mono".to_string(),
+            ..common::CaptureHealthStatus::default()
+        },
+        client_kind,
+        playback,
+        transport,
+        "running",
+        None,
+    )
+}
+
+fn desktop_capture_audio_telemetry(
+    desktop: &common::DesktopCaptureHealthStatus,
+) -> common::ClientTelemetryAudioStatus {
+    common::ClientTelemetryAudioStatus {
+        backend: desktop.backend.clone(),
+        input_device: Some(desktop.device.clone()).filter(|device| !device.is_empty()),
+        output_device: None,
+        sample_format: desktop.sample_format.clone(),
+        sample_rate_hz: desktop.sample_rate_hz,
+        channels: desktop.channels,
+        channel_mode: desktop.channel_mode.clone(),
+        mic_gain: Some(desktop.mic_gain),
+        speaker_gain: None,
+        input: desktop.post_gain.clone(),
+        pre_gain: desktop.pre_gain.clone(),
+        post_gain: desktop.post_gain.clone(),
+        pre_gain_clipped_samples: desktop.pre_gain_clipped_samples,
+        post_gain_clipped_samples: desktop.post_gain_clipped_samples,
+        dropped_frames: desktop.dropped_frames,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1922,6 +2111,44 @@ mod tests {
         endpoints.advanced_endpoints = false;
         normalize_endpoint_overrides(&mut endpoints);
         assert!(endpoints.advanced_endpoints);
+    }
+
+    #[test]
+    fn telemetry_builder_maps_playback_and_transport_counters() {
+        let counters = ClientTelemetryCounters::default();
+        counters.record_udp_rx_packet();
+        counters.record_malformed_packet();
+        counters.record_decode_error();
+        counters.record_tx_packet();
+        counters.record_tx_send_failure();
+        counters.record_tx_queue_drop();
+
+        let playback = PlaybackStats {
+            available_samples: 120,
+            capacity_samples: 960,
+            prebuffer_samples: 240,
+            channels: 2,
+            started: true,
+            underflows: 3,
+            overflows: 4,
+            dropped_samples: 5,
+        };
+        let health = basic_client_telemetry("pi", playback, counters.snapshot());
+
+        assert_eq!(health.runtime.unwrap().client_kind, "pi");
+        let playback = health.playback.unwrap();
+        assert_eq!(playback.available_samples, 120);
+        assert_eq!(playback.capacity_samples, 960);
+        assert_eq!(playback.underflows, 3);
+        assert_eq!(health.playback_queue_depth, 120);
+        assert_eq!(health.playback_underflows, 3);
+        let transport = health.client_transport.unwrap();
+        assert_eq!(transport.udp_rx_packets, 1);
+        assert_eq!(transport.malformed_packets, 1);
+        assert_eq!(transport.decode_errors, 1);
+        assert_eq!(transport.tx_packets, 1);
+        assert_eq!(transport.tx_send_failures, 1);
+        assert_eq!(transport.tx_queue_drops, 1);
     }
 
     #[test]

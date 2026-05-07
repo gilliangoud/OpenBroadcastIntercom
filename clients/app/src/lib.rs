@@ -799,7 +799,9 @@ mod mobile {
 
     use anyhow::Context;
     use client_core::{ClientAudioBackend, ClientEndpointOverrides, ClientRuntimePhase};
-    use common::{AlertId, ButtonId, Codec, TalkMode};
+    use common::{
+        AlertId, ButtonId, CaptureHealthStatus, ClientTelemetryRuntimeStatus, Codec, TalkMode,
+    };
     use serde::Serialize;
     use tauri::Manager;
     use tokio::sync::oneshot;
@@ -1160,11 +1162,54 @@ mod mobile {
             })
     }
 
+    fn mobile_runtime_phase_name(phase: ClientRuntimePhase) -> &'static str {
+        match phase {
+            ClientRuntimePhase::Stopped => "stopped",
+            ClientRuntimePhase::Starting => "starting",
+            ClientRuntimePhase::Running => "running",
+            ClientRuntimePhase::Failed => "failed",
+        }
+    }
+
     #[tauri::command]
     fn client_state(
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::StateResponse, String> {
-        Ok(mobile_runtime_api(&state)?.state())
+        let (api, phase, last_error) = {
+            let mut runtime_state = state
+                .runtime
+                .lock()
+                .map_err(|_| "mobile runtime state is poisoned".to_string())?;
+            refresh_mobile_runtime_state(&mut runtime_state);
+            let api = runtime_state
+                .runtime
+                .as_ref()
+                .map(|runtime| runtime.api.clone())
+                .ok_or_else(|| {
+                    runtime_state
+                        .last_error
+                        .clone()
+                        .unwrap_or_else(|| "mobile client is not running".to_string())
+                })?;
+            (api, runtime_state.phase, runtime_state.last_error.clone())
+        };
+        let mut response = api.state();
+        let runtime = ClientTelemetryRuntimeStatus {
+            client_kind: "mobile".to_string(),
+            phase: mobile_runtime_phase_name(phase).to_string(),
+            last_error,
+        };
+        if let Some(telemetry) = response.telemetry.as_mut() {
+            telemetry.runtime = Some(runtime);
+        } else {
+            response.telemetry = Some(CaptureHealthStatus {
+                runtime: Some(runtime),
+                adc_input: "mobile".to_string(),
+                capture_channel: "mobile".to_string(),
+                ..CaptureHealthStatus::default()
+            });
+        }
+        Ok(response)
     }
 
     #[tauri::command]

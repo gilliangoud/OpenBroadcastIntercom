@@ -306,7 +306,7 @@ function userRows() {
 }
 function healthText(s) {
   const parts = [];
-  if (s.transport?.source_frame_drops) parts.push(`${s.transport.source_frame_drops} drops`);
+  if (s.transport?.source_frames_dropped) parts.push(`${s.transport.source_frames_dropped} drops`);
   if (s.transport?.malformed_packets) parts.push(`${s.transport.malformed_packets} malformed`);
   if ((s.role || '') === 'bridge' && !s.bridge) parts.push('bridge status not reported');
   if (s.processing_status?.active) {
@@ -321,8 +321,15 @@ function healthText(s) {
     parts.push(`DSP ${(s.processing_status.engine || 'engine')} unavailable`);
   }
   if (s.output?.limiter_reduction_db > 0.1) parts.push(`limiter ${s.output.limiter_reduction_db.toFixed(1)} dB`);
+  const telemetry = s.capture?.client_transport || {};
+  const playback = s.capture?.playback || {};
+  if (telemetry.malformed_packets || telemetry.decode_errors) parts.push(`rx drops ${telemetry.malformed_packets || 0}/${telemetry.decode_errors || 0}`);
+  if (telemetry.tx_queue_drops || telemetry.tx_send_failures) parts.push(`tx drops ${telemetry.tx_queue_drops || 0}/${telemetry.tx_send_failures || 0}`);
+  if (playback.underflows || playback.overflows) parts.push(`playback U/O ${playback.underflows || 0}/${playback.overflows || 0}`);
   if (s.capture?.desktop?.post_gain_clipped_samples) parts.push(`desktop clip ${s.capture.desktop.post_gain_clipped_samples}`);
   if (s.capture?.desktop?.post_gain) parts.push(`mic ${dbfsText(s.capture.desktop.post_gain.rms)} rms`);
+  if (s.capture?.audio?.post_gain_clipped_samples && !s.capture?.desktop) parts.push(`clip ${s.capture.audio.post_gain_clipped_samples}`);
+  if (s.capture?.audio?.input && !s.capture?.desktop && !s.capture?.selected) parts.push(`mic ${dbfsText(s.capture.audio.input.rms)} rms`);
   if (!s.capture?.desktop && (s.capture?.raw_clipped_samples || s.capture?.software_clipped_samples)) parts.push(`capture clip ${s.capture.raw_clipped_samples || 0}/${s.capture.software_clipped_samples || 0}`);
   if (!s.capture?.desktop && s.capture?.selected?.dc_offset && Math.abs(s.capture.selected.dc_offset) > 0.08) parts.push(`capture DC ${pct(s.capture.selected.dc_offset)}`);
   if (s.capture?.selected && !s.capture?.desktop) parts.push(`mic ${dbfsText(s.capture.selected.rms)} rms`);
@@ -912,7 +919,7 @@ function openClientEditor(userId) {
         ${normalizationStatusText(live.processing_status?.normalization) ? `<p class="muted wide">Leveler: ${esc(normalizationStatusText(live.processing_status?.normalization))}</p>` : ''}
         ${live.processing_status?.engine_detail ? `<p class="muted wide">${esc(live.processing_status.engine_detail)}</p>` : ''}
       </fieldset>
-      <fieldset class="wide"><legend>Live Capture Health</legend>${captureHealthHtml(live)}</fieldset>
+      <fieldset class="wide"><legend>Client Telemetry</legend>${captureHealthHtml(live)}</fieldset>
       <fieldset class="wide"><legend>ESP32 Audio Hardware</legend>${esp32AudioEditorHtml()}</fieldset>
       <fieldset class="wide"><legend>Routing</legend>${editorRoutingHtml(cfg)}</fieldset>
       <fieldset class="wide"><legend>Stereo Receive</legend><label class="check"><input id="stereo-enabled" type="checkbox"> Stereo receive</label><div id="stereo-pan-wrap">${panEditorHtml(cfg)}</div></fieldset>
@@ -928,35 +935,93 @@ function openClientEditor(userId) {
 function closeModal() { selectedUser = null; modalRoot().innerHTML = ''; }
 function captureHealthHtml(live) {
   const capture = live.capture;
-  if (!capture) return '<p class="muted">No capture health reported by this client.</p>';
-  if (capture.desktop) return desktopCaptureHealthHtml(capture.desktop);
+  if (!capture) return '<p class="muted">No client telemetry reported by this client.</p>';
+  const runtime = capture.runtime || {};
+  const audio = clientAudioTelemetry(capture);
+  const playback = clientPlaybackTelemetry(capture);
+  const clientTransport = clientTransportTelemetry(capture);
   const codec = capture.codec_config;
   const sidetone = codec?.sidetone;
   const wifi = capture.wifi || {};
-  const transport = capture.transport || {};
   const memory = capture.memory || {};
   const stack = capture.task_stack_high_water_bytes || {};
   const display = capture.display || {};
   const battery = capture.battery || {};
   const row = (label, item) => `<tr><td>${esc(label)}</td><td>${meter(item?.rms, '', item?.peak)}</td><td>${esc(dbfsText(item?.rms))}</td><td>${esc(dbfsText(item?.peak))}</td><td>${esc(pct(item?.dc_offset))}</td></tr>`;
+  const platformRows = [];
+  if (capture.wifi || capture.battery) {
+    platformRows.push(`<div class="status-line"><span>RSSI ${esc(wifi.rssi_dbm ?? '-')} dBm</span><span>Wi-Fi ${wifi.connect_count || 0}/${wifi.disconnect_count || 0}</span><span>Control ${wifi.control_connect_count || 0}/${wifi.control_disconnect_count || 0}</span><span>Battery ${esc(battery.status || 'unknown')}</span></div>`);
+  }
+  if (codec) {
+    platformRows.push(`<div class="status-line"><span>Codec ${esc(codec.chip || '-')}</span><span>Active ${codecName(codec.active_codec)}</span><span>Server audio ${codec.server_control_enabled ? 'on' : 'off'}</span><span>Backend ${esc(codec.audio_backend || '-')}</span><span>HW ${esc(codec.hardware_sample_rate_hz || codec.i2s_sample_rate_hz || '-')} Hz ${esc(codec.hardware_channels || '-')}ch/${esc(codec.hardware_bits_per_sample || '-')}bit</span><span>I2S ${esc(codec.i2s_format || '-')} ${esc(codec.i2s_slot_width || '-')}</span><span>Mic SW ${esc(codec.mic_software_gain_percent ?? '-')}%</span><span>Speaker SW ${esc(codec.speaker_software_gain_percent ?? '-')}%</span><span>Notifications ${esc(codec.notification_gain_percent ?? '-')}%</span><span>ALC ${codec.alc_enabled ? 'on' : 'off'}</span><span>Gate ${codec.noise_gate_enabled ? 'on' : 'off'}</span><span>Sidetone ${esc(sidetone?.mode || 'off')}</span><span>FW monitor ${esc(sidetone?.firmware_gain_percent ?? '-')}%</span><span>Line bypass ${esc(sidetone?.codec_bypass_gain_percent ?? '-')}%</span><span>Mic bypass ${esc(sidetone?.mic_bypass_gain_percent ?? '-')}%</span><span>Bypass source ${esc(sidetone?.active_bypass_source || '-')}</span><span>Bypass keeps DAC ${sidetone?.codec_bypass_preserves_dac ? 'yes' : 'no'}</span></div>`);
+  }
+  if (capture.memory || capture.free_heap_bytes || capture.min_free_heap_bytes) {
+    platformRows.push(`<div class="status-line"><span>Heap ${memory.free_heap_bytes || capture.free_heap_bytes || 0}</span><span>Min heap ${memory.min_free_heap_bytes || capture.min_free_heap_bytes || 0}</span><span>Internal ${memory.internal_free_heap_bytes || 0}</span><span>Internal block ${memory.internal_largest_free_block_bytes || 0}</span><span>PSRAM ${memory.spiram_free_heap_bytes || 0}</span><span>PSRAM block ${memory.spiram_largest_free_block_bytes || 0}</span></div>`);
+  }
+  if (capture.task_stack_high_water_bytes) {
+    platformRows.push(`<div class="status-line"><span>Stack UDP ${stack.udp || 0}</span><span>Reg ${stack.registration || 0}</span><span>Playback ${stack.playback || 0}</span><span>Capture ${stack.capture || 0}</span><span>Buttons ${stack.buttons || 0}</span><span>Display ${stack.display || 0}</span></div>`);
+  }
+  if (capture.display) {
+    platformRows.push(`<div class="status-line"><span>Display ${display.enabled ? (display.initialized ? 'ready' : 'enabled') : 'disabled'}</span><span>FB ${display.framebuffer_bytes || 0}</span><span>FB PSRAM ${display.framebuffer_in_psram ? 'yes' : 'no'}</span></div>`);
+  }
   return `
-    <div class="status-line"><span>ADC ${esc(capture.adc_input || '-')}</span><span>PGA ${esc(capture.mic_pga_gain_db ?? '-')} dB</span><span>Channel ${esc(capture.capture_channel || '-')}</span><span>SW gain ${esc(capture.software_gain_percent ?? '-')}%</span><span>HP ${capture.high_pass_enabled ? 'on' : 'off'}</span><span>ALC ${capture.alc_enabled ? 'on' : 'off'}</span><span>Gate ${capture.noise_gate_enabled ? 'on' : 'off'}</span></div>
-    <div class="status-line"><span>Uptime ${Math.round((capture.uptime_ms || 0) / 1000)}s</span><span>RSSI ${esc(wifi.rssi_dbm ?? '-')} dBm</span><span>Wi-Fi ${wifi.connect_count || 0}/${wifi.disconnect_count || 0}</span><span>Control ${wifi.control_connect_count || 0}/${wifi.control_disconnect_count || 0}</span><span>Battery ${esc(battery.status || 'unknown')}</span></div>
-    ${codec ? `<div class="status-line"><span>Codec ${esc(codec.chip || '-')}</span><span>Active ${codecName(codec.active_codec)}</span><span>Server audio ${codec.server_control_enabled ? 'on' : 'off'}</span><span>Backend ${esc(codec.audio_backend || '-')}</span><span>HW ${esc(codec.hardware_sample_rate_hz || codec.i2s_sample_rate_hz || '-')} Hz ${esc(codec.hardware_channels || '-')}ch/${esc(codec.hardware_bits_per_sample || '-')}bit</span><span>I2S ${esc(codec.i2s_format || '-')} ${esc(codec.i2s_slot_width || '-')}</span><span>Mic SW ${esc(codec.mic_software_gain_percent ?? '-')}%</span><span>Speaker SW ${esc(codec.speaker_software_gain_percent ?? '-')}%</span><span>Notifications ${esc(codec.notification_gain_percent ?? '-')}%</span><span>ALC ${codec.alc_enabled ? 'on' : 'off'}</span><span>Gate ${codec.noise_gate_enabled ? 'on' : 'off'}</span><span>Sidetone ${esc(sidetone?.mode || 'off')}</span><span>FW monitor ${esc(sidetone?.firmware_gain_percent ?? '-')}%</span><span>Line bypass ${esc(sidetone?.codec_bypass_gain_percent ?? '-')}%</span><span>Mic bypass ${esc(sidetone?.mic_bypass_gain_percent ?? '-')}%</span><span>Bypass source ${esc(sidetone?.active_bypass_source || '-')}</span><span>Bypass keeps DAC ${sidetone?.codec_bypass_preserves_dac ? 'yes' : 'no'}</span></div>` : ''}
-    <div class="status-line"><span>Playback depth ${capture.playback_queue_depth || 0}</span><span>Playback underflows ${capture.playback_underflows || 0}</span><span>Playback overflows ${capture.playback_overflows || 0}</span></div>
-    <div class="status-line"><span>UDP RX ${transport.udp_rx_packets || 0}</span><span>Seq gaps ${transport.udp_sequence_gaps || 0}</span><span>UDP decode ${transport.udp_decode_errors || 0}</span><span>Payload decode ${transport.udp_payload_decode_errors || 0}</span><span>Codec drops ${transport.udp_codec_drops || 0}</span><span>Queue drops ${transport.audio_tx_queue_drops || 0}</span><span>Opus E/D ${transport.opus_encode_failures || 0}/${transport.opus_decode_failures || 0}</span></div>
-    <div class="status-line"><span>Heap ${memory.free_heap_bytes || capture.free_heap_bytes || 0}</span><span>Min heap ${memory.min_free_heap_bytes || capture.min_free_heap_bytes || 0}</span><span>Internal ${memory.internal_free_heap_bytes || 0}</span><span>Internal block ${memory.internal_largest_free_block_bytes || 0}</span><span>PSRAM ${memory.spiram_free_heap_bytes || 0}</span><span>PSRAM block ${memory.spiram_largest_free_block_bytes || 0}</span></div>
-    <div class="status-line"><span>Stack UDP ${stack.udp || 0}</span><span>Reg ${stack.registration || 0}</span><span>Playback ${stack.playback || 0}</span><span>Capture ${stack.capture || 0}</span><span>Buttons ${stack.buttons || 0}</span><span>Display ${stack.display || 0}</span></div>
-    <div class="status-line"><span>Display ${display.enabled ? (display.initialized ? 'ready' : 'enabled') : 'disabled'}</span><span>FB ${display.framebuffer_bytes || 0}</span><span>FB PSRAM ${display.framebuffer_in_psram ? 'yes' : 'no'}</span></div>
-    <div class="status-line"><span>TX targets ${capture.tx_target_count || 0}</span><span>TX packets ${capture.tx_packets_sent || 0}</span><span>TX failures ${capture.tx_send_failures || 0}</span><span>Raw clipped ${capture.raw_clipped_samples || 0}</span><span>Software clipped ${capture.software_clipped_samples || 0}</span></div>
-    <div class="table-wrap"><table><thead><tr><th>Input</th><th>Level</th><th>RMS</th><th>Peak</th><th>DC</th></tr></thead><tbody>${row('Left', capture.left)}${row('Right', capture.right)}${row('Selected', capture.selected)}</tbody></table></div>`;
+    <div class="status-line"><span>Kind ${esc(runtime.client_kind || live.role || 'client')}</span><span>Phase ${esc(runtime.phase || 'running')}</span><span>Uptime ${Math.round((capture.uptime_ms || 0) / 1000)}s</span>${runtime.last_error ? `<span>Error ${esc(runtime.last_error)}</span>` : ''}</div>
+    <div class="status-line"><span>Audio ${esc(audio.backend || capture.adc_input || '-')}</span><span>Input ${esc(audio.input_device || '-')}</span><span>Output ${esc(audio.output_device || '-')}</span><span>Format ${esc(audio.sample_format || '-')}</span><span>Rate ${esc(audio.sample_rate_hz || '-')} Hz</span><span>Channels ${esc(audio.channels ?? '-')}</span><span>Mode ${esc(audio.channel_mode || capture.capture_channel || '-')}</span><span>Mic gain ${audio.mic_gain == null ? '-' : Number(audio.mic_gain).toFixed(2)}</span></div>
+    <div class="status-line"><span>Playback ${playback.available_samples || playback.queue_depth || capture.playback_queue_depth || 0}/${playback.capacity_samples || '-'}</span><span>Prebuffer ${playback.prebuffer_samples ?? '-'}</span><span>Channels ${playback.channels ?? '-'}</span><span>Started ${playback.started ? 'yes' : 'no'}</span><span>Underflows ${playback.underflows || capture.playback_underflows || 0}</span><span>Overflows ${playback.overflows || capture.playback_overflows || 0}</span><span>Dropped samples ${playback.dropped_samples || 0}</span></div>
+    <div class="status-line"><span>RX ${clientTransport.udp_rx_packets || 0}</span><span>Malformed ${clientTransport.malformed_packets || 0}</span><span>Decode ${clientTransport.decode_errors || 0}</span><span>Codec drops ${clientTransport.codec_drops || 0}</span><span>Payload ${clientTransport.payload_decode_errors || 0}</span><span>TX ${clientTransport.tx_packets || capture.tx_packets_sent || 0}</span><span>TX failures ${clientTransport.tx_send_failures || capture.tx_send_failures || 0}</span><span>Queue drops ${clientTransport.tx_queue_drops || 0}</span></div>
+    ${platformRows.join('')}
+    <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Level</th><th>RMS</th><th>Peak</th><th>DC</th></tr></thead><tbody>${row('Input', audio.input)}${row('Pre gain', audio.pre_gain)}${row('Post gain', audio.post_gain)}${row('Left', capture.left)}${row('Right', capture.right)}${row('Selected', capture.selected)}</tbody></table></div>`;
 }
-function desktopCaptureHealthHtml(capture) {
-  const row = (label, item) => `<tr><td>${esc(label)}</td><td>${meter(item?.rms, '', item?.peak)}</td><td>${esc(dbfsText(item?.rms))}</td><td>${esc(dbfsText(item?.peak))}</td><td>${esc(pct(item?.dc_offset))}</td></tr>`;
-  return `
-    <div class="status-line"><span>Backend ${esc(capture.backend || '-')}</span><span>Device ${esc(capture.device || '-')}</span><span>Format ${esc(capture.sample_format || '-')}</span><span>Rate ${esc(capture.sample_rate_hz || '-')} Hz</span><span>Channels ${esc(capture.channels ?? '-')}</span><span>Mode ${esc(capture.channel_mode || '-')}</span><span>Mic gain ${Number(capture.mic_gain || 0).toFixed(2)}</span></div>
-    <div class="status-line"><span>Pre-gain clipped ${capture.pre_gain_clipped_samples || 0}</span><span>Post-gain clipped ${capture.post_gain_clipped_samples || 0}</span><span>Dropped frames ${capture.dropped_frames || 0}</span></div>
-    <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Level</th><th>RMS</th><th>Peak</th><th>DC</th></tr></thead><tbody>${row('Pre gain', capture.pre_gain)}${row('Post gain', capture.post_gain)}</tbody></table></div>`;
+function clientAudioTelemetry(capture) {
+  if (capture.audio) return capture.audio;
+  if (capture.desktop) {
+    return {
+      backend: capture.desktop.backend,
+      input_device: capture.desktop.device,
+      sample_format: capture.desktop.sample_format,
+      sample_rate_hz: capture.desktop.sample_rate_hz,
+      channels: capture.desktop.channels,
+      channel_mode: capture.desktop.channel_mode,
+      mic_gain: capture.desktop.mic_gain,
+      input: capture.desktop.post_gain,
+      pre_gain: capture.desktop.pre_gain,
+      post_gain: capture.desktop.post_gain,
+      pre_gain_clipped_samples: capture.desktop.pre_gain_clipped_samples,
+      post_gain_clipped_samples: capture.desktop.post_gain_clipped_samples,
+      dropped_frames: capture.desktop.dropped_frames,
+    };
+  }
+  return {
+    backend: capture.codec_config?.audio_backend || capture.adc_input || '',
+    sample_rate_hz: capture.codec_config?.hardware_sample_rate_hz || capture.codec_config?.i2s_sample_rate_hz || 0,
+    channels: capture.codec_config?.hardware_channels || 0,
+    channel_mode: capture.capture_channel || '',
+    mic_gain: capture.software_gain_percent == null ? null : Number(capture.software_gain_percent) / 100,
+    input: capture.selected || {},
+    pre_gain: capture.selected || {},
+    post_gain: capture.selected || {},
+  };
+}
+function clientPlaybackTelemetry(capture) {
+  return capture.playback || {
+    available_samples: capture.playback_queue_depth || 0,
+    queue_depth: capture.playback_queue_depth || 0,
+    underflows: capture.playback_underflows || 0,
+    overflows: capture.playback_overflows || 0,
+  };
+}
+function clientTransportTelemetry(capture) {
+  const esp32 = capture.transport || {};
+  return capture.client_transport || {
+    udp_rx_packets: esp32.udp_rx_packets || 0,
+    malformed_packets: esp32.udp_decode_errors || 0,
+    decode_errors: esp32.opus_decode_failures || 0,
+    codec_drops: esp32.udp_codec_drops || 0,
+    payload_decode_errors: esp32.udp_payload_decode_errors || 0,
+    tx_packets: capture.tx_packets_sent || 0,
+    tx_send_failures: capture.tx_send_failures || esp32.udp_tx_send_failures || 0,
+    tx_queue_drops: esp32.audio_tx_queue_drops || 0,
+  };
 }
 function esp32AudioEditorHtml() {
   return `<div class="status-line"><span>When enabled, the server overrides runtime-changeable ESP32 menuconfig audio defaults on config update.</span></div>

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use axum::extract::Request;
@@ -19,14 +19,15 @@ use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{Parser, ValueEnum};
 use client_core::{
-    bind_tcp_listener_with_port_fallback, default_button_capabilities, format_button_ids,
-    format_buttons, format_channels, format_codec, format_volumes, load_or_create_client_uid,
-    merge_button_capabilities, parse_channels, parse_volumes, run_connection_cue_task,
-    run_control_connection, samples_for_ms, send_control_request, supported_codecs, AlertRequest,
-    AudioDecoder, AudioEncoder, AudioSettings, ClientAudioBackend, ClientAudioBackendKind,
-    ClientConfig, ClientConnectionEvent, ClientControlApi, ClientServerEndpoint, CodecRequest,
-    ControlRequest, FullConfigRequest, GainRequest, InputBackendState, MacosMicrophoneModeStatus,
-    OkResponse, PlaybackBuffer, StateResponse, TalkModeRequest, DEFAULT_CLIENT_BUTTON_COUNT,
+    bind_tcp_listener_with_port_fallback, capture_health_with_client_telemetry,
+    default_button_capabilities, format_button_ids, format_buttons, format_channels, format_codec,
+    format_volumes, load_or_create_client_uid, merge_button_capabilities, parse_channels,
+    parse_volumes, run_connection_cue_task, run_control_connection, samples_for_ms,
+    send_control_request, supported_codecs, AlertRequest, AudioDecoder, AudioEncoder,
+    AudioSettings, ClientAudioBackend, ClientAudioBackendKind, ClientConfig, ClientConnectionEvent,
+    ClientControlApi, ClientServerEndpoint, ClientTelemetryCounters, CodecRequest, ControlRequest,
+    FullConfigRequest, GainRequest, InputBackendState, MacosMicrophoneModeStatus, OkResponse,
+    PlaybackBuffer, StateResponse, TalkModeRequest, DEFAULT_CLIENT_BUTTON_COUNT,
     DEFAULT_CONTROL_PORT, DEFAULT_SERVER_HOST, MAX_CLIENT_BUTTON_COUNT,
 };
 use common::{
@@ -461,6 +462,8 @@ pub async fn run_until_shutdown_with_local_api(
     let input_backend_status =
         Arc::new(Mutex::new(InputBackendStatus::starting(args.input_backend)));
     let capture_diagnostics = CaptureDiagnostics::new(args.input_channel);
+    let telemetry_counters = ClientTelemetryCounters::default();
+    let latest_telemetry = Arc::new(Mutex::new(None));
     let debug_audio_tap = args
         .debug_audio_dir
         .clone()
@@ -475,6 +478,7 @@ pub async fn run_until_shutdown_with_local_api(
         input_silence_gate: true,
         processing_settings: Arc::clone(&capture_processing_settings),
         diagnostics: Some(capture_diagnostics.clone()),
+        telemetry: Some(telemetry_counters.clone()),
         debug_audio_tap: debug_audio_tap.clone(),
     };
     let runtime_config = Arc::new(Mutex::new(ClientConfig {
@@ -549,12 +553,29 @@ pub async fn run_until_shutdown_with_local_api(
     }
     let capture_health_control_tx = control_tx.clone();
     let capture_health_diagnostics = capture_diagnostics.clone();
+    let capture_health_playback = Arc::clone(&playback);
+    let capture_health_telemetry = telemetry_counters.clone();
+    let capture_health_latest = Arc::clone(&latest_telemetry);
+    let telemetry_started_at = Instant::now();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
-            let health = capture_health_diagnostics.snapshot();
+            let mut health = capture_health_with_client_telemetry(
+                capture_health_diagnostics.snapshot(),
+                "desktop",
+                capture_health_playback.lock().unwrap().stats(),
+                capture_health_telemetry.snapshot(),
+                "running",
+                None,
+            );
+            health.uptime_ms = telemetry_started_at
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            *capture_health_latest.lock().unwrap() = Some(health.clone());
             if let Err(err) = queue_control_message(
                 &capture_health_control_tx,
                 ControlMessage::CaptureHealth { user_id, health },
@@ -571,6 +592,7 @@ pub async fn run_until_shutdown_with_local_api(
         audio_settings: Arc::clone(&audio_settings),
         input_backend_status: Arc::clone(&input_backend_status),
         playback: Arc::clone(&playback),
+        latest_telemetry: Arc::clone(&latest_telemetry),
     };
     if let Some(local_api_tx) = local_api_tx {
         let _ = local_api_tx.send(local_api.clone());
@@ -686,6 +708,7 @@ pub async fn run_until_shutdown_with_local_api(
 
     let send_socket = Arc::clone(&socket);
     let send_config = Arc::clone(&runtime_config);
+    let send_telemetry = telemetry_counters.clone();
     let send_task = tokio::spawn(async move {
         let seq = AtomicU16::new(0);
         let timestamp = AtomicU32::new(0);
@@ -737,6 +760,7 @@ pub async fn run_until_shutdown_with_local_api(
             let payload = match audio_encoder.encode(&frame) {
                 Ok(payload) => payload,
                 Err(err) => {
+                    send_telemetry.record_codec_drop();
                     tracing::warn!(codec = ?current_codec, %err, "failed to encode mic frame");
                     continue;
                 }
@@ -755,17 +779,20 @@ pub async fn run_until_shutdown_with_local_api(
                     payload: payload.clone(),
                 };
                 if let Err(err) = packet.encode(&mut encoded) {
+                    send_telemetry.record_payload_decode_error();
                     tracing::warn!(%err, "failed to encode audio packet");
                     continue;
                 }
                 match send_socket.send(&encoded).await {
                     Ok(_) => {
+                        send_telemetry.record_tx_packet();
                         if send_error_logged {
                             tracing::info!("audio UDP send recovered");
                             send_error_logged = false;
                         }
                     }
                     Err(err) => {
+                        send_telemetry.record_tx_send_failure();
                         if !send_error_logged {
                             tracing::warn!(%err, "audio UDP send failed; keeping client alive");
                             send_error_logged = true;
@@ -795,6 +822,7 @@ pub async fn run_until_shutdown_with_local_api(
     let recv_socket = Arc::clone(&socket);
     let recv_playback = Arc::clone(&playback);
     let recv_config = Arc::clone(&runtime_config);
+    let recv_telemetry = telemetry_counters.clone();
     let recv_task = tokio::spawn(async move {
         let mut buf = vec![0_u8; common::MAX_PACKET_BYTES];
         let mut audio_decoder = AudioDecoder::default();
@@ -818,8 +846,12 @@ pub async fn run_until_shutdown_with_local_api(
                 }
             };
             let packet = match AudioPacket::decode(&buf[..len]) {
-                Ok(packet) => packet,
+                Ok(packet) => {
+                    recv_telemetry.record_udp_rx_packet();
+                    packet
+                }
                 Err(err) => {
+                    recv_telemetry.record_malformed_packet();
                     tracing::warn!(%err, "dropped malformed incoming packet");
                     continue;
                 }
@@ -843,6 +875,7 @@ pub async fn run_until_shutdown_with_local_api(
             ) {
                 Ok(samples) => samples,
                 Err(err) => {
+                    recv_telemetry.record_decode_error();
                     tracing::warn!(codec = ?packet.codec, %err, "dropped invalid audio payload");
                     continue;
                 }
@@ -893,6 +926,7 @@ pub struct LocalClientApi {
     audio_settings: Arc<AudioSettings>,
     input_backend_status: Arc<Mutex<InputBackendStatus>>,
     playback: Arc<Mutex<PlaybackBuffer>>,
+    latest_telemetry: Arc<Mutex<Option<CaptureHealthStatus>>>,
 }
 
 type ApiState = LocalClientApi;
@@ -942,6 +976,7 @@ impl LocalClientApi {
     pub fn state(&self) -> StateResponse {
         let snapshot = self.config.lock().unwrap().clone();
         let playback = self.playback.lock().unwrap().stats();
+        let telemetry = self.latest_telemetry.lock().unwrap().clone();
         let input_backend_status = self.input_backend_status.lock().unwrap().clone();
         StateResponse::from_runtime_state(
             &snapshot,
@@ -949,6 +984,7 @@ impl LocalClientApi {
             input_backend_status.to_client_core(),
             macos_microphone_mode_status(),
             playback,
+            telemetry,
         )
     }
 
@@ -2413,6 +2449,7 @@ struct CapturePipelineOptions {
     input_silence_gate: bool,
     processing_settings: Arc<CaptureProcessingSettings>,
     diagnostics: Option<CaptureDiagnostics>,
+    telemetry: Option<ClientTelemetryCounters>,
     debug_audio_tap: Option<DesktopDebugAudioTap>,
 }
 
@@ -2588,6 +2625,10 @@ impl CaptureDiagnostics {
         let software_gain_percent = (mic_gain * 100.0).round().clamp(0.0, u16::MAX as f32) as u16;
 
         CaptureHealthStatus {
+            runtime: None,
+            audio: None,
+            playback: None,
+            client_transport: None,
             codec_config: None,
             desktop: Some(DesktopCaptureHealthStatus {
                 backend: format!("{:?}", source.backend),
@@ -2603,6 +2644,13 @@ impl CaptureDiagnostics {
                 post_gain_clipped_samples: post_gain.clipped_samples,
                 dropped_frames,
             }),
+            uptime_ms: 0,
+            wifi: None,
+            transport: None,
+            memory: None,
+            task_stack_high_water_bytes: None,
+            display: None,
+            battery: None,
             playback_queue_depth: 0,
             playback_underflows: 0,
             playback_overflows: 0,
@@ -2757,6 +2805,7 @@ struct CaptureAdapter {
     frame_pre_gain_stats: CaptureStats,
     frame_post_gain_stats: CaptureStats,
     diagnostics: Option<CaptureDiagnostics>,
+    telemetry: Option<ClientTelemetryCounters>,
     debug_audio_tap: Option<DesktopDebugAudioTap>,
 }
 
@@ -2799,6 +2848,7 @@ impl CaptureAdapter {
             frame_pre_gain_stats: CaptureStats::default(),
             frame_post_gain_stats: CaptureStats::default(),
             diagnostics: options.diagnostics,
+            telemetry: options.telemetry,
             debug_audio_tap: options.debug_audio_tap,
         }
     }
@@ -2971,6 +3021,9 @@ impl CaptureAdapter {
             let dropped = self.tx.try_send(full_frame.clone()).is_err();
             if dropped {
                 tracing::warn!("dropped mic frame because network queue is full");
+                if let Some(telemetry) = &self.telemetry {
+                    telemetry.record_tx_queue_drop();
+                }
             }
             if let Some(tap) = &self.debug_audio_tap {
                 let _ = tap.tx.try_send(DesktopDebugAudioFrame {
@@ -3388,6 +3441,7 @@ mod tests {
                     SAMPLES_PER_FRAME * 4,
                     SAMPLES_PER_FRAME,
                 ))),
+                latest_telemetry: Arc::new(Mutex::new(None)),
             },
             control_rx,
         )
@@ -3561,6 +3615,7 @@ mod tests {
                 input_silence_gate: false,
                 processing_settings: test_capture_processing_settings(),
                 diagnostics: Some(diagnostics.clone()),
+                telemetry: None,
                 debug_audio_tap: None,
             },
         );
@@ -3592,6 +3647,7 @@ mod tests {
                 input_silence_gate: false,
                 processing_settings: test_capture_processing_settings(),
                 diagnostics: Some(diagnostics.clone()),
+                telemetry: None,
                 debug_audio_tap: None,
             },
         );
@@ -3624,6 +3680,7 @@ mod tests {
                     ..ProcessingConfig::default()
                 })),
                 diagnostics: None,
+                telemetry: None,
                 debug_audio_tap: None,
             },
         );
@@ -3659,6 +3716,7 @@ mod tests {
                     ..ProcessingConfig::default()
                 })),
                 diagnostics: None,
+                telemetry: None,
                 debug_audio_tap: None,
             },
         );

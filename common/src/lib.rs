@@ -858,6 +858,14 @@ pub struct Esp32CodecConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CaptureHealthStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<ClientTelemetryRuntimeStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<ClientTelemetryAudioStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback: Option<ClientTelemetryPlaybackStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_transport: Option<ClientTelemetryTransportStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codec_config: Option<Esp32CodecConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop: Option<DesktopCaptureHealthStatus>,
@@ -911,6 +919,94 @@ pub struct CaptureHealthStatus {
     pub selected: CaptureChannelHealth,
     pub raw_clipped_samples: u32,
     pub software_clipped_samples: u32,
+}
+
+pub type ClientTelemetryStatus = CaptureHealthStatus;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientTelemetryRuntimeStatus {
+    #[serde(default)]
+    pub client_kind: String,
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ClientTelemetryAudioStatus {
+    #[serde(default)]
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_device: Option<String>,
+    #[serde(default)]
+    pub sample_format: String,
+    #[serde(default)]
+    pub sample_rate_hz: u32,
+    #[serde(default)]
+    pub channels: u16,
+    #[serde(default)]
+    pub channel_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_gain: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_gain: Option<f32>,
+    #[serde(default)]
+    pub input: CaptureChannelHealth,
+    #[serde(default)]
+    pub pre_gain: CaptureChannelHealth,
+    #[serde(default)]
+    pub post_gain: CaptureChannelHealth,
+    #[serde(default)]
+    pub pre_gain_clipped_samples: u32,
+    #[serde(default)]
+    pub post_gain_clipped_samples: u32,
+    #[serde(default)]
+    pub dropped_frames: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientTelemetryPlaybackStatus {
+    #[serde(default)]
+    pub available_samples: u64,
+    #[serde(default)]
+    pub capacity_samples: u64,
+    #[serde(default)]
+    pub prebuffer_samples: u64,
+    #[serde(default)]
+    pub queue_depth: u64,
+    #[serde(default)]
+    pub channels: u16,
+    #[serde(default)]
+    pub started: bool,
+    #[serde(default)]
+    pub underflows: u64,
+    #[serde(default)]
+    pub overflows: u64,
+    #[serde(default)]
+    pub dropped_samples: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientTelemetryTransportStatus {
+    #[serde(default)]
+    pub udp_rx_packets: u64,
+    #[serde(default)]
+    pub malformed_packets: u64,
+    #[serde(default)]
+    pub decode_errors: u64,
+    #[serde(default)]
+    pub codec_drops: u64,
+    #[serde(default)]
+    pub payload_decode_errors: u64,
+    #[serde(default)]
+    pub tx_packets: u64,
+    #[serde(default)]
+    pub tx_send_failures: u64,
+    #[serde(default)]
+    pub tx_queue_drops: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -2134,6 +2230,10 @@ mod tests {
         );
 
         let health = CaptureHealthStatus {
+            runtime: None,
+            audio: None,
+            playback: None,
+            client_transport: None,
             codec_config: Some(Esp32CodecConfig {
                 chip: "es8388".to_string(),
                 active_codec: Some(Codec::Pcm16),
@@ -2261,6 +2361,44 @@ mod tests {
             serde_json::from_str::<CaptureHealthStatus>(&serde_json::to_string(&health).unwrap())
                 .unwrap(),
             health
+        );
+        let generic = CaptureHealthStatus {
+            runtime: Some(ClientTelemetryRuntimeStatus {
+                client_kind: "pi".to_string(),
+                phase: "running".to_string(),
+                last_error: None,
+            }),
+            playback: Some(ClientTelemetryPlaybackStatus {
+                available_samples: 120,
+                capacity_samples: 960,
+                prebuffer_samples: 240,
+                queue_depth: 120,
+                channels: 2,
+                started: true,
+                underflows: 1,
+                overflows: 2,
+                dropped_samples: 3,
+            }),
+            client_transport: Some(ClientTelemetryTransportStatus {
+                udp_rx_packets: 4,
+                malformed_packets: 5,
+                decode_errors: 6,
+                codec_drops: 7,
+                payload_decode_errors: 8,
+                tx_packets: 9,
+                tx_send_failures: 10,
+                tx_queue_drops: 11,
+            }),
+            adc_input: "pi".to_string(),
+            capture_channel: "mono".to_string(),
+            ..CaptureHealthStatus::default()
+        };
+        assert_eq!(
+            serde_json::from_str::<ClientTelemetryStatus>(
+                &serde_json::to_string(&generic).unwrap()
+            )
+            .unwrap(),
+            generic
         );
         let legacy_codec_config = serde_json::from_str::<Esp32CodecConfig>(
             r#"{
