@@ -32,6 +32,7 @@
     name: 'http',
     capabilities: {
       setup: mobileShell(),
+      runtimeSettings: !mobileShell(),
       gain: true,
       macosMicrophoneModes: true
     },

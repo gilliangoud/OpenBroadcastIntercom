@@ -9,6 +9,33 @@ let expandedChannels = new Set();
 let regularTalkDown = false;
 let selectedChannelId = null;
 let suppressNextChannelClick = false;
+const CHANNEL_VIEW_STORAGE_KEY = 'intercom.operator.showAllChannels';
+let showAllChannels = readChannelViewPreference();
+
+function readChannelViewPreference() {
+  try {
+    return localStorage.getItem(CHANNEL_VIEW_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeChannelViewPreference(value) {
+  try {
+    localStorage.setItem(CHANNEL_VIEW_STORAGE_KEY, value ? '1' : '0');
+  } catch {
+    // Local storage can be unavailable in locked-down embedded webviews.
+  }
+}
+
+function setShowAllChannels(value) {
+  showAllChannels = !!value;
+  writeChannelViewPreference(showAllChannels);
+  if ($('show-all-channels')) $('show-all-channels').checked = showAllChannels;
+  if (!state) return;
+  renderChannels();
+  renderStatus();
+}
 
 function message(text, kind = 'ok') {
   const el = $('message');
@@ -46,9 +73,14 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
-function sortedNumbers(values) {
-  return [...new Set((values || []).map(Number).filter(v => Number.isInteger(v) && v > 0))]
+function sortedNumbers(values, { allowZero = false } = {}) {
+  const minimum = allowZero ? 0 : 1;
+  return [...new Set((values || []).map(Number).filter(v => Number.isInteger(v) && v >= minimum))]
     .sort((a, b) => a - b);
+}
+
+function sortedChannels(values) {
+  return sortedNumbers(values, { allowZero: true });
 }
 
 function codecName(codec) {
@@ -154,6 +186,17 @@ function allRouteChannels() {
   return [...ids].sort((a, b) => a - b);
 }
 
+function allConfiguredChannels() {
+  const ids = new Set((state?.channel_rosters || []).map(roster => Number(roster.channel_id)));
+  return sortedChannels([...ids]);
+}
+
+function displayedChannels() {
+  const assigned = allRouteChannels();
+  if (!showAllChannels) return assigned;
+  return sortedChannels([...new Set([...assigned, ...allConfiguredChannels()])]);
+}
+
 function rosterForChannel(id) {
   return (state?.channel_rosters || []).find(roster => roster.channel_id === id);
 }
@@ -174,6 +217,12 @@ function rosterNameForUser(id) {
 function displayNameForUser(id, preferredName) {
   const name = String(preferredName || rosterNameForUser(id) || '').trim();
   return name || `Client ${id}`;
+}
+
+function assignedClientLabel() {
+  const userId = state?.user_id ?? '-';
+  const name = String(state?.name || '').trim();
+  return name ? `User ID ${userId} - ${name}` : `User ID ${userId}`;
 }
 
 function directCallName(call, side) {
@@ -224,6 +273,35 @@ function applyButtonColor(button, config) {
   button.style.setProperty('--button-ink', readableTextColor(color));
 }
 
+function bindPressHold(button, press, release) {
+  let activePointerId = null;
+  const finish = event => {
+    if (activePointerId === null) return;
+    if (event?.pointerId !== undefined && event.pointerId !== activePointerId) return;
+    event?.preventDefault?.();
+    activePointerId = null;
+    document.removeEventListener('pointerup', finish, true);
+    document.removeEventListener('pointercancel', finish, true);
+    window.removeEventListener('blur', finish, true);
+    window.removeEventListener('pagehide', finish, true);
+    release();
+  };
+  button.onpointerdown = event => {
+    if (event.button && event.button !== 0) return;
+    if (button.disabled || activePointerId !== null) return;
+    event.preventDefault();
+    activePointerId = event.pointerId;
+    button.setPointerCapture?.(event.pointerId);
+    document.addEventListener('pointerup', finish, true);
+    document.addEventListener('pointercancel', finish, true);
+    window.addEventListener('blur', finish, true);
+    window.addEventListener('pagehide', finish, true);
+    press();
+  };
+  button.onpointerup = finish;
+  button.onpointercancel = finish;
+}
+
 function syncDockPadding() {
   const shell = document.querySelector('.phone-shell');
   const dock = document.querySelector('.bottom-dock');
@@ -234,14 +312,14 @@ function syncDockPadding() {
 function cloneDraftFromState() {
   const ifb = state?.ifb || { enabled: false, program: [], interrupt: [], duck_gain: 0.125 };
   draft = {
-    listen: sortedNumbers(state?.listen),
-    tx: sortedNumbers(state?.tx),
+    listen: sortedChannels(state?.listen),
+    tx: sortedChannels(state?.tx),
     vol: { ...(state?.vol || {}) },
     talker_vol: { ...(state?.talker_vol || {}) },
     ifb: {
       enabled: !!ifb.enabled,
-      program: sortedNumbers(ifb.program),
-      interrupt: sortedNumbers(ifb.interrupt),
+      program: sortedChannels(ifb.program),
+      interrupt: sortedChannels(ifb.interrupt),
       duck_gain: ifb.duck_gain ?? 0.125
     }
   };
@@ -256,11 +334,16 @@ function markDirty() {
   dirty = true;
 }
 
-function addNumberTo(list, value) {
+function addNumberTo(list, value, { allowZero = false } = {}) {
   const n = Number(value);
-  if (Number.isInteger(n) && n > 0 && !list.includes(n)) list.push(n);
+  const minimum = allowZero ? 0 : 1;
+  if (Number.isInteger(n) && n >= minimum && !list.includes(n)) list.push(n);
   list.sort((a, b) => a - b);
   markDirty();
+}
+
+function addChannelTo(list, value) {
+  addNumberTo(list, value, { allowZero: true });
 }
 
 function removeNumberFrom(list, value) {
@@ -311,7 +394,7 @@ function allDraftChannels() {
       for (const ch of action.channels || []) ids.add(ch);
     }
   }
-  return sortedNumbers([...ids]);
+  return sortedChannels([...ids]);
 }
 
 async function refresh() {
@@ -352,6 +435,7 @@ function renderStatus() {
   }
   setText('operator-state', activeChannels.length ? 'Talking' : state.talk_mode === 'muted' ? 'Muted' : 'Ready');
   setText('client-title', state.name ? `${state.user_id} ${state.name}` : `Client ${state.user_id}`);
+  setText('identity-card-value', assignedClientLabel());
   setText(
     'connection-label',
     state.talk_mode === 'muted'
@@ -383,6 +467,12 @@ function renderStatus() {
   setText('lockout-label', lockedLabels().join(', ') || 'none');
   setText('route-summary', `${(state.listen || []).length} listen / ${activeChannels.length} talking`);
   setText('button-summary', `${(state.buttons || []).length} available`);
+  const channelViewToggle = $('channel-view-toggle');
+  if (channelViewToggle) {
+    channelViewToggle.textContent = showAllChannels ? 'All' : 'Assigned';
+    channelViewToggle.title = showAllChannels ? 'Showing all server channels' : 'Showing assigned channels only';
+    channelViewToggle.setAttribute('aria-pressed', showAllChannels ? 'true' : 'false');
+  }
 
   const lockout = lockedLabels();
   const strip = $('lockout-strip');
@@ -407,9 +497,9 @@ function renderChannels() {
   if (!box) return;
   box.innerHTML = '';
   const talking = activeTalkChannels();
-  const ids = allRouteChannels();
+  const ids = displayedChannels();
   if (!ids.length) {
-    box.innerHTML = '<span class="muted">No channels configured.</span>';
+    box.innerHTML = `<span class="muted">${showAllChannels ? 'No server channels available.' : 'No assigned channels configured.'}</span>`;
     return;
   }
   for (const id of ids) {
@@ -480,7 +570,7 @@ function openChannelSettings(id) {
 }
 
 function renderChannelSettings() {
-  if (!selectedChannelId) return;
+  if (selectedChannelId === null) return;
   const d = ensureDraft();
   setText('channel-settings-title', channelName(selectedChannelId));
   setText('channel-settings-legend', `Channel ${selectedChannelId}`);
@@ -495,18 +585,18 @@ function renderChannelSettings() {
 }
 
 async function saveChannelSettings() {
-  if (!selectedChannelId) return;
+  if (selectedChannelId === null) return;
   const d = ensureDraft();
   const ch = selectedChannelId;
-  $('channel-listen-toggle')?.checked ? addNumberTo(d.listen, ch) : removeNumberFrom(d.listen, ch);
-  $('channel-tx-toggle')?.checked ? addNumberTo(d.tx, ch) : removeNumberFrom(d.tx, ch);
+  $('channel-listen-toggle')?.checked ? addChannelTo(d.listen, ch) : removeNumberFrom(d.listen, ch);
+  $('channel-tx-toggle')?.checked ? addChannelTo(d.tx, ch) : removeNumberFrom(d.tx, ch);
   d.vol[ch] = Number($('channel-gain-input')?.value ?? d.vol[ch] ?? 1);
   await saveConfig();
   closeModal('channel-settings-modal');
 }
 
 async function removeSelectedChannel() {
-  if (!selectedChannelId) return;
+  if (selectedChannelId === null) return;
   const d = ensureDraft();
   const ch = selectedChannelId;
   removeNumberFrom(d.listen, ch);
@@ -625,6 +715,7 @@ function fillForms() {
   if ($('priority-input')) $('priority-input').checked = !!state.priority;
   if ($('mic-gain-input')) $('mic-gain-input').value = state.mic_gain ?? 1;
   if ($('speaker-gain-input')) $('speaker-gain-input').value = state.speaker_gain ?? 1;
+  if ($('show-all-channels')) $('show-all-channels').checked = showAllChannels;
   if ($('ifb-enabled')) $('ifb-enabled').checked = !!draft.ifb.enabled;
   if ($('ifb-duck-gain')) $('ifb-duck-gain').value = draft.ifb.duck_gain;
   showGainValues();
@@ -666,20 +757,20 @@ function renderRouteEditor() {
   for (const ch of channels) {
     const row = document.createElement('div');
     row.className = 'config-row';
-    row.innerHTML = `<div class="config-row-head"><span class="config-title">Channel ${ch}</span><button data-route-remove="${ch}" type="button">Remove</button></div><div class="config-controls"><label class="pill-toggle"><input data-route-listen="${ch}" type="checkbox" ${d.listen.includes(ch) ? 'checked' : ''}> Listen</label><label class="pill-toggle"><input data-route-tx="${ch}" type="checkbox" ${d.tx.includes(ch) ? 'checked' : ''}> Regular TX</label><label>Receive Gain<input data-route-gain="${ch}" type="number" min="0" max="4" step="0.05" value="${d.vol[ch] ?? 1}"></label></div>`;
+    row.innerHTML = `<div class="config-row-head"><span class="config-title">Channel ${ch}</span><button data-route-remove="${ch}" type="button">Remove</button></div><div class="config-controls"><label class="pill-toggle"><input data-route-listen="${ch}" type="checkbox" ${d.listen.includes(ch) ? 'checked' : ''}> Listen</label><label class="pill-toggle"><input data-route-tx="${ch}" type="checkbox" ${d.tx.includes(ch) ? 'checked' : ''}> Regular TX</label><label>Receive Gain<input data-route-gain="${ch}" type="number" min="0" max="2" step="0.05" value="${d.vol[ch] ?? 1}"></label></div>`;
     box.appendChild(row);
   }
   box.querySelectorAll('[data-route-listen]').forEach(input => {
     input.onchange = () => {
       const ch = Number(input.dataset.routeListen);
-      input.checked ? addNumberTo(d.listen, ch) : removeNumberFrom(d.listen, ch);
+      input.checked ? addChannelTo(d.listen, ch) : removeNumberFrom(d.listen, ch);
       renderRouteEditor();
     };
   });
   box.querySelectorAll('[data-route-tx]').forEach(input => {
     input.onchange = () => {
       const ch = Number(input.dataset.routeTx);
-      input.checked ? addNumberTo(d.tx, ch) : removeNumberFrom(d.tx, ch);
+      input.checked ? addChannelTo(d.tx, ch) : removeNumberFrom(d.tx, ch);
       renderRouteEditor();
     };
   });
@@ -715,7 +806,7 @@ function renderTalkerGainEditor() {
   for (const id of talkers) {
     const row = document.createElement('div');
     row.className = 'config-row';
-    row.innerHTML = `<div class="config-row-head"><span class="config-title">Talker ${id}</span><button data-talker-remove="${id}" type="button">Remove</button></div><label>Gain<input data-talker-gain="${id}" type="number" min="0" max="4" step="0.05" value="${d.talker_vol[id] ?? 1}"></label>`;
+    row.innerHTML = `<div class="config-row-head"><span class="config-title">Talker ${id}</span><button data-talker-remove="${id}" type="button">Remove</button></div><label>Gain<input data-talker-gain="${id}" type="number" min="0" max="2" step="0.05" value="${d.talker_vol[id] ?? 1}"></label>`;
     box.appendChild(row);
   }
   box.querySelectorAll('[data-talker-gain]').forEach(input => {
@@ -737,7 +828,7 @@ function renderIfbEditor() {
   const d = ensureDraft();
   const box = $('ifb-editor');
   if (!box) return;
-  const channels = sortedNumbers([...d.ifb.program, ...d.ifb.interrupt]);
+  const channels = sortedChannels([...d.ifb.program, ...d.ifb.interrupt]);
   if (!channels.length) {
     box.innerHTML = '<span class="muted">No IFB program or interrupt channels.</span>';
     return;
@@ -752,14 +843,14 @@ function renderIfbEditor() {
   box.querySelectorAll('[data-ifb-program]').forEach(input => {
     input.onchange = () => {
       const ch = Number(input.dataset.ifbProgram);
-      input.checked ? addNumberTo(d.ifb.program, ch) : removeNumberFrom(d.ifb.program, ch);
+      input.checked ? addChannelTo(d.ifb.program, ch) : removeNumberFrom(d.ifb.program, ch);
       renderIfbEditor();
     };
   });
   box.querySelectorAll('[data-ifb-interrupt]').forEach(input => {
     input.onchange = () => {
       const ch = Number(input.dataset.ifbInterrupt);
-      input.checked ? addNumberTo(d.ifb.interrupt, ch) : removeNumberFrom(d.ifb.interrupt, ch);
+      input.checked ? addChannelTo(d.ifb.interrupt, ch) : removeNumberFrom(d.ifb.interrupt, ch);
       renderIfbEditor();
     };
   });
@@ -776,8 +867,8 @@ function renderIfbEditor() {
 function configBody() {
   const d = ensureDraft();
   return {
-    listen: sortedNumbers(d.listen),
-    tx: sortedNumbers(d.tx),
+    listen: sortedChannels(d.listen),
+    tx: sortedChannels(d.tx),
     vol: d.vol,
     talker_vol: d.talker_vol,
     codec: $('codec-input')?.value || state.codec,
@@ -787,8 +878,8 @@ function configBody() {
     priority_channels: state.priority_channels || [],
     ifb: {
       enabled: !!$('ifb-enabled')?.checked,
-      program: sortedNumbers(d.ifb.program),
-      interrupt: sortedNumbers(d.ifb.interrupt),
+      program: sortedChannels(d.ifb.program),
+      interrupt: sortedChannels(d.ifb.interrupt),
       duck_gain: Number($('ifb-duck-gain')?.value ?? d.ifb.duck_gain)
     }
   };
@@ -891,17 +982,7 @@ function renderButtons() {
           message(String(err), 'error');
         }
       };
-      button.onpointerdown = event => {
-        event.preventDefault();
-        button.setPointerCapture?.(event.pointerId);
-        press();
-      };
-      button.onpointerup = event => {
-        event.preventDefault();
-        release();
-      };
-      button.onpointercancel = release;
-      button.onlostpointercapture = release;
+      bindPressHold(button, press, release);
     }
     box.appendChild(card);
   }
@@ -925,7 +1006,7 @@ function renderTalkControls() {
   if ($('talk')) {
     $('talk').hidden = muted;
     $('talk').textContent = state.talk_mode === 'open' ? 'Open Mic' : 'Talk';
-    $('talk').classList.toggle('active', regularTalkActive());
+    $('talk').classList.toggle('active', regularTalkDown || regularTalkActive());
   }
   setControl('mute', allowed('allow_talk_mode'), 'Talk mode locked by admin');
   setControl('talk', locks().allow_local_api !== false, 'Local controls locked by admin');
@@ -939,6 +1020,7 @@ function renderCapabilityPanels() {
   const macosSupported = capability('macosMicrophoneModes', false) && state.macos_microphone_mode !== undefined;
   if ($('macos-mic-mode-row')) $('macos-mic-mode-row').hidden = !macosSupported;
   setText('macos-mic-mode-label', macosSupported ? `Current mode: ${state.macos_microphone_mode || 'standard'}` : '');
+  if ($('settings-open')) $('settings-open').hidden = !capability('runtimeSettings', true);
   if ($('setup-open')) $('setup-open').hidden = !mobileShell();
 }
 
@@ -996,6 +1078,12 @@ function bindEvents() {
     removeSelectedChannel().catch(err => message(String(err), 'error'));
   });
   $('setup-open')?.addEventListener('click', openSetup);
+  $('channel-view-toggle')?.addEventListener('click', () => {
+    setShowAllChannels(!showAllChannels);
+  });
+  $('show-all-channels')?.addEventListener('change', () => {
+    setShowAllChannels(!!$('show-all-channels')?.checked);
+  });
   document.querySelectorAll('#settings-form input,#settings-form select').forEach(el => {
     el.addEventListener('input', () => {
       dirty = true;
@@ -1010,13 +1098,13 @@ function bindEvents() {
   });
   $('route-add-listen')?.addEventListener('click', event => {
     event.preventDefault();
-    addNumberTo(ensureDraft().listen, $('route-channel-input').value);
+    addChannelTo(ensureDraft().listen, $('route-channel-input').value);
     $('route-channel-input').value = '';
     renderConfigEditor();
   });
   $('route-add-tx')?.addEventListener('click', event => {
     event.preventDefault();
-    addNumberTo(ensureDraft().tx, $('route-channel-input').value);
+    addChannelTo(ensureDraft().tx, $('route-channel-input').value);
     $('route-channel-input').value = '';
     renderConfigEditor();
   });
@@ -1033,13 +1121,13 @@ function bindEvents() {
   });
   $('ifb-add-program')?.addEventListener('click', event => {
     event.preventDefault();
-    addNumberTo(ensureDraft().ifb.program, $('ifb-channel-input').value);
+    addChannelTo(ensureDraft().ifb.program, $('ifb-channel-input').value);
     $('ifb-channel-input').value = '';
     renderIfbEditor();
   });
   $('ifb-add-interrupt')?.addEventListener('click', event => {
     event.preventDefault();
-    addNumberTo(ensureDraft().ifb.interrupt, $('ifb-channel-input').value);
+    addChannelTo(ensureDraft().ifb.interrupt, $('ifb-channel-input').value);
     $('ifb-channel-input').value = '';
     renderIfbEditor();
   });
@@ -1064,17 +1152,7 @@ function bindEvents() {
   });
   const talk = $('talk');
   if (talk) {
-    talk.onpointerdown = event => {
-      event.preventDefault();
-      talk.setPointerCapture?.(event.pointerId);
-      regularTalkPress();
-    };
-    talk.onpointerup = event => {
-      event.preventDefault();
-      regularTalkRelease();
-    };
-    talk.onpointercancel = regularTalkRelease;
-    talk.onlostpointercapture = regularTalkRelease;
+    bindPressHold(talk, regularTalkPress, regularTalkRelease);
   }
   window.addEventListener('resize', syncDockPadding);
   if (window.ResizeObserver) {

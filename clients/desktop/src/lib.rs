@@ -65,9 +65,9 @@ pub struct Args {
     pub client_uid: Option<String>,
     #[arg(long)]
     pub identity_file: Option<PathBuf>,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 0)]
     pub tx_channel: u16,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 0)]
     pub listen_channel: u16,
     #[arg(long, value_enum, default_value_t = WireCodec::Pcm16)]
     pub codec: WireCodec,
@@ -105,6 +105,8 @@ pub struct Args {
     pub local_ui_token: Option<String>,
     #[arg(long)]
     pub disable_local_ui: bool,
+    #[arg(long, hide = true)]
+    pub disable_command_loop: bool,
     #[arg(long)]
     pub list_devices: bool,
 }
@@ -519,16 +521,28 @@ pub async fn run_until_shutdown_with_local_api(
         jitter_samples + MIX_SAMPLES_PER_FRAME * 12,
         jitter_samples,
     )));
+    let (control_tx, control_rx) = mpsc::channel::<ControlRequest>(16);
+    let connection_status = Arc::new(Mutex::new(ClientConnectionEvent::Reconnecting));
+    let local_api = LocalClientApi {
+        config: Arc::clone(&runtime_config),
+        control_tx: control_tx.clone(),
+        audio_settings: Arc::clone(&audio_settings),
+        input_backend_status: Arc::clone(&input_backend_status),
+        playback: Arc::clone(&playback),
+        latest_telemetry: Arc::clone(&latest_telemetry),
+        connection_status: Arc::clone(&connection_status),
+    };
+    if let Some(local_api_tx) = local_api_tx {
+        let _ = local_api_tx.send(local_api.clone());
+    }
     let output_stream = build_output_stream(
         Arc::clone(&playback),
         Arc::clone(&audio_settings),
         args.output_device.as_deref(),
     )?;
     output_stream.play()?;
-    let (control_tx, control_rx) = mpsc::channel::<ControlRequest>(16);
     let (connection_event_tx, connection_event_rx) = mpsc::channel::<ClientConnectionEvent>(8);
     let (connection_cue_tx, connection_cue_rx) = mpsc::channel::<ClientConnectionEvent>(8);
-    let connection_status = Arc::new(Mutex::new(ClientConnectionEvent::Reconnecting));
     let control_config = Arc::clone(&runtime_config);
     let cue_playback = Arc::clone(&playback);
     tokio::spawn(run_connection_cue_task(cue_playback, connection_cue_rx));
@@ -603,18 +617,6 @@ pub async fn run_until_shutdown_with_local_api(
             }
         }
     });
-    let local_api = LocalClientApi {
-        config: Arc::clone(&runtime_config),
-        control_tx: control_tx.clone(),
-        audio_settings: Arc::clone(&audio_settings),
-        input_backend_status: Arc::clone(&input_backend_status),
-        playback: Arc::clone(&playback),
-        latest_telemetry: Arc::clone(&latest_telemetry),
-        connection_status: Arc::clone(&connection_status),
-    };
-    if let Some(local_api_tx) = local_api_tx {
-        let _ = local_api_tx.send(local_api.clone());
-    }
     let local_ui_task = if args.disable_local_ui {
         tokio::spawn(future::pending::<anyhow::Result<()>>())
     } else {
@@ -739,17 +741,13 @@ pub async fn run_until_shutdown_with_local_api(
         let mut send_error_logged = false;
 
         while let Some(frame) = mic_rx.recv().await {
-            let (tx_targets, codec, opus_profile) = {
-                let config = send_config.lock().unwrap();
-                (
-                    config.active_tx_targets(),
-                    config.codec,
-                    config.opus_profile,
-                )
-            };
-            if tx_targets.is_empty() {
+            let Some(snapshot) = send_config.lock().unwrap().active_transmit_snapshot() else {
                 continue;
-            }
+            };
+            let user_id = snapshot.user_id;
+            let tx_targets = snapshot.targets;
+            let codec = snapshot.codec;
+            let opus_profile = snapshot.opus_profile;
 
             if codec != current_codec || opus_profile != current_opus_profile {
                 match AudioEncoder::new(codec, opus_profile) {
@@ -827,7 +825,9 @@ pub async fn run_until_shutdown_with_local_api(
 
     let command_config = Arc::clone(&runtime_config);
     let command_control_tx = control_tx.clone();
-    let command_task = if button_keys.is_empty() {
+    let command_task = if args.disable_command_loop {
+        tokio::spawn(future::pending::<anyhow::Result<()>>())
+    } else if button_keys.is_empty() {
         tokio::spawn(async move { run_command_loop(command_control_tx, command_config).await })
     } else {
         let hotkey_config = Arc::clone(&runtime_config);
@@ -4057,7 +4057,7 @@ mod tests {
             State(state),
             Json(GainRequest {
                 mic_gain: Some(1.75),
-                speaker_gain: Some(2.25),
+                speaker_gain: Some(1.9),
             }),
         )
         .await
@@ -4065,7 +4065,7 @@ mod tests {
 
         assert_eq!(response, OkResponse { ok: true });
         assert_eq!(settings.mic_gain(), 1.75);
-        assert_eq!(settings.speaker_gain(), 2.25);
+        assert_eq!(settings.speaker_gain(), 1.9);
     }
 
     #[test]
@@ -4073,7 +4073,7 @@ mod tests {
         let settings = AudioSettings::new(f32::NAN, 99.0);
 
         assert_eq!(settings.mic_gain(), 1.0);
-        assert_eq!(settings.speaker_gain(), 8.0);
+        assert_eq!(settings.speaker_gain(), 2.0);
     }
 
     #[test]
@@ -4081,7 +4081,16 @@ mod tests {
         assert!(LOCAL_UI_HTML.contains("Operator Console"));
         assert!(LOCAL_UI_HTML.contains("client-api.js"));
         assert!(LOCAL_UI_HTML.contains("id=\"client-title\" hidden"));
+        assert!(LOCAL_UI_HTML.contains(">Runtime</button>"));
+        assert!(LOCAL_UI_HTML.contains("Runtime Controls"));
+        assert!(LOCAL_UI_HTML.contains("show-all-channels"));
+        assert!(LOCAL_UI_HTML.contains("channel-view-toggle"));
+        assert!(LOCAL_UI_HTML.contains("identity-card"));
+        assert!(LOCAL_UI_HTML.contains("identity-card-value"));
+        assert!(LOCAL_UI_HTML.contains("max=\"2\""));
+        assert!(!LOCAL_UI_HTML.contains("Client Settings"));
         assert!(LOCAL_UI_API_JS.contains("fetch("));
+        assert!(LOCAL_UI_API_JS.contains("runtimeSettings: !mobileShell()"));
         assert!(!LOCAL_UI_JS.contains("fetch("));
         assert!(!LOCAL_UI_JS.contains("clientApi?.name || 'client'} controls"));
         assert!(LOCAL_UI_HTML.contains("dock-status"));
@@ -4126,6 +4135,11 @@ mod tests {
         assert!(LOCAL_UI_HTML.contains("channel-tx-toggle"));
         assert!(LOCAL_UI_JS.contains("function bindChannelSettingsGesture"));
         assert!(LOCAL_UI_JS.contains("function saveChannelSettings()"));
+        assert!(LOCAL_UI_JS.contains("showAllChannels"));
+        assert!(LOCAL_UI_JS.contains("function allConfiguredChannels()"));
+        assert!(LOCAL_UI_JS.contains("function setShowAllChannels"));
+        assert!(LOCAL_UI_JS.contains("function assignedClientLabel()"));
+        assert!(LOCAL_UI_JS.contains("User ID"));
         assert!(LOCAL_UI_JS.contains("function channelIconTag"));
         assert!(LOCAL_UI_JS.contains("function channelStatusTags"));
         assert!(LOCAL_UI_CSS.contains(".tag.icon-tag"));

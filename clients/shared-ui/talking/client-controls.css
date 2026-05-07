@@ -79,14 +79,15 @@ p {
 
 .topbar {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
+  flex-wrap: nowrap;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   padding: 10px 2px 14px;
 }
 
 .client-heading {
+  flex: 0 1 auto;
   min-width: 0;
 }
 
@@ -114,19 +115,32 @@ h2 {
 .top-actions,
 .channel-tags {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 7px;
 }
 
+.status-line,
+.top-actions {
+  flex-wrap: nowrap;
+}
+
+#status-tag {
+  max-width: clamp(108px, 38vw, 176px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .top-actions {
   justify-content: flex-end;
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   max-width: 100%;
+  gap: 6px;
 }
 
 .top-actions button {
-  padding: 8px 10px;
+  padding: 7px 9px;
+  white-space: nowrap;
 }
 
 .section-title,
@@ -136,6 +150,55 @@ h2 {
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 10px;
+}
+
+.identity-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+
+.identity-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.identity-value {
+  min-width: 0;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.channel-view-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  min-width: 0;
+}
+
+.compact-toggle {
+  min-width: 68px;
+  padding: 5px 8px;
+  font-size: 12px;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.compact-toggle[aria-pressed="true"] {
+  background: #e0f2fe;
+  border-color: #7dd3fc;
+  color: #075985;
 }
 
 .event-strip,
@@ -343,6 +406,10 @@ h2 {
   font-size: clamp(13px, 3.5vw, 18px);
   font-weight: 900;
   overflow-wrap: anywhere;
+  touch-action: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
 }
 
 .special-talk.active {
@@ -399,6 +466,10 @@ h2 {
   min-height: 56px;
   font-size: 18px;
   font-weight: 900;
+  touch-action: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
 }
 
 .mute-button {
@@ -509,6 +580,10 @@ fieldset {
 legend {
   padding: 0 4px;
   font-weight: 900;
+}
+
+.preference-panel {
+  margin-bottom: 12px;
 }
 
 label {
@@ -671,13 +746,28 @@ select {
 
 @media (max-width: 900px) {
   .top-actions {
-    width: 100%;
-    justify-content: flex-start;
+    width: auto;
+    justify-content: flex-end;
   }
 
   .top-actions button {
-    flex: 1 1 88px;
+    flex: 0 0 auto;
     min-width: 0;
     padding-inline: 8px;
+  }
+}
+
+@media (max-width: 380px) {
+  .top-actions {
+    gap: 4px;
+  }
+
+  .top-actions button {
+    padding: 6px 7px;
+    font-size: 12px;
+  }
+
+  #status-tag {
+    max-width: 126px;
   }
 }

@@ -373,7 +373,7 @@ By default the server listens on UDP `0.0.0.0:40000` for audio and TCP
 `http://0.0.0.0:40002/admin/` and stores desired client/channel config in
 `intercom-state.json`.
 New admin state is seeded with the default show channel plan from GOU-69:
-Program, Production PL, Referee PL, Director IFB, Producer Cue, PA, and Utility.
+open, Program, Production PL, Referee PL, Director IFB, Producer Cue, PA, and Utility.
 Emergency is not a default channel because the server has a separate emergency
 override path.
 
@@ -664,8 +664,8 @@ Options:
 - `--user-id <ID>`: required numeric user ID.
 - `--client-uid <UUID>`: stable client identity override. By default the client creates/reuses a UUID in the OS config directory.
 - `--identity-file <PATH>`: path to the JSON file used for the generated stable client UUID.
-- `--tx-channel <CHANNEL>`: initial transmit channel. Default: `1`.
-- `--listen-channel <CHANNEL>`: initial listen channel. Default: `1`.
+- `--tx-channel <CHANNEL>`: initial transmit channel. Default: `0` (`open`).
+- `--listen-channel <CHANNEL>`: initial listen channel. Default: `0` (`open`).
 - `--codec <pcm16|pcm24|pcm48|opus>`: edge codec. Default: `pcm16`. JSON/API also accepts `pcm-24` and `pcm-48`.
 - `--opus-profile <speech-16-low|speech-24-standard|speech-48-high|music-48>`: Opus encoder profile. Default: `speech-24-standard`.
 - `--mic-gain <GAIN>`: local mic gain before encoding. Default: `1`.
@@ -867,8 +867,8 @@ Settings file shape:
   "server": "127.0.0.1:40000",
   "control": "ws://127.0.0.1:40001",
   "user_id": 1,
-  "tx_channel": 1,
-  "listen_channel": 1,
+  "tx_channel": 0,
+  "listen_channel": 0,
   "codec": "pcm48",
   "opus_profile": "speech_24_standard",
   "mic_gain": 1.25,
@@ -993,8 +993,8 @@ Options:
 - `--user-id <ID>`: required numeric user ID.
 - `--client-uid <UUID>`: stable Pi identity override. By default the Pi client creates/reuses a UUID in the OS config directory.
 - `--identity-file <PATH>`: path to the JSON file used for the generated stable Pi UUID.
-- `--tx-channel <CHANNEL>`: initial transmit channel. Default: `1`.
-- `--listen-channel <CHANNEL>`: initial listen channel. Default: `1`.
+- `--tx-channel <CHANNEL>`: initial transmit channel. Default: `0` (`open`).
+- `--listen-channel <CHANNEL>`: initial listen channel. Default: `0` (`open`).
 - `--codec <pcm16|pcm24|pcm48|opus>`: edge codec. Default: `pcm16`. JSON/API also accepts `pcm-24` and `pcm-48`.
 - `--opus-profile <speech-16-low|speech-24-standard|speech-48-high|music-48>`: Opus encoder profile. Default: `speech-24-standard`.
 - `--mic-gain <GAIN>`: local mic gain before encoding. Default: `1`.

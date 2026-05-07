@@ -19,6 +19,7 @@
           <button id="close-config" type="button" disabled>Close</button>
         </div>
       </header>
+      <p id="message" class="hint top-message" aria-live="polite"></p>
 
       <section class="channels-panel server-panel">
         <div class="section-title">
@@ -62,11 +63,11 @@
           </label>
           <label>
             Mic Gain <output id="mic_gain_value"></output>
-            <input id="mic_gain" type="range" min="0" max="8" step="0.05" />
+            <input id="mic_gain" type="range" min="0" max="2" step="0.05" />
           </label>
           <label>
             Speaker Gain <output id="speaker_gain_value"></output>
-            <input id="speaker_gain" type="range" min="0" max="8" step="0.05" />
+            <input id="speaker_gain" type="range" min="0" max="2" step="0.05" />
           </label>
           <label>
             Button Count
@@ -93,8 +94,6 @@
           </details>
         </form>
       </section>
-
-      <p id="message" class="hint"></p>
 
       <div class="bottom-dock">
         <div class="bottom-controls">

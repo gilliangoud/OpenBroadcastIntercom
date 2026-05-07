@@ -767,6 +767,10 @@ fn derive_admin_base_from_control(control: &str) -> Option<String> {
 fn default_channel_options() -> Vec<ChannelOption> {
     vec![
         ChannelOption {
+            id: 0,
+            name: "open".to_string(),
+        },
+        ChannelOption {
             id: 1,
             name: "Program".to_string(),
         },
@@ -818,7 +822,6 @@ fn merge_channel_options(
             });
         }
     }
-    channels.retain(|channel| channel.id > 0);
     channels.sort_by_key(|channel| channel.id);
     channels.dedup_by_key(|channel| channel.id);
     channels
@@ -961,8 +964,8 @@ fn opus_profile_arg(profile: OpusProfile) -> &'static str {
 }
 
 fn validate_gain(name: &str, gain: f32) -> anyhow::Result<()> {
-    if !gain.is_finite() || !(0.0..=8.0).contains(&gain) {
-        bail!("{name} must be a finite value between 0 and 8");
+    if !gain.is_finite() || !(0.0..=2.0).contains(&gain) {
+        bail!("{name} must be a finite value between 0 and 2");
     }
     Ok(())
 }
@@ -1135,7 +1138,7 @@ function deviceSelect(field,label,devices,current,placeholder){let values=[...(d
 function channelLabel(channel){return channel.name ? `${channel.id} - ${channel.name}` : `Channel ${channel.id}`;}
 function channelsFor(selected){const byId=new Map((state.channels||[]).map(ch=>[Number(ch.id),ch]));for(const id of selected||[]){if(!byId.has(Number(id))){byId.set(Number(id),{id:Number(id),name:`Channel ${id}`});}}return [...byId.values()].sort((a,b)=>Number(a.id)-Number(b.id));}
 function channelDropdown(field,label,selected){const picked=new Set((selected||[]).map(Number));const checks=channelsFor(selected).map(ch=>`<label><input type="checkbox" value="${ch.id}" ${picked.has(Number(ch.id))?'checked':''}> ${esc(channelLabel(ch))}</label>`).join('');return `<div class="field"><span>${esc(label)}</span><div class="multi" data-field="${field}" data-channel-dropdown="true"><button class="multi-button" type="button"></button><div class="multi-menu">${checks}</div></div><span class="hint">Select one or more configured server channels.</span></div>`;}
-function selectedChannels(card,field){return [...card.querySelectorAll(`[data-field="${field}"] input:checked`)].map(input=>Number(input.value)).filter(value=>Number.isInteger(value)&&value>0);}
+function selectedChannels(card,field){return [...card.querySelectorAll(`[data-field="${field}"] input:checked`)].map(input=>Number(input.value)).filter(value=>Number.isInteger(value)&&value>=0);}
 function channelSummary(values){if(!values.length){return 'No channels selected';}const byId=new Map((state.channels||[]).map(ch=>[Number(ch.id),ch]));return values.map(id=>channelLabel(byId.get(Number(id))||{id,name:''})).join(', ');}
 function refreshChannelButtons(scope=document){scope.querySelectorAll('[data-channel-dropdown]').forEach(dropdown=>{const values=[...dropdown.querySelectorAll('input:checked')].map(input=>Number(input.value));dropdown.querySelector('.multi-button').textContent=channelSummary(values);});}
 function routeHtml(route,index){const status=routeStatus(route.id);const running=!!status.running;return `<div class="route" data-index="${index}">
@@ -1151,8 +1154,8 @@ function routeHtml(route,index){const status=routeStatus(route.id);const running
     ${deviceSelect('output_device','Output Device',state.output_devices,route.output_device,'output')}
     <label>Codec<select data-field="codec"><option value="pcm16">PCM16</option><option value="pcm24">PCM24</option><option value="pcm48">PCM48</option><option value="opus">Opus</option></select></label>
     <label>Opus Profile<select data-field="opus_profile"><option value="speech_16_low">Speech 16 Low</option><option value="speech_24_standard">Speech 24 Standard</option><option value="speech_48_high">Speech 48 High</option><option value="music_48">Music 48</option></select></label>
-    <label>Input Gain<input data-field="input_gain" type="number" min="0" max="8" step="0.05" value="${route.input_gain ?? 1}"></label>
-    <label>Output Gain<input data-field="output_gain" type="number" min="0" max="8" step="0.05" value="${route.output_gain ?? 1}"></label>
+    <label>Input Gain<input data-field="input_gain" type="number" min="0" max="2" step="0.05" value="${route.input_gain ?? 1}"></label>
+    <label>Output Gain<input data-field="output_gain" type="number" min="0" max="2" step="0.05" value="${route.output_gain ?? 1}"></label>
     <label class="check"><input data-field="stereo" type="checkbox" ${route.stereo ? 'checked' : ''}> Stereo receive</label>
     <label class="check"><input data-field="enabled" type="checkbox" ${route.enabled !== false ? 'checked' : ''}> Start with Start Enabled</label>
     <label class="wide">Note<input data-field="note" value="${esc(route.note || '')}" placeholder="vMix bus A into Program"></label>
@@ -1295,6 +1298,9 @@ mod tests {
             "http://192.0.2.10:40002/admin/api/state"
         );
         let channels = merge_channel_options(default_channel_options(), &config);
+        assert!(channels
+            .iter()
+            .any(|channel| channel.id == 0 && channel.name == "open"));
         assert!(channels
             .iter()
             .any(|channel| channel.id == 42 && channel.name == "Channel 42"));

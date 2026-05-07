@@ -453,6 +453,14 @@ pub struct ClientConfig {
     pub esp32_audio: Esp32AudioConfig,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientTransmitSnapshot {
+    pub user_id: u16,
+    pub targets: Vec<AudioTarget>,
+    pub codec: Codec,
+    pub opus_profile: OpusProfile,
+}
+
 impl ClientConfig {
     pub fn set_talk_mode(&mut self, talk_mode: TalkMode) {
         self.talk_mode = talk_mode;
@@ -526,6 +534,22 @@ impl ClientConfig {
             AudioTarget::Mixed => (2, 0),
         });
         targets
+    }
+
+    pub fn active_transmit_snapshot(&self) -> Option<ClientTransmitSnapshot> {
+        if self.user_id == 0 {
+            return None;
+        }
+        let targets = self.active_tx_targets();
+        if targets.is_empty() {
+            return None;
+        }
+        Some(ClientTransmitSnapshot {
+            user_id: self.user_id,
+            targets,
+            codec: self.codec,
+            opus_profile: self.opus_profile,
+        })
     }
 
     pub fn button_known(&self, button_id: &str) -> bool {
@@ -679,7 +703,7 @@ impl AudioSettings {
 
 pub fn clamp_runtime_gain(gain: f32) -> f32 {
     if gain.is_finite() {
-        gain.clamp(0.0, 8.0)
+        gain.clamp(0.0, 2.0)
     } else {
         1.0
     }
@@ -2229,6 +2253,49 @@ mod tests {
     }
 
     #[test]
+    fn transmit_snapshot_uses_enrolled_user_id_and_rejects_zero() {
+        let mut config = ClientConfig {
+            user_id: 0,
+            client_uid: "test-client".to_string(),
+            role: ClientRole::Client,
+            name: String::new(),
+            listen: vec![1],
+            tx: vec![1],
+            codec: Codec::Pcm16,
+            opus_profile: OpusProfile::default(),
+            talk_mode: TalkMode::Ptt,
+            last_non_muted_talk_mode: TalkMode::Ptt,
+            regular_talk_active: true,
+            priority: false,
+            priority_channels: Vec::new(),
+            emergency: None,
+            vol: HashMap::new(),
+            talker_vol: HashMap::new(),
+            buttons: Vec::new(),
+            active_buttons: Vec::new(),
+            active_direct_calls: Vec::new(),
+            last_direct_caller: None,
+            direct_call_history: Vec::new(),
+            active_alerts: Vec::new(),
+            recent_alerts: Vec::new(),
+            advertised_buttons: Vec::new(),
+            ifb: IfbConfig::default(),
+            lockout: ClientLockoutPolicy::default(),
+            stereo: StereoConfig::default(),
+            esp32_audio: Esp32AudioConfig::default(),
+            processing: ProcessingConfig::default(),
+            channel_rosters: Vec::new(),
+        };
+
+        assert!(config.active_transmit_snapshot().is_none());
+
+        config.user_id = 7;
+        let snapshot = config.active_transmit_snapshot().unwrap();
+        assert_eq!(snapshot.user_id, 7);
+        assert_eq!(snapshot.targets, vec![AudioTarget::Channel(1)]);
+    }
+
+    #[test]
     fn presence_update_replaces_channel_rosters() {
         let config = Arc::new(Mutex::new(ClientConfig {
             user_id: 1,
@@ -2423,7 +2490,7 @@ mod tests {
         let settings = AudioSettings::new(f32::NAN, 99.0);
 
         assert_eq!(settings.mic_gain(), 1.0);
-        assert_eq!(settings.speaker_gain(), 8.0);
+        assert_eq!(settings.speaker_gain(), 2.0);
     }
 
     #[test]

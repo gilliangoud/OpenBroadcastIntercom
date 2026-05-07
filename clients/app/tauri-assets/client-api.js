@@ -52,6 +52,7 @@
     name: 'tauri',
     capabilities: {
       setup: true,
+      runtimeSettings: false,
       gain: true,
       macosMicrophoneModes: false
     },

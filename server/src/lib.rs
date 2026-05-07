@@ -979,8 +979,8 @@ impl DesiredClientConfig {
             client_uid: None,
             role: ClientRole::Client,
             name: String::new(),
-            listen: Vec::new(),
-            tx: Vec::new(),
+            listen: vec![CHANNEL_OPEN],
+            tx: vec![CHANNEL_OPEN],
             vol: HashMap::new(),
             talker_vol: HashMap::new(),
             codec: Codec::Pcm16,
@@ -998,6 +998,7 @@ impl DesiredClientConfig {
     }
 }
 
+const CHANNEL_OPEN: ChannelId = 0;
 const CHANNEL_PROGRAM: ChannelId = 1;
 const CHANNEL_PRODUCTION_PL: ChannelId = 2;
 const CHANNEL_REFEREE_PL: ChannelId = 3;
@@ -1016,6 +1017,7 @@ const USER_PA_BRIDGE: UserId = 91;
 
 fn default_workflow_channels() -> Vec<ChannelConfig> {
     vec![
+        channel_config(CHANNEL_OPEN, "open"),
         channel_config(CHANNEL_PROGRAM, "Program"),
         channel_config(CHANNEL_PRODUCTION_PL, "Production PL"),
         channel_config(CHANNEL_REFEREE_PL, "Referee PL"),
@@ -2596,7 +2598,9 @@ fn admin_router(state: Arc<ServerState>, auth: HttpAuthConfig) -> Router {
         )
         .route(
             "/admin/api/devices/:client_uid",
-            put(patch_device_handler).patch(patch_device_handler),
+            put(patch_device_handler)
+                .patch(patch_device_handler)
+                .delete(delete_device_handler),
         )
         .route(
             "/admin/api/channels/:channel_id",
@@ -2849,6 +2853,32 @@ async fn patch_device_handler(
     Json(body): Json<DevicePatch>,
 ) -> Result<Json<DeviceEnrollment>, AdminApiError> {
     update_device_enrollment(&state, client_uid, body, None).await
+}
+
+async fn delete_device_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(client_uid): AxumPath<String>,
+) -> Result<Json<OkResponse>, AdminApiError> {
+    let client_uid = client_uid.trim().to_string();
+    if client_uid.is_empty() {
+        return Err(AdminApiError::BadRequest(
+            "device UID cannot be empty".to_string(),
+        ));
+    }
+    let admin_snapshot = {
+        let mut admin_state = state.admin_state.write().await;
+        admin_state
+            .devices
+            .retain(|device| device.client_uid != client_uid);
+        for client in &mut admin_state.clients {
+            if client.client_uid.as_deref() == Some(client_uid.as_str()) {
+                client.client_uid = None;
+            }
+        }
+        admin_state.clone()
+    };
+    save_admin_state(&state, &admin_snapshot).await?;
+    Ok(Json(OkResponse { ok: true }))
 }
 
 async fn update_device_enrollment(
@@ -4045,8 +4075,11 @@ async fn apply_control(state: &ServerState, control: ControlMessage) -> ControlR
             session.advertised_buttons = normalize_button_capabilities(buttons);
             if let Some(desired) = desired.as_ref() {
                 apply_desired_to_session_fields(desired, session);
-            } else if !session.supported_codecs.contains(&session.output_codec) {
-                session.output_codec = Codec::Pcm16;
+            } else {
+                apply_default_operator_channels_to_session(session);
+                if !session.supported_codecs.contains(&session.output_codec) {
+                    session.output_codec = Codec::Pcm16;
+                }
             }
             session.last_seen = Instant::now();
             tracing::info!(
@@ -4643,6 +4676,18 @@ fn apply_desired_to_session_fields(desired: &DesiredClientConfig, session: &mut 
     session.talk_mode = desired.talk_mode;
     session.priority = desired.priority;
     session.priority_channels = desired.priority_channels.iter().copied().collect();
+}
+
+fn apply_default_operator_channels_to_session(session: &mut Session) {
+    if session.role != ClientRole::Client {
+        return;
+    }
+    if session.listen_channels.is_empty() {
+        session.listen_channels.insert(CHANNEL_OPEN);
+    }
+    if session.tx_channels.is_empty() {
+        session.tx_channels.insert(CHANNEL_OPEN);
+    }
 }
 
 async fn apply_regular_talk_event(
@@ -5720,7 +5765,6 @@ fn normalize_optional_message(message: Option<String>) -> Option<String> {
 }
 
 fn sorted_unique_channels(mut channels: Vec<ChannelId>) -> Vec<ChannelId> {
-    channels.retain(|channel| *channel > 0);
     channels.sort_unstable();
     channels.dedup();
     channels
@@ -5736,7 +5780,7 @@ fn sorted_unique_users(mut users: Vec<UserId>) -> Vec<UserId> {
 fn sorted_unique_alert_targets(mut targets: Vec<AlertTarget>) -> Vec<AlertTarget> {
     targets.retain(|target| match target {
         AlertTarget::User(user_id) => *user_id > 0,
-        AlertTarget::Channel(channel_id) => *channel_id > 0,
+        AlertTarget::Channel(_) => true,
     });
     targets.sort_by_key(|target| match target {
         AlertTarget::User(user_id) => (0, *user_id),
@@ -5819,6 +5863,7 @@ fn normalize_admin_state(state: &mut PersistedAdminState) {
     if state.channels.is_empty() {
         state.channels = default_workflow_channels();
     }
+    ensure_open_channel(&mut state.channels);
     if state.presets.is_empty() {
         state.presets = default_workflow_presets();
     }
@@ -5849,12 +5894,24 @@ fn normalize_admin_state(state: &mut PersistedAdminState) {
 }
 
 fn normalize_channels(channels: &mut Vec<ChannelConfig>) {
-    channels.retain(|channel| channel.id > 0);
     for channel in channels.iter_mut() {
         channel.name = channel.name.trim().to_string();
     }
     channels.sort_by_key(|channel| channel.id);
     channels.dedup_by(|left, right| left.id == right.id);
+}
+
+fn ensure_open_channel(channels: &mut Vec<ChannelConfig>) {
+    if let Some(channel) = channels
+        .iter_mut()
+        .find(|channel| channel.id == CHANNEL_OPEN)
+    {
+        if channel.name.trim().is_empty() {
+            channel.name = "open".to_string();
+        }
+    } else {
+        channels.push(channel_config(CHANNEL_OPEN, "open"));
+    }
 }
 
 fn normalize_device_enrollments(devices: &mut Vec<DeviceEnrollment>) {
@@ -7210,7 +7267,9 @@ async fn channel_rosters_for_user(
         return Vec::new();
     };
 
-    let mut visible_channels = configured_presence_channels(viewer);
+    let configured_channels = channel_names.keys().copied().collect::<HashSet<_>>();
+    let mut visible_channels = configured_channels.clone();
+    visible_channels.extend(configured_presence_channels(viewer));
     visible_channels.extend(viewer.effective_tx_channels());
     let mut rosters = visible_channels
         .into_iter()
@@ -7218,6 +7277,9 @@ async fn channel_rosters_for_user(
             let mut members = sessions
                 .iter()
                 .filter_map(|(&member_id, session)| {
+                    if member_id == 0 {
+                        return None;
+                    }
                     let mut member_channels = configured_presence_channels(session);
                     member_channels.extend(session.effective_tx_channels());
                     if !member_channels.contains(&channel_id) {
@@ -7238,7 +7300,7 @@ async fn channel_rosters_for_user(
                 })
                 .collect::<Vec<_>>();
             members.sort_by_key(|member| member.user_id);
-            if members.is_empty() {
+            if members.is_empty() && !configured_channels.contains(&channel_id) {
                 None
             } else {
                 Some(ChannelPresenceRoster {
@@ -7293,6 +7355,10 @@ async fn register_audio_source(
 }
 
 async fn audio_user_is_enrolled(state: &ServerState, user_id: UserId) -> bool {
+    if user_id == 0 {
+        return false;
+    }
+
     {
         let sessions = state.sessions.read().await;
         if let Some(session) = sessions.get(&user_id) {
@@ -10707,11 +10773,16 @@ mod tests {
         let mut unrelated = Session::new();
         unrelated.addr = Some("127.0.0.1:10003".parse().unwrap());
         unrelated.listen_channels = [9].into();
-        state
-            .sessions
-            .write()
-            .await
-            .extend([(1, listener), (2, talker), (3, unrelated)]);
+        let mut stale_zero = Session::new();
+        stale_zero.addr = Some("127.0.0.1:10004".parse().unwrap());
+        stale_zero.listen_channels = [1].into();
+        stale_zero.tx_channels = [1].into();
+        state.sessions.write().await.extend([
+            (0, stale_zero),
+            (1, listener),
+            (2, talker),
+            (3, unrelated),
+        ]);
         record_input_health(
             &state,
             2,
@@ -10721,17 +10792,27 @@ mod tests {
         .await;
 
         let rosters = channel_rosters_for_user(&state, 1).await;
-        assert_eq!(rosters.len(), 1);
-        assert_eq!(rosters[0].channel_id, 1);
-        assert_eq!(rosters[0].name.as_deref(), Some("Program"));
-        assert!(rosters[0]
+        assert_eq!(rosters.len(), default_workflow_channels().len());
+        assert!(rosters.iter().any(|roster| {
+            roster.channel_id == CHANNEL_OPEN
+                && roster.name.as_deref() == Some("open")
+                && roster.members.is_empty()
+        }));
+        assert!(!rosters.iter().any(|roster| roster.channel_id == 9));
+        let program = rosters
+            .iter()
+            .find(|roster| roster.channel_id == CHANNEL_PROGRAM)
+            .unwrap();
+        assert_eq!(program.name.as_deref(), Some("Program"));
+        assert!(program
             .members
             .iter()
             .any(|member| member.user_id == 1 && member.present));
-        assert!(rosters[0].members.iter().any(|member| {
+        assert!(program.members.iter().any(|member| {
             member.user_id == 2 && member.name == "Director" && member.transmitting
         }));
-        assert!(!rosters[0].members.iter().any(|member| member.user_id == 3));
+        assert!(!program.members.iter().any(|member| member.user_id == 0));
+        assert!(!program.members.iter().any(|member| member.user_id == 3));
     }
 
     #[tokio::test]
@@ -11170,7 +11251,7 @@ mod tests {
         let bridge = sessions[0].bridge.as_ref().unwrap();
         assert_eq!(bridge.mode, common::BridgeMode::Output);
         assert_eq!(bridge.output_device.as_deref(), Some("USB Audio"));
-        assert_eq!(bridge.tx, vec![5]);
+        assert_eq!(bridge.tx, vec![0, 5]);
         assert_eq!(bridge.listen, vec![10, 30]);
         assert_eq!(bridge.note, "PA output");
     }
@@ -11313,6 +11394,18 @@ mod tests {
 
         assert!(ADMIN_JS.contains("function renderDashboardPage()"));
         assert!(ADMIN_JS.contains("function renderClientsPage()"));
+        assert!(ADMIN_JS.contains("function clientCards()"));
+        assert!(ADMIN_JS.contains("client-card-list"));
+        assert!(ADMIN_JS.contains("function clientEditorName("));
+        assert!(ADMIN_JS.contains("Stable Device UID<span class=\"readonly-value\""));
+        assert!(ADMIN_JS.contains("id=\"client-uid\" type=\"hidden\""));
+        assert!(!ADMIN_JS.contains("Stable Device UID<input id=\"client-uid\" type=\"text\""));
+        assert!(ADMIN_JS.contains("data-delete-device"));
+        assert!(ADMIN_JS.contains("async function deleteDevice("));
+        assert!(ADMIN_JS.contains("method: 'DELETE'"));
+        assert!(ADMIN_CSS.contains(".client-card-list"));
+        assert!(ADMIN_CSS.contains(".readonly-value"));
+        assert!(!ADMIN_JS.contains("<th>User</th><th>UID</th><th>Role"));
         assert!(ADMIN_JS.contains("function renderRoutingPage()"));
         assert!(ADMIN_JS.contains("function renderPresetsPage()"));
         assert!(ADMIN_JS.contains("function renderCallsPage()"));
@@ -12234,6 +12327,7 @@ mod tests {
         assert_eq!(
             channels,
             vec![
+                (0, "open"),
                 (1, "Program"),
                 (2, "Production PL"),
                 (3, "Referee PL"),
@@ -12295,6 +12389,47 @@ mod tests {
     }
 
     #[test]
+    fn new_desired_client_defaults_to_open_channel() {
+        let desired = DesiredClientConfig::new(42);
+
+        assert_eq!(desired.listen, vec![CHANNEL_OPEN]);
+        assert_eq!(desired.tx, vec![CHANNEL_OPEN]);
+    }
+
+    #[test]
+    fn live_client_without_desired_config_defaults_to_open_channel() {
+        let mut session = Session::new();
+        session.role = ClientRole::Client;
+
+        apply_default_operator_channels_to_session(&mut session);
+
+        assert_eq!(session.listen_channels, [CHANNEL_OPEN].into());
+        assert_eq!(session.tx_channels, [CHANNEL_OPEN].into());
+    }
+
+    #[test]
+    fn normalize_admin_state_preserves_open_channel_zero() {
+        let mut state = PersistedAdminState {
+            channels: vec![channel_config(CHANNEL_PROGRAM, "Program")],
+            devices: Vec::new(),
+            clients: Vec::new(),
+            presets: Vec::new(),
+            templates: Vec::new(),
+        };
+
+        normalize_admin_state(&mut state);
+
+        assert_eq!(
+            state
+                .channels
+                .iter()
+                .map(|channel| (channel.id, channel.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(CHANNEL_OPEN, "open"), (CHANNEL_PROGRAM, "Program"),]
+        );
+    }
+
+    #[test]
     fn workflow_validation_warnings_report_common_ifb_and_pa_mistakes() {
         let mut pa_regular_tx = DesiredClientConfig::new(1);
         pa_regular_tx.name = "Ref".to_string();
@@ -12302,6 +12437,7 @@ mod tests {
 
         let mut bad_talent = DesiredClientConfig::new(2);
         bad_talent.name = "Talent".to_string();
+        bad_talent.tx = Vec::new();
         bad_talent.talk_mode = TalkMode::Muted;
         bad_talent.ifb = IfbConfig {
             enabled: true,
@@ -12374,10 +12510,16 @@ mod tests {
     async fn admin_state_saves_and_loads_json() {
         let path = temp_state_path("roundtrip");
         let state = PersistedAdminState {
-            channels: vec![ChannelConfig {
-                id: 2,
-                name: "Program".to_string(),
-            }],
+            channels: vec![
+                ChannelConfig {
+                    id: 0,
+                    name: "open".to_string(),
+                },
+                ChannelConfig {
+                    id: 2,
+                    name: "Program".to_string(),
+                },
+            ],
             devices: Vec::new(),
             clients: vec![DesiredClientConfig {
                 user_id: 7,
@@ -12563,6 +12705,17 @@ mod tests {
         assert!(err.contains("preconfigured-only"));
         assert!(state.admin_state.read().await.devices.is_empty());
         assert!(!audio_user_is_enrolled(&state, 20).await);
+    }
+
+    #[tokio::test]
+    async fn audio_user_zero_is_never_enrolled_by_udp_path() {
+        let state = ServerState::new_with_admin_state(
+            PersistedAdminState::default(),
+            None,
+            EnrollmentPolicy::Auto,
+        );
+
+        assert!(!audio_user_is_enrolled(&state, 0).await);
     }
 
     #[tokio::test]

@@ -223,8 +223,8 @@ impl Default for AppSettings {
             user_id: None,
             client_uid: None,
             identity_file: None,
-            tx_channel: 1,
-            listen_channel: 1,
+            tx_channel: 0,
+            listen_channel: 0,
             codec: Codec::Pcm16,
             opus_profile: OpusProfile::default(),
             mic_gain: 1.0,
@@ -456,6 +456,7 @@ impl AppSettings {
             local_ui_bind: runtime.local_ui_bind,
             local_ui_token: runtime.local_ui_token,
             disable_local_ui: runtime.disable_local_ui,
+            disable_command_loop: self.window_mode == AppWindowMode::Native,
             list_devices,
         })
     }
@@ -612,6 +613,36 @@ fn remember_mobile_profile(settings: &mut AppSettings, profile: MobileServerProf
         .retain(|existing| existing.id != profile.id && existing.control != profile.control);
     settings.server_profiles.insert(0, profile);
     settings.server_profiles.truncate(20);
+}
+
+#[allow(dead_code)]
+fn mobile_profile_uses_ipv4(profile: &MobileServerProfile) -> bool {
+    profile
+        .server_host
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_ipv4())
+}
+
+#[allow(dead_code)]
+fn mobile_profiles_match_discovered_service(
+    left: &MobileServerProfile,
+    right: &MobileServerProfile,
+) -> bool {
+    (!left.id.trim().is_empty() && left.id == right.id)
+        || (left.discovered
+            && right.discovered
+            && !left.name.trim().is_empty()
+            && left.name == right.name
+            && left.auth == right.auth
+            && left.version == right.version)
+}
+
+#[allow(dead_code)]
+fn should_replace_mobile_profile(
+    existing: &MobileServerProfile,
+    candidate: &MobileServerProfile,
+) -> bool {
+    mobile_profile_uses_ipv4(candidate) || !mobile_profile_uses_ipv4(existing)
 }
 
 #[allow(dead_code)]
@@ -792,13 +823,18 @@ mod mobile_audio;
 
 #[cfg(all(feature = "native", any(target_os = "ios", target_os = "android")))]
 mod mobile {
-    use std::path::PathBuf;
+    use std::io::ErrorKind;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::thread;
     use std::thread::JoinHandle;
+    use std::time::Duration;
 
-    use anyhow::Context;
-    use client_core::{ClientAudioBackend, ClientEndpointOverrides, ClientRuntimePhase};
+    use anyhow::{bail, Context};
+    use client_core::{
+        ClientAudioBackend, ClientEndpointOverrides, ClientRuntimePhase, DEFAULT_AUDIO_PORT,
+        DEFAULT_CONTROL_PORT,
+    };
     use common::{
         AlertId, ButtonId, CaptureHealthStatus, ClientTelemetryRuntimeStatus, Codec, TalkMode,
     };
@@ -807,8 +843,10 @@ mod mobile {
     use tokio::sync::oneshot;
 
     use super::{
-        load_settings, mobile_connected_timestamp_ms, mobile_profile_id, normalize_mobile_profile,
-        remember_mobile_profile, save_settings, AppSettings, AppWindowMode, MobileServerProfile,
+        load_settings, mobile_connected_timestamp_ms, mobile_profile_id,
+        mobile_profiles_match_discovered_service, normalize_mobile_profile,
+        remember_mobile_profile, save_settings, should_replace_mobile_profile, AppSettings,
+        AppWindowMode, MobileServerProfile,
     };
     use crate::mobile_audio::DefaultMobileAudioPlatform;
 
@@ -1028,8 +1066,9 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
         mut settings: AppSettings,
     ) -> std::result::Result<MobileStartResponse, String> {
-        prepare_mobile_settings(&mut settings);
         let path = mobile_settings_path(&app)?;
+        prepare_mobile_settings(&mut settings);
+        prepare_mobile_identity_path(&mut settings, &path);
         save_settings(&path, &settings).map_err(|err| err.to_string())?;
 
         {
@@ -1512,12 +1551,19 @@ mod mobile {
         for mut profile in discovered {
             profile = normalize_mobile_profile(profile);
             profile.discovered = true;
-            if let Some(existing) = saved
-                .iter_mut()
-                .find(|existing| existing.id == profile.id || existing.control == profile.control)
-            {
+            if let Some(existing) = saved.iter_mut().find(|existing| {
+                existing.control == profile.control
+                    || mobile_profiles_match_discovered_service(existing, &profile)
+            }) {
                 let last_connected_ms = existing.last_connected_ms;
-                *existing = profile;
+                if should_replace_mobile_profile(existing, &profile) {
+                    *existing = profile;
+                } else {
+                    existing.name = profile.name;
+                    existing.auth = profile.auth;
+                    existing.version = profile.version;
+                    existing.discovered = true;
+                }
                 existing.last_connected_ms = last_connected_ms;
             } else {
                 saved.push(profile);
@@ -1541,7 +1587,12 @@ mod mobile {
         ios_discover_intercom_servers()
     }
 
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    fn discover_mobile_servers_for_platform() -> anyhow::Result<Vec<MobileServerProfile>> {
+        android_discover_intercom_servers()
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     fn discover_mobile_servers_for_platform() -> anyhow::Result<Vec<MobileServerProfile>> {
         Ok(Vec::new())
     }
@@ -1565,14 +1616,364 @@ mod mobile {
         serde_json::from_str(&text).context("parse iOS Bonjour discovery results")
     }
 
+    const INTERCOM_DISCOVERY_SERVICE: &str = "_intercom-suite._tcp.local";
+
+    #[cfg(target_os = "android")]
+    fn android_discover_intercom_servers() -> anyhow::Result<Vec<MobileServerProfile>> {
+        use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+        use std::time::Instant;
+
+        let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+            .context("bind Android mDNS discovery socket")?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .context("configure Android mDNS discovery timeout")?;
+        socket
+            .set_multicast_ttl_v4(255)
+            .context("configure Android mDNS multicast TTL")?;
+
+        let query = build_mdns_ptr_query(INTERCOM_DISCOVERY_SERVICE)?;
+        let mdns_addr = SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353);
+        socket
+            .send_to(&query, mdns_addr)
+            .context("send Android mDNS discovery query")?;
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut responses = Vec::new();
+        let mut buf = [0_u8; 4096];
+        while Instant::now() < deadline {
+            match socket.recv_from(&mut buf) {
+                Ok((len, _peer)) => {
+                    responses.extend(profiles_from_mdns_packet(&buf[..len])?);
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                    ) => {}
+                Err(err) => return Err(err).context("receive Android mDNS discovery response"),
+            }
+        }
+        dedupe_discovered_profiles(responses)
+    }
+
+    fn build_mdns_ptr_query(service: &str) -> anyhow::Result<Vec<u8>> {
+        let mut query = Vec::with_capacity(64);
+        query.extend_from_slice(&0_u16.to_be_bytes()); // transaction id
+        query.extend_from_slice(&0_u16.to_be_bytes()); // flags
+        query.extend_from_slice(&1_u16.to_be_bytes()); // questions
+        query.extend_from_slice(&0_u16.to_be_bytes()); // answers
+        query.extend_from_slice(&0_u16.to_be_bytes()); // authorities
+        query.extend_from_slice(&0_u16.to_be_bytes()); // additionals
+        write_dns_name(&mut query, service)?;
+        query.extend_from_slice(&12_u16.to_be_bytes()); // PTR
+        query.extend_from_slice(&0x8001_u16.to_be_bytes()); // IN + unicast response requested
+        Ok(query)
+    }
+
+    fn write_dns_name(out: &mut Vec<u8>, name: &str) -> anyhow::Result<()> {
+        for label in name.trim_end_matches('.').split('.') {
+            if label.is_empty() || label.len() > 63 {
+                bail!("invalid DNS label in {name}");
+            }
+            out.push(label.len() as u8);
+            out.extend_from_slice(label.as_bytes());
+        }
+        out.push(0);
+        Ok(())
+    }
+
+    #[derive(Debug, Default)]
+    struct MdnsService {
+        instance: String,
+        name: Option<String>,
+        target: Option<String>,
+        control_port: Option<u16>,
+        audio_port: Option<u16>,
+        admin_port: Option<u16>,
+        auth: Option<String>,
+        version: Option<String>,
+    }
+
+    fn profiles_from_mdns_packet(packet: &[u8]) -> anyhow::Result<Vec<MobileServerProfile>> {
+        use std::collections::{HashMap, HashSet};
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        if packet.len() < 12 {
+            return Ok(Vec::new());
+        }
+        let qdcount = dns_u16(packet, 4)? as usize;
+        let record_count = dns_u16(packet, 6)? as usize
+            + dns_u16(packet, 8)? as usize
+            + dns_u16(packet, 10)? as usize;
+        let mut offset = 12;
+        for _ in 0..qdcount {
+            let (_name, next) = read_dns_name(packet, offset)?;
+            offset = next + 4;
+            if offset > packet.len() {
+                return Ok(Vec::new());
+            }
+        }
+
+        let mut instances = HashSet::new();
+        let mut services = HashMap::<String, MdnsService>::new();
+        let mut addresses = HashMap::<String, Vec<IpAddr>>::new();
+
+        for _ in 0..record_count {
+            let (record_name, next) = read_dns_name(packet, offset)?;
+            offset = next;
+            if offset + 10 > packet.len() {
+                break;
+            }
+            let record_type = dns_u16(packet, offset)?;
+            offset += 2;
+            let _class = dns_u16(packet, offset)?;
+            offset += 2;
+            let _ttl = dns_u32(packet, offset)?;
+            offset += 4;
+            let rdlen = dns_u16(packet, offset)? as usize;
+            offset += 2;
+            if offset + rdlen > packet.len() {
+                break;
+            }
+            let rdata_offset = offset;
+            offset += rdlen;
+
+            match record_type {
+                1 if rdlen == 4 => {
+                    addresses
+                        .entry(normalize_dns_name(&record_name))
+                        .or_default()
+                        .push(IpAddr::V4(Ipv4Addr::new(
+                            packet[rdata_offset],
+                            packet[rdata_offset + 1],
+                            packet[rdata_offset + 2],
+                            packet[rdata_offset + 3],
+                        )));
+                }
+                12 if normalize_dns_name(&record_name) == INTERCOM_DISCOVERY_SERVICE => {
+                    let (instance, _) = read_dns_name(packet, rdata_offset)?;
+                    let instance = normalize_dns_name(&instance);
+                    instances.insert(instance.clone());
+                    services
+                        .entry(instance.clone())
+                        .or_insert_with(|| MdnsService {
+                            instance,
+                            ..MdnsService::default()
+                        });
+                }
+                16 => {
+                    let service = services
+                        .entry(normalize_dns_name(&record_name))
+                        .or_default();
+                    service.instance = normalize_dns_name(&record_name);
+                    for (key, value) in read_txt_records(&packet[rdata_offset..offset]) {
+                        match key.as_str() {
+                            "audio_port" => service.audio_port = value.parse().ok(),
+                            "admin_port" => service.admin_port = value.parse().ok(),
+                            "auth" => service.auth = Some(value),
+                            "name" => service.name = Some(value),
+                            "version" => service.version = Some(value),
+                            _ => {}
+                        }
+                    }
+                }
+                28 if rdlen == 16 => {
+                    let mut octets = [0_u8; 16];
+                    octets.copy_from_slice(&packet[rdata_offset..rdata_offset + 16]);
+                    addresses
+                        .entry(normalize_dns_name(&record_name))
+                        .or_default()
+                        .push(IpAddr::V6(Ipv6Addr::from(octets)));
+                }
+                33 if rdlen >= 6 => {
+                    let service = services
+                        .entry(normalize_dns_name(&record_name))
+                        .or_default();
+                    service.instance = normalize_dns_name(&record_name);
+                    service.control_port = Some(dns_u16(packet, rdata_offset + 4)?);
+                    let (target, _) = read_dns_name(packet, rdata_offset + 6)?;
+                    service.target = Some(normalize_dns_name(&target));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(services
+            .into_iter()
+            .filter(|(instance, service)| {
+                instances.contains(instance)
+                    || instance.ends_with(INTERCOM_DISCOVERY_SERVICE)
+                    || service.target.is_some()
+            })
+            .filter_map(|(_instance, service)| profile_from_mdns_service(service, &addresses))
+            .collect())
+    }
+
+    fn profile_from_mdns_service(
+        service: MdnsService,
+        addresses: &std::collections::HashMap<String, Vec<std::net::IpAddr>>,
+    ) -> Option<MobileServerProfile> {
+        let target = service.target?;
+        let ip = addresses
+            .get(&target)?
+            .iter()
+            .copied()
+            .find(std::net::IpAddr::is_ipv4)
+            .or_else(|| addresses.get(&target)?.iter().copied().next())?;
+        let server_host = ip.to_string();
+        let url_host = match ip {
+            std::net::IpAddr::V4(ip) => ip.to_string(),
+            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        };
+        let name = service
+            .name
+            .unwrap_or_else(|| mdns_instance_label(&service.instance));
+        let control_port = service.control_port.unwrap_or(DEFAULT_CONTROL_PORT);
+        let audio_port = service.audio_port.unwrap_or(DEFAULT_AUDIO_PORT);
+        let server = std::net::SocketAddr::new(ip, audio_port).to_string();
+        let control = format!("ws://{url_host}:{control_port}");
+        let admin = service
+            .admin_port
+            .map(|port| format!("http://{url_host}:{port}"));
+        let id = if service.instance.trim().is_empty() {
+            mobile_profile_id(&name, &control)
+        } else {
+            service.instance.clone()
+        };
+
+        Some(MobileServerProfile {
+            id,
+            name,
+            server_host,
+            server,
+            control,
+            admin,
+            auth: service.auth,
+            version: service.version,
+            last_connected_ms: None,
+            discovered: true,
+        })
+    }
+
+    fn dedupe_discovered_profiles(
+        profiles: Vec<MobileServerProfile>,
+    ) -> anyhow::Result<Vec<MobileServerProfile>> {
+        let mut merged = Vec::<MobileServerProfile>::new();
+        for profile in profiles {
+            if let Some(existing) = merged.iter_mut().find(|existing| {
+                existing.control == profile.control
+                    || mobile_profiles_match_discovered_service(existing, &profile)
+            }) {
+                if should_replace_mobile_profile(existing, &profile) {
+                    *existing = profile;
+                }
+            } else if !merged
+                .iter()
+                .any(|existing| existing.control == profile.control)
+            {
+                merged.push(profile);
+            }
+        }
+        Ok(merged)
+    }
+
+    fn normalize_dns_name(name: &str) -> String {
+        name.trim_end_matches('.').to_ascii_lowercase()
+    }
+
+    fn mdns_instance_label(instance: &str) -> String {
+        instance
+            .strip_suffix(&format!(".{INTERCOM_DISCOVERY_SERVICE}"))
+            .unwrap_or(instance)
+            .to_string()
+    }
+
+    fn read_txt_records(data: &[u8]) -> Vec<(String, String)> {
+        let mut records = Vec::new();
+        let mut offset = 0;
+        while offset < data.len() {
+            let len = data[offset] as usize;
+            offset += 1;
+            if offset + len > data.len() {
+                break;
+            }
+            let text = String::from_utf8_lossy(&data[offset..offset + len]);
+            offset += len;
+            if let Some((key, value)) = text.split_once('=') {
+                records.push((key.to_ascii_lowercase(), value.to_string()));
+            }
+        }
+        records
+    }
+
+    fn read_dns_name(packet: &[u8], offset: usize) -> anyhow::Result<(String, usize)> {
+        let mut labels = Vec::new();
+        let mut pos = offset;
+        let mut consumed = None;
+        let mut jumps = 0;
+        loop {
+            if pos >= packet.len() {
+                bail!("DNS name offset out of bounds");
+            }
+            let len = packet[pos];
+            if len & 0xC0 == 0xC0 {
+                if pos + 1 >= packet.len() {
+                    bail!("DNS compression pointer out of bounds");
+                }
+                let pointer = (((len & 0x3F) as usize) << 8) | packet[pos + 1] as usize;
+                consumed.get_or_insert(pos + 2);
+                pos = pointer;
+                jumps += 1;
+                if jumps > 16 {
+                    bail!("too many DNS compression jumps");
+                }
+                continue;
+            }
+            if len == 0 {
+                return Ok((labels.join("."), consumed.unwrap_or(pos + 1)));
+            }
+            if len & 0xC0 != 0 {
+                bail!("unsupported DNS label encoding");
+            }
+            let start = pos + 1;
+            let end = start + len as usize;
+            if end > packet.len() {
+                bail!("DNS label out of bounds");
+            }
+            labels.push(String::from_utf8_lossy(&packet[start..end]).into_owned());
+            pos = end;
+        }
+    }
+
+    fn dns_u16(packet: &[u8], offset: usize) -> anyhow::Result<u16> {
+        if offset + 2 > packet.len() {
+            bail!("DNS u16 out of bounds");
+        }
+        Ok(u16::from_be_bytes([packet[offset], packet[offset + 1]]))
+    }
+
+    fn dns_u32(packet: &[u8], offset: usize) -> anyhow::Result<u32> {
+        if offset + 4 > packet.len() {
+            bail!("DNS u32 out of bounds");
+        }
+        Ok(u32::from_be_bytes([
+            packet[offset],
+            packet[offset + 1],
+            packet[offset + 2],
+            packet[offset + 3],
+        ]))
+    }
+
     fn spawn_mobile_runtime(settings: AppSettings) -> anyhow::Result<MobileRuntimeHandle> {
         let desktop_args = settings.desktop_args(false)?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let (api_tx, api_rx) = std::sync::mpsc::channel::<desktop::LocalClientApi>();
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
         let join = thread::Builder::new()
             .name("intercom-mobile-client-runtime".to_string())
             .spawn(move || {
-                tokio::runtime::Builder::new_multi_thread()
+                let result = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
                     .context("build mobile client runtime")
@@ -1584,16 +1985,53 @@ mod mobile {
                             },
                             Some(api_tx),
                         ))
-                    })
+                    });
+                let reported = result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|err| format!("{err:#}"));
+                let _ = result_tx.send(reported);
+                result
             })
             .context("spawn mobile client runtime")?;
-        let api = match api_rx.recv_timeout(std::time::Duration::from_secs(15)) {
-            Ok(api) => api,
-            Err(err) => {
-                let _ = shutdown_tx.send(());
-                return Err(anyhow::anyhow!(
-                    "mobile client runtime did not become ready: {err}"
-                ));
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let api = loop {
+            match api_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(api) => break api,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Ok(result) = result_rx.try_recv() {
+                        let _ = shutdown_tx.send(());
+                        let _ = join.join();
+                        match result {
+                            Ok(()) => bail!("mobile client runtime exited before becoming ready"),
+                            Err(err) => bail!("mobile client runtime failed before ready: {err}"),
+                        }
+                    }
+                    if std::time::Instant::now() >= ready_deadline {
+                        let _ = shutdown_tx.send(());
+                        bail!("mobile client runtime did not become ready within 15 seconds");
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = shutdown_tx.send(());
+                    let joined = join
+                        .join()
+                        .map_err(|_| "mobile client runtime thread panicked".to_string())
+                        .and_then(|result| result.map_err(|err| format!("{err:#}")));
+                    let runtime_result = result_rx.try_recv().ok();
+                    match runtime_result {
+                        Some(Ok(())) => {
+                            bail!("mobile client runtime exited before becoming ready")
+                        }
+                        Some(Err(err)) => {
+                            bail!("mobile client runtime failed before ready: {err}")
+                        }
+                        None => match joined {
+                            Ok(()) => bail!("mobile client runtime exited before becoming ready"),
+                            Err(err) => bail!("mobile client runtime failed before ready: {err}"),
+                        },
+                    }
+                }
             }
         };
         Ok(MobileRuntimeHandle {
@@ -1613,6 +2051,20 @@ mod mobile {
         settings.normalize_endpoints();
     }
 
+    fn prepare_mobile_identity_path(settings: &mut AppSettings, settings_path: &Path) {
+        if settings
+            .client_uid
+            .as_deref()
+            .is_some_and(|uid| !uid.trim().is_empty())
+            || settings.identity_file.is_some()
+        {
+            return;
+        }
+        settings.identity_file = settings_path
+            .parent()
+            .map(|dir| dir.join("client-identity.json"));
+    }
+
     fn mobile_controls_url() -> String {
         "client-controls.html".to_string()
     }
@@ -1627,8 +2079,8 @@ mod mobile {
 }
 
 fn validate_gain(name: &str, gain: f32) -> anyhow::Result<()> {
-    if !gain.is_finite() || !(0.0..=8.0).contains(&gain) {
-        bail!("{name} must be a finite value between 0 and 8");
+    if !gain.is_finite() || !(0.0..=2.0).contains(&gain) {
+        bail!("{name} must be a finite value between 0 and 2");
     }
     Ok(())
 }
@@ -1751,8 +2203,8 @@ mod tests {
         assert_eq!(settings.server, "127.0.0.1:40000".parse().unwrap());
         assert_eq!(settings.control, "ws://127.0.0.1:40001");
         assert!(!settings.advanced_endpoints);
-        assert_eq!(settings.tx_channel, 1);
-        assert_eq!(settings.listen_channel, 1);
+        assert_eq!(settings.tx_channel, 0);
+        assert_eq!(settings.listen_channel, 0);
         assert_eq!(settings.codec, Codec::Pcm16);
         assert_eq!(settings.opus_profile, OpusProfile::Speech24Standard);
         assert!(!settings.input_limiter);
@@ -1949,6 +2401,32 @@ mod tests {
     }
 
     #[test]
+    fn mobile_profile_preference_keeps_ipv4_over_ipv6() {
+        let ipv6 = MobileServerProfile {
+            id: "studio-a._intercom-suite._tcp.local".to_string(),
+            name: "Studio A".to_string(),
+            server_host: "fe80::1".to_string(),
+            server: "[fe80::1]:40000".to_string(),
+            control: "ws://[fe80::1]:40001".to_string(),
+            discovered: true,
+            ..MobileServerProfile::default()
+        };
+        let ipv4 = MobileServerProfile {
+            id: "studio-a._intercom-suite._tcp.local".to_string(),
+            name: "Studio A".to_string(),
+            server_host: "192.168.12.84".to_string(),
+            server: "192.168.12.84:40000".to_string(),
+            control: "ws://192.168.12.84:40001".to_string(),
+            discovered: true,
+            ..MobileServerProfile::default()
+        };
+
+        assert!(mobile_profiles_match_discovered_service(&ipv6, &ipv4));
+        assert!(should_replace_mobile_profile(&ipv6, &ipv4));
+        assert!(!should_replace_mobile_profile(&ipv4, &ipv6));
+    }
+
+    #[test]
     fn desktop_args_parse_button_strings() {
         let settings = AppSettings {
             user_id: Some(1),
@@ -1964,6 +2442,19 @@ mod tests {
         assert_eq!(args.button_count, DEFAULT_CLIENT_BUTTON_COUNT);
         assert_eq!(args.buttons.len(), 1);
         assert_eq!(args.button_keys.len(), 1);
+        assert!(!args.disable_command_loop);
+    }
+
+    #[test]
+    fn native_desktop_args_disable_terminal_command_loop() {
+        let settings = AppSettings {
+            window_mode: AppWindowMode::Native,
+            ..AppSettings::default()
+        };
+
+        let args = settings.desktop_args(false).unwrap();
+
+        assert!(args.disable_command_loop);
     }
 
     #[test]
@@ -1975,7 +2466,7 @@ mod tests {
         assert!(settings.validate().is_err());
 
         settings.jitter_ms = 40;
-        settings.mic_gain = 9.0;
+        settings.mic_gain = 2.5;
         assert!(settings.validate().is_err());
 
         settings.mic_gain = 1.0;
@@ -2218,6 +2709,8 @@ mod tests {
         assert!(!settings_html.contains("Advertised Buttons"));
         assert!(!settings_html.contains("Button Hotkeys"));
         assert!(settings_html.contains("type=\"range\""));
+        assert!(settings_html.contains("id=\"mic_gain\" type=\"range\" min=\"0\" max=\"2\""));
+        assert!(settings_html.contains("id=\"speaker_gain\" type=\"range\" min=\"0\" max=\"2\""));
         assert!(settings_js.contains("input_backend"));
         assert!(settings_js.contains("button_count"));
         assert!(settings_js.contains("server_host"));
@@ -2232,11 +2725,16 @@ mod tests {
         assert!(mobile_html.contains("button_count"));
         assert!(mobile_html.contains("server_host"));
         assert!(mobile_html.contains("advanced_endpoints"));
+        assert!(
+            mobile_html.find("id=\"message\"").unwrap() < mobile_html.find("server-panel").unwrap()
+        );
         assert!(!mobile_html.contains("User ID"));
         assert!(!mobile_html.contains("Listen Channel"));
         assert!(!mobile_html.contains("TX Channel"));
         assert!(!mobile_html.contains("Button Keys"));
         assert!(mobile_html.contains("type=\"range\""));
+        assert!(mobile_html.contains("id=\"mic_gain\" type=\"range\" min=\"0\" max=\"2\""));
+        assert!(mobile_html.contains("id=\"speaker_gain\" type=\"range\" min=\"0\" max=\"2\""));
         assert!(mobile_js.contains("invoke("));
         assert!(mobile_js.contains("button_count"));
         assert!(mobile_js.contains("server_host"));
@@ -2249,6 +2747,8 @@ mod tests {
         assert!(mobile_js.contains("mobile_select_server"));
         assert!(mobile_js.contains("mobile_forget_server"));
         assert!(mobile_js.contains("server_profiles"));
+        assert!(mobile_js.contains("Choose a server"));
+        assert!(mobile_js.contains("applyServerProfileToForm"));
         assert!(mobile_js.contains("status.phase"));
         assert!(!mobile_js.contains("fetch("));
         assert!(mobile_css.contains(".phone-shell"));
@@ -2260,8 +2760,22 @@ mod tests {
         assert!(controls_html.contains("client-api.js"));
         assert!(controls_html.contains("client-controls.js"));
         assert!(controls_html.contains("id=\"client-title\" hidden"));
+        assert!(controls_html.contains(">Runtime</button>"));
+        assert!(controls_js.contains("function bindPressHold"));
+        assert!(controls_js.contains("document.addEventListener('pointerup', finish, true)"));
+        assert!(!controls_js.contains("onlostpointercapture = regularTalkRelease"));
+        assert!(controls_css.contains("touch-action: none"));
+        assert!(controls_html.contains("Runtime Controls"));
+        assert!(controls_html.contains("show-all-channels"));
+        assert!(controls_html.contains("channel-view-toggle"));
+        assert!(controls_html.contains("identity-card"));
+        assert!(controls_html.contains("identity-card-value"));
+        assert!(controls_html.contains("max=\"2\""));
+        assert!(!controls_html.contains("Client Settings"));
         assert!(controls_html.contains("dock-status"));
         assert!(controls_js.contains("Server connected"));
+        assert!(controls_js.contains("runtimeSettings"));
+        assert!(controls_api.contains("runtimeSettings: false"));
         assert!(controls_css.contains(".tag.connected"));
         assert!(controls_api.contains("invoke("));
         assert!(controls_api.contains("client_state"));
@@ -2273,6 +2787,11 @@ mod tests {
         assert!(controls_html.contains("channel-tx-toggle"));
         assert!(controls_js.contains("function bindChannelSettingsGesture"));
         assert!(controls_js.contains("function saveChannelSettings()"));
+        assert!(controls_js.contains("showAllChannels"));
+        assert!(controls_js.contains("function allConfiguredChannels()"));
+        assert!(controls_js.contains("function setShowAllChannels"));
+        assert!(controls_js.contains("function assignedClientLabel()"));
+        assert!(controls_js.contains("User ID"));
         assert!(controls_js.contains("function channelIconTag"));
         assert!(controls_js.contains("function channelStatusTags"));
         assert!(controls_css.contains(".tag.icon-tag"));

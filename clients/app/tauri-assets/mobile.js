@@ -56,6 +56,10 @@ function setServerProfiles(profiles = []) {
     return;
   }
   picker.disabled = false;
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = 'Choose a server...';
+  picker.appendChild(placeholder);
   for (const profile of serverProfiles) {
     const option = document.createElement('option');
     option.value = profile.id;
@@ -64,8 +68,30 @@ function setServerProfiles(profiles = []) {
   }
   const currentProfile = serverProfiles.find(profile => profile.control === $('control').value.trim() || profile.server_host === $('server_host').value.trim());
   if (currentProfile) picker.value = currentProfile.id;
+  else picker.value = '';
   $('forget-server').disabled = !picker.value;
   $('server-list-status').textContent = `${serverProfiles.length} server${serverProfiles.length === 1 ? '' : 's'} available.`;
+}
+
+function profileUsesDefaultEndpoints(profile, host) {
+  if (!host) return false;
+  return (!profile.server || profile.server === audioForHost(host))
+    && (!profile.control || profile.control === controlForHost(host))
+    && (!profile.admin || profile.admin === adminForHost(host));
+}
+
+function applyServerProfileToForm(profile) {
+  const host = normalizeHost(profile.server_host);
+  if (host) {
+    $('server_host').value = host;
+  }
+
+  const useDefaultEndpoints = profileUsesDefaultEndpoints(profile, host);
+  $('advanced_endpoints').checked = !useDefaultEndpoints;
+  $('server').value = profile.server || (host ? audioForHost(host) : $('server').value.trim());
+  $('control').value = profile.control || (host ? controlForHost(host) : $('control').value.trim());
+  $('admin').value = profile.admin || (host ? adminForHost(host) : '');
+  syncEndpointFields();
 }
 
 async function openControls() {
@@ -159,8 +185,8 @@ function collect() {
     user_id: null,
     codec: $('codec').value,
     opus_profile: $('opus_profile').value,
-    listen_channel: Number(current?.listen_channel || 1),
-    tx_channel: Number(current?.tx_channel || 1),
+    listen_channel: Number(current?.listen_channel ?? 0),
+    tx_channel: Number(current?.tx_channel ?? 0),
     mic_gain: Number($('mic_gain').value || 1),
     speaker_gain: Number($('speaker_gain').value || 1),
     button_count: Number($('button_count').value || 6),
@@ -239,6 +265,7 @@ $('server-picker').addEventListener('change', async event => {
   const profile = serverProfiles.find(item => item.id === $('server-picker').value);
   if (!profile) return;
   try {
+    applyServerProfileToForm(profile);
     const settings = await invoke('mobile_select_server', { profile });
     fill(settings);
     setMessage(`Selected ${profile.name || profile.control}.`, 'running');

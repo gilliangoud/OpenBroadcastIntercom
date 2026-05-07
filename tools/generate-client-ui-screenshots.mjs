@@ -390,6 +390,7 @@ function controlsMockScript() {
       name: 'docs',
       capabilities: {
         setup: scenario() === 'tauri',
+        runtimeSettings: scenario() !== 'tauri',
         gain: scenario() !== 'pi',
         macosMicrophoneModes: scenario() === 'desktop'
       },

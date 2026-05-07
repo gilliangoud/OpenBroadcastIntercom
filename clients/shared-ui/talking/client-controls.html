@@ -17,10 +17,15 @@
         </div>
         <nav class="top-actions" aria-label="Console actions">
           <button id="stats-open" type="button">Stats</button>
-          <button id="settings-open" type="button">Settings</button>
+          <button id="settings-open" type="button" hidden>Runtime</button>
           <button id="setup-open" type="button" hidden>Setup</button>
         </nav>
       </header>
+
+      <section class="identity-card" aria-label="Assigned client">
+        <span class="identity-label">Assigned Client</span>
+        <strong id="identity-card-value" class="identity-value">User ID -</strong>
+      </section>
 
       <section id="lockout-strip" class="event-strip warning-strip" hidden>
         <strong>Limited controls</strong>
@@ -46,7 +51,10 @@
       <section class="channels-panel">
         <div class="section-title">
           <h2>Channels</h2>
-          <span id="route-summary" class="muted"></span>
+          <div class="channel-view-controls">
+            <span id="route-summary" class="muted"></span>
+            <button id="channel-view-toggle" class="compact-toggle" type="button" aria-pressed="false">Assigned</button>
+          </div>
         </div>
         <div id="channel-list" class="channel-list"></div>
       </section>
@@ -102,14 +110,18 @@
       <div id="settings-modal" class="modal" hidden>
         <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
           <div class="modal-head">
-            <h2 id="settings-title">Client Settings</h2>
+            <h2 id="settings-title">Runtime Controls</h2>
             <button id="settings-close" type="button">Close</button>
           </div>
+          <fieldset class="preference-panel">
+            <legend>Channel View</legend>
+            <label class="check"><input id="show-all-channels" type="checkbox" /> Show all server channels</label>
+          </fieldset>
           <form id="settings-form">
             <fieldset data-requires-gain>
               <legend>Audio</legend>
-              <label>Mic Gain <output id="mic-gain-value"></output><input id="mic-gain-input" type="range" min="0" max="4" step="0.05" /></label>
-              <label>Speaker Gain <output id="speaker-gain-value"></output><input id="speaker-gain-input" type="range" min="0" max="4" step="0.05" /></label>
+              <label>Mic Gain <output id="mic-gain-value"></output><input id="mic-gain-input" type="range" min="0" max="2" step="0.05" /></label>
+              <label>Speaker Gain <output id="speaker-gain-value"></output><input id="speaker-gain-input" type="range" min="0" max="2" step="0.05" /></label>
               <button id="save-gain" type="button">Apply Gain</button>
             </fieldset>
 
@@ -134,7 +146,7 @@
               <summary>Routing</summary>
               <fieldset>
                 <div class="inline-editor">
-                  <label>Channel<input id="route-channel-input" type="number" min="1" max="65535" inputmode="numeric" placeholder="1" /></label>
+                  <label>Channel<input id="route-channel-input" type="number" min="0" max="65535" inputmode="numeric" placeholder="0" /></label>
                   <div class="inline-actions">
                     <button id="route-add-listen" type="button">Add Listen</button>
                     <button id="route-add-tx" type="button">Add TX</button>
@@ -149,7 +161,7 @@
               <fieldset>
                 <div class="inline-editor two">
                   <label>Talker ID<input id="talker-id-input" type="number" min="1" max="65535" inputmode="numeric" placeholder="12" /></label>
-                  <label>Gain<input id="talker-gain-input" type="number" min="0" max="4" step="0.05" value="1" /></label>
+                  <label>Gain<input id="talker-gain-input" type="number" min="0" max="2" step="0.05" value="1" /></label>
                   <button id="talker-add" type="button">Add Gain</button>
                 </div>
                 <div id="talker-gain-editor" class="config-list"></div>
@@ -161,7 +173,7 @@
               <fieldset>
                 <label class="check"><input id="ifb-enabled" type="checkbox" /> Enabled</label>
                 <div class="inline-editor">
-                  <label>Channel<input id="ifb-channel-input" type="number" min="1" max="65535" inputmode="numeric" placeholder="9" /></label>
+                  <label>Channel<input id="ifb-channel-input" type="number" min="0" max="65535" inputmode="numeric" placeholder="9" /></label>
                   <div class="inline-actions">
                     <button id="ifb-add-program" type="button">Add Program</button>
                     <button id="ifb-add-interrupt" type="button">Add Interrupt</button>
@@ -172,7 +184,7 @@
               </fieldset>
             </details>
 
-            <button id="save-config" class="save-button" type="button">Apply Settings</button>
+            <button id="save-config" class="save-button" type="button">Apply Runtime Controls</button>
           </form>
         </div>
       </div>
@@ -188,7 +200,7 @@
               <legend id="channel-settings-legend">Channel</legend>
               <label class="pill-toggle"><input id="channel-listen-toggle" type="checkbox" /> Listen to this channel</label>
               <label class="pill-toggle"><input id="channel-tx-toggle" type="checkbox" /> Talk on this channel</label>
-              <label>Receive Gain<input id="channel-gain-input" type="number" min="0" max="4" step="0.05" inputmode="decimal" value="1" /></label>
+              <label>Receive Gain<input id="channel-gain-input" type="number" min="0" max="2" step="0.05" inputmode="decimal" value="1" /></label>
             </fieldset>
             <div class="dialog-actions">
               <button id="channel-settings-remove" type="button">Remove</button>

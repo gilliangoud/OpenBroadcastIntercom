@@ -53,9 +53,9 @@ struct Args {
     client_uid: Option<String>,
     #[arg(long)]
     identity_file: Option<std::path::PathBuf>,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 0)]
     tx_channel: u16,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 0)]
     listen_channel: u16,
     #[arg(long, value_enum, default_value_t = WireCodec::Pcm16)]
     codec: WireCodec,
@@ -551,17 +551,13 @@ async fn main() -> anyhow::Result<()> {
         let mut send_error_logged = false;
 
         while let Some(frame) = mic_rx.recv().await {
-            let (tx_targets, codec, opus_profile) = {
-                let config = send_config.lock().unwrap();
-                (
-                    config.active_tx_targets(),
-                    config.codec,
-                    config.opus_profile,
-                )
-            };
-            if tx_targets.is_empty() {
+            let Some(snapshot) = send_config.lock().unwrap().active_transmit_snapshot() else {
                 continue;
-            }
+            };
+            let user_id = snapshot.user_id;
+            let tx_targets = snapshot.targets;
+            let codec = snapshot.codec;
+            let opus_profile = snapshot.opus_profile;
 
             if codec != current_codec || opus_profile != current_opus_profile {
                 match AudioEncoder::new(codec, opus_profile) {
@@ -1962,6 +1958,14 @@ mod tests {
         assert!(LOCAL_UI_HTML.contains("Operator Console"));
         assert!(LOCAL_UI_HTML.contains("client-api.js"));
         assert!(LOCAL_UI_HTML.contains("id=\"client-title\" hidden"));
+        assert!(LOCAL_UI_HTML.contains(">Runtime</button>"));
+        assert!(LOCAL_UI_HTML.contains("Runtime Controls"));
+        assert!(LOCAL_UI_HTML.contains("show-all-channels"));
+        assert!(LOCAL_UI_HTML.contains("channel-view-toggle"));
+        assert!(LOCAL_UI_HTML.contains("identity-card"));
+        assert!(LOCAL_UI_HTML.contains("identity-card-value"));
+        assert!(LOCAL_UI_HTML.contains("max=\"2\""));
+        assert!(!LOCAL_UI_HTML.contains("Client Settings"));
         assert!(LOCAL_UI_HTML.contains("route-editor"));
         assert!(LOCAL_UI_HTML.contains("bottom-special"));
         assert!(LOCAL_UI_JS.contains("function renderButtons()"));
@@ -1969,6 +1973,11 @@ mod tests {
         assert!(LOCAL_UI_JS.contains("data-requires-gain"));
         assert!(LOCAL_UI_HTML.contains("channel-settings-modal"));
         assert!(LOCAL_UI_JS.contains("function bindChannelSettingsGesture"));
+        assert!(LOCAL_UI_JS.contains("showAllChannels"));
+        assert!(LOCAL_UI_JS.contains("function allConfiguredChannels()"));
+        assert!(LOCAL_UI_JS.contains("function setShowAllChannels"));
+        assert!(LOCAL_UI_JS.contains("function assignedClientLabel()"));
+        assert!(LOCAL_UI_JS.contains("User ID"));
         assert!(LOCAL_UI_JS.contains("function channelIconTag"));
         assert!(LOCAL_UI_JS.contains("function channelStatusTags"));
         assert!(LOCAL_UI_CSS.contains(".tag.icon-tag"));
@@ -1981,6 +1990,7 @@ mod tests {
         assert!(LOCAL_UI_CSS.contains(".tag.connected"));
         assert!(!LOCAL_UI_JS.contains("fetch("));
         assert!(LOCAL_UI_API_JS.contains("fetch("));
+        assert!(LOCAL_UI_API_JS.contains("runtimeSettings: !mobileShell()"));
         assert!(LOCAL_UI_CSS.contains(".phone-shell"));
         assert!(LOCAL_UI_CSS.contains("--dock-height"));
     }
