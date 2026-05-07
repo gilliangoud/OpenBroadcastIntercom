@@ -185,11 +185,11 @@ config INTERCOM_BUTTON1_GPIO
 
 config INTERCOM_BUTTON1_ID
     string "Dedicated button 1 ID"
-    default "director"
+    default "button-a"
 
 config INTERCOM_BUTTON1_LABEL
     string "Dedicated button 1 label"
-    default "Director"
+    default "A"
 
 config INTERCOM_BUTTON2_GPIO
     int "Dedicated button 2 GPIO"
@@ -198,11 +198,132 @@ config INTERCOM_BUTTON2_GPIO
 
 config INTERCOM_BUTTON2_ID
     string "Dedicated button 2 ID"
-    default "pa"
+    default "button-b"
 
 config INTERCOM_BUTTON2_LABEL
     string "Dedicated button 2 label"
-    default "PA"
+    default "B"
+
+config INTERCOM_BUTTON3_GPIO
+    int "Dedicated button 3 GPIO"
+    default -1
+    range -1 48
+
+config INTERCOM_BUTTON3_ID
+    string "Dedicated button 3 ID"
+    default "button-c"
+
+config INTERCOM_BUTTON3_LABEL
+    string "Dedicated button 3 label"
+    default "C"
+
+config INTERCOM_BUTTON4_GPIO
+    int "Dedicated button 4 GPIO"
+    default -1
+    range -1 48
+
+config INTERCOM_BUTTON4_ID
+    string "Dedicated button 4 ID"
+    default "button-d"
+
+config INTERCOM_BUTTON4_LABEL
+    string "Dedicated button 4 label"
+    default "D"
+
+config INTERCOM_REPLY_BUTTON_GPIO
+    int "Reply/alert button GPIO"
+    default -1
+    range -1 48
+    help
+        Active-low momentary reply/alert input. Pressing and holding acks the
+        newest active alert and direct-calls its sender while held. If there is
+        no active alert, it falls back to the last direct caller.
+
+menu "ST7789 display"
+
+config INTERCOM_DISPLAY_ST7789
+    bool "Enable ST7789 240x240 TFT display"
+    default n
+    help
+        Enables the optional 1.54 inch 240x240 SPI ST7789 display UI. Leave
+        disabled unless the display pins are wired and configured.
+
+config INTERCOM_DISPLAY_SPI_HOST
+    int "Display SPI host"
+    default 2
+    range 1 3
+    depends on INTERCOM_DISPLAY_ST7789
+    help
+        ESP-IDF SPI host number used for the ST7789 display. ESP32 projects
+        normally use 2 for HSPI or 3 for VSPI.
+
+config INTERCOM_DISPLAY_SPI_MOSI_GPIO
+    int "Display SPI MOSI GPIO"
+    default -1
+    range -1 48
+    depends on INTERCOM_DISPLAY_ST7789
+
+config INTERCOM_DISPLAY_SPI_SCLK_GPIO
+    int "Display SPI SCLK GPIO"
+    default -1
+    range -1 48
+    depends on INTERCOM_DISPLAY_ST7789
+
+config INTERCOM_DISPLAY_SPI_CS_GPIO
+    int "Display SPI CS GPIO"
+    default -1
+    range -1 48
+    depends on INTERCOM_DISPLAY_ST7789
+
+config INTERCOM_DISPLAY_DC_GPIO
+    int "Display DC GPIO"
+    default -1
+    range -1 48
+    depends on INTERCOM_DISPLAY_ST7789
+
+config INTERCOM_DISPLAY_RST_GPIO
+    int "Display reset GPIO"
+    default -1
+    range -1 48
+    depends on INTERCOM_DISPLAY_ST7789
+
+config INTERCOM_DISPLAY_BACKLIGHT_GPIO
+    int "Display backlight GPIO"
+    default -1
+    range -1 48
+    depends on INTERCOM_DISPLAY_ST7789
+
+config INTERCOM_DISPLAY_BACKLIGHT_ACTIVE_LOW
+    bool "Display backlight active low"
+    default n
+    depends on INTERCOM_DISPLAY_ST7789
+
+config INTERCOM_DISPLAY_SPI_CLOCK_HZ
+    int "Display SPI clock Hz"
+    default 40000000
+    range 1000000 80000000
+    depends on INTERCOM_DISPLAY_ST7789
+
+choice INTERCOM_DISPLAY_ROTATION
+    prompt "Display rotation"
+    default INTERCOM_DISPLAY_ROTATION_90
+    depends on INTERCOM_DISPLAY_ST7789
+
+config INTERCOM_DISPLAY_ROTATION_0
+    bool "0 degrees"
+
+config INTERCOM_DISPLAY_ROTATION_90
+    bool "90 degrees"
+
+config INTERCOM_DISPLAY_ROTATION_180
+    bool "180 degrees"
+
+config INTERCOM_DISPLAY_ROTATION_270
+    bool "270 degrees"
+
+endchoice
+
+endmenu
 
 config INTERCOM_AUDIO_TASK_CORE
     int "Audio task core"
@@ -251,6 +372,39 @@ config INTERCOM_CAPTURE_TASK_STACK_SIZE
         out of the task stack, but this guard leaves room for I2S and control
         call frames when running pcm24 or pcm48.
 
+config INTERCOM_OPUS
+    bool "Enable Opus codec support"
+    default n
+    help
+        Enables the optional ESP32 Opus encoder/decoder path using 10 ms mono
+        speech frames. This increases firmware size and CPU use, so leave it
+        disabled unless the larger app partition is selected.
+
+config INTERCOM_OPUS_BITRATE_BPS
+    int "Opus mono bitrate bps"
+    default 32000
+    range 12000 80000
+    depends on INTERCOM_OPUS
+
+config INTERCOM_OPUS_COMPLEXITY
+    int "Opus encoder complexity"
+    default 5
+    range 0 10
+    depends on INTERCOM_OPUS
+
+config INTERCOM_TASK_WATCHDOG
+    bool "Enable ESP32 intercom task watchdog"
+    default y
+    help
+        Registers the long-running normal-mode intercom tasks with the ESP-IDF
+        task watchdog. Diagnostic audio modes do not start these runtime tasks.
+
+config INTERCOM_TASK_WATCHDOG_TIMEOUT_SECONDS
+    int "ESP32 intercom task watchdog timeout seconds"
+    default 8
+    range 2 60
+    depends on INTERCOM_TASK_WATCHDOG
+
 config INTERCOM_JITTER_FRAMES
     int "Playback jitter buffer frames"
     default 4
@@ -266,13 +420,12 @@ config INTERCOM_PLAYBACK_PREFILL_FRAMES
         that are heard as headphone clicks.
 
 choice INTERCOM_INITIAL_CODEC
-    prompt "Initial PCM codec"
+    prompt "Initial audio codec"
     default INTERCOM_INITIAL_CODEC_PCM16
     help
         Codec used before the server has sent authoritative configuration.
         The ESP32 I2S hardware sample rate follows this codec and later follows
-        the server-selected codec. Use pcm16 while gain-staging a new board,
-        then try pcm24 or pcm48 once capture health shows no clipping.
+        the server-selected codec. Use pcm16 while gain-staging a new board.
 
 config INTERCOM_INITIAL_CODEC_PCM16
     bool "PCM16 / 16 kHz"
@@ -282,6 +435,10 @@ config INTERCOM_INITIAL_CODEC_PCM24
 
 config INTERCOM_INITIAL_CODEC_PCM48
     bool "PCM48 / 48 kHz"
+
+config INTERCOM_INITIAL_CODEC_OPUS
+    bool "Opus / 24 kHz speech"
+    depends on INTERCOM_OPUS
 
 endchoice
 

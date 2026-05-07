@@ -11,11 +11,17 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/i2s.h"
+#include "driver/spi_master.h"
 #include "esp_check.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_vendor.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "esp_websocket_client.h"
@@ -36,6 +42,10 @@
 #include "intercom_protocol.h"
 #include "pcm_frame_ring.h"
 
+#if CONFIG_INTERCOM_OPUS
+#include "opus.h"
+#endif
+
 #ifndef CONFIG_INTERCOM_CLIENT_UID
 #define CONFIG_INTERCOM_CLIENT_UID ""
 #endif
@@ -46,6 +56,9 @@
 #define MAX_BUTTONS 4
 #define MAX_BUTTON_ID 24
 #define MAX_BUTTON_LABEL 32
+#define MAX_UNIT_NAME 48
+#define MAX_ALERT_MESSAGE 72
+#define MAX_UI_STATUS 64
 #define CONTROL_SEND_TIMEOUT_MS 1000
 #define CONTROL_SEND_MUTEX_TIMEOUT_MS 1500
 #define CONTROL_RX_MAX_BYTES 16384
@@ -73,6 +86,48 @@
 #define ESP32_AUDIO_HW_CHANNELS 2
 #define ESP32_AUDIO_HW_BITS_PER_SAMPLE 16
 #define ESP32_AUDIO_HW_FRAME_BYTES (ESP32_AUDIO_HW_SAMPLES_PER_FRAME * ESP32_AUDIO_HW_CHANNELS * sizeof(int16_t))
+#define DISPLAY_WIDTH 240
+#define DISPLAY_HEIGHT 240
+#define DISPLAY_PIXELS (DISPLAY_WIDTH * DISPLAY_HEIGHT)
+#define DISPLAY_REFRESH_MIN_US 250000LL
+#define DISPLAY_IDLE_REFRESH_US 2000000LL
+#define DISPLAY_TRANSIENT_US 1500000LL
+
+#ifndef CONFIG_INTERCOM_DISPLAY_ST7789
+#define CONFIG_INTERCOM_DISPLAY_ST7789 0
+#endif
+
+#ifndef CONFIG_INTERCOM_DISPLAY_SPI_HOST
+#define CONFIG_INTERCOM_DISPLAY_SPI_HOST 2
+#endif
+
+#ifndef CONFIG_INTERCOM_DISPLAY_SPI_MOSI_GPIO
+#define CONFIG_INTERCOM_DISPLAY_SPI_MOSI_GPIO -1
+#endif
+
+#ifndef CONFIG_INTERCOM_DISPLAY_SPI_SCLK_GPIO
+#define CONFIG_INTERCOM_DISPLAY_SPI_SCLK_GPIO -1
+#endif
+
+#ifndef CONFIG_INTERCOM_DISPLAY_SPI_CS_GPIO
+#define CONFIG_INTERCOM_DISPLAY_SPI_CS_GPIO -1
+#endif
+
+#ifndef CONFIG_INTERCOM_DISPLAY_DC_GPIO
+#define CONFIG_INTERCOM_DISPLAY_DC_GPIO -1
+#endif
+
+#ifndef CONFIG_INTERCOM_DISPLAY_RST_GPIO
+#define CONFIG_INTERCOM_DISPLAY_RST_GPIO -1
+#endif
+
+#ifndef CONFIG_INTERCOM_DISPLAY_BACKLIGHT_GPIO
+#define CONFIG_INTERCOM_DISPLAY_BACKLIGHT_GPIO -1
+#endif
+
+#ifndef CONFIG_INTERCOM_DISPLAY_SPI_CLOCK_HZ
+#define CONFIG_INTERCOM_DISPLAY_SPI_CLOCK_HZ 40000000
+#endif
 
 #ifndef CONFIG_INTERCOM_SIDETONE_CODEC_BYPASS_GAIN_PERCENT
 #define CONFIG_INTERCOM_SIDETONE_CODEC_BYPASS_GAIN_PERCENT 25
@@ -230,6 +285,40 @@ typedef struct {
 } physical_button_t;
 
 typedef struct {
+    char id[MAX_BUTTON_ID];
+    char label[MAX_BUTTON_LABEL];
+    bool enabled;
+    bool configured;
+    bool active;
+} ui_button_state_t;
+
+typedef struct {
+    uint64_t id;
+    uint16_t sender;
+    char message[MAX_ALERT_MESSAGE];
+    uint64_t created_at_ms;
+    bool present;
+} ui_alert_state_t;
+
+typedef struct {
+    bool wifi_connected;
+    bool control_connected;
+    bool config_received;
+    char blocking_status[MAX_UI_STATUS];
+    uint16_t user_id;
+    char unit_name[MAX_UNIT_NAME];
+    ui_button_state_t buttons[MAX_BUTTONS];
+    ui_alert_state_t active_alert;
+    bool has_last_direct_caller;
+    uint16_t last_direct_caller;
+    uint16_t active_direct_call_count;
+    bool reply_held;
+    uint16_t reply_target;
+    char transient_status[MAX_UI_STATUS];
+    int64_t transient_until_us;
+} ui_state_t;
+
+typedef struct {
     double sum;
     double sum_squares;
     int peak_abs;
@@ -368,6 +457,7 @@ static portMUX_TYPE s_audio_config_lock = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE s_audio_cue_lock = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE s_codec_mute_lock = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE s_control_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE s_ui_lock = portMUX_INITIALIZER_UNLOCKED;
 static capture_health_report_t s_capture_health_report;
 static audio_cue_state_t s_audio_cue;
 static esp32_audio_config_t s_audio_config;
@@ -401,6 +491,38 @@ static bool s_codec_output_mute_requested;
 static bool s_control_connected;
 static bool s_control_hello_pending;
 static bool s_control_startup_config_pending;
+static volatile uint32_t s_wifi_connect_count;
+static volatile uint32_t s_wifi_disconnect_count;
+static volatile uint32_t s_control_connect_count;
+static volatile uint32_t s_control_disconnect_count;
+static volatile uint32_t s_udp_rx_packets;
+static volatile uint32_t s_udp_decode_errors;
+static volatile uint32_t s_udp_codec_drops;
+static volatile uint32_t s_udp_sequence_gaps;
+static volatile uint32_t s_udp_payload_decode_errors;
+static volatile uint32_t s_udp_tx_send_failures;
+static volatile uint32_t s_audio_tx_queue_drops;
+#if CONFIG_INTERCOM_OPUS
+static volatile uint32_t s_opus_encode_failures;
+static volatile uint32_t s_opus_decode_failures;
+#endif
+static bool s_udp_have_last_seq;
+static uint16_t s_udp_last_seq;
+static TaskHandle_t s_udp_task_handle;
+static TaskHandle_t s_registration_task_handle;
+static TaskHandle_t s_playback_task_handle;
+static TaskHandle_t s_capture_task_handle;
+static TaskHandle_t s_button_task_handle;
+#if CONFIG_INTERCOM_DISPLAY_ST7789
+static TaskHandle_t s_display_task_handle;
+static bool s_display_initialized;
+static bool s_display_framebuffer_in_psram;
+static size_t s_display_framebuffer_bytes;
+#endif
+#if CONFIG_INTERCOM_OPUS
+static OpusEncoder *s_opus_encoder;
+static OpusDecoder *s_opus_decoder;
+#endif
 static int16_t s_audio_cue_sine_lut[AUDIO_CUE_SINE_LUT_SIZE];
 static bool s_audio_cue_sine_lut_ready;
 static i2c_master_bus_handle_t s_i2c_bus;
@@ -412,10 +534,28 @@ static int64_t s_audio_hw_last_write_warn_us;
 static uint32_t s_audio_hw_write_gap_warnings;
 static uint32_t s_audio_hw_write_slow_warnings;
 static uint32_t s_audio_hw_write_short_warnings;
+static ui_state_t s_ui_state;
+static volatile uint32_t s_ui_state_version;
+static uint16_t s_reply_active_target;
+
+#if CONFIG_INTERCOM_DISPLAY_ST7789
+static esp_lcd_panel_handle_t s_display_panel;
+static uint16_t *s_display_framebuffer;
+#endif
 
 static physical_button_t s_dedicated_buttons[] = {
     {CONFIG_INTERCOM_BUTTON1_GPIO, CONFIG_INTERCOM_BUTTON1_ID, CONFIG_INTERCOM_BUTTON1_LABEL, false, false, 0},
     {CONFIG_INTERCOM_BUTTON2_GPIO, CONFIG_INTERCOM_BUTTON2_ID, CONFIG_INTERCOM_BUTTON2_LABEL, false, false, 0},
+    {CONFIG_INTERCOM_BUTTON3_GPIO, CONFIG_INTERCOM_BUTTON3_ID, CONFIG_INTERCOM_BUTTON3_LABEL, false, false, 0},
+    {CONFIG_INTERCOM_BUTTON4_GPIO, CONFIG_INTERCOM_BUTTON4_ID, CONFIG_INTERCOM_BUTTON4_LABEL, false, false, 0},
+};
+static physical_button_t s_reply_button = {
+    CONFIG_INTERCOM_REPLY_BUTTON_GPIO,
+    "reply",
+    "Reply",
+    false,
+    false,
+    0,
 };
 
 static cJSON *codec_config_json(void);
@@ -896,7 +1036,9 @@ static const char *talk_mode_wire(talk_mode_t mode)
 
 static ic_codec_t default_codec(void)
 {
-#if CONFIG_INTERCOM_INITIAL_CODEC_PCM48
+#if CONFIG_INTERCOM_INITIAL_CODEC_OPUS
+    return IC_CODEC_OPUS;
+#elif CONFIG_INTERCOM_INITIAL_CODEC_PCM48
     return IC_CODEC_PCM48;
 #elif CONFIG_INTERCOM_INITIAL_CODEC_PCM24
     return IC_CODEC_PCM24;
@@ -907,7 +1049,11 @@ static ic_codec_t default_codec(void)
 
 static bool codec_supported(ic_codec_t codec)
 {
-    return codec == IC_CODEC_PCM16 || codec == IC_CODEC_PCM24 || codec == IC_CODEC_PCM48;
+    return codec == IC_CODEC_PCM16 || codec == IC_CODEC_PCM24 || codec == IC_CODEC_PCM48
+#if CONFIG_INTERCOM_OPUS
+           || codec == IC_CODEC_OPUS
+#endif
+        ;
 }
 
 static gpio_num_t audio_i2s_ws_gpio_for(const i2s_runtime_options_t *options)
@@ -946,6 +1092,8 @@ static void audio_i2s_log_channel_info(const char *label)
 static const char *codec_wire(ic_codec_t codec)
 {
     switch (codec) {
+    case IC_CODEC_OPUS:
+        return "opus";
     case IC_CODEC_PCM24:
         return "pcm24";
     case IC_CODEC_PCM48:
@@ -970,12 +1118,18 @@ static bool parse_codec_value(const char *value, ic_codec_t *out)
         *out = IC_CODEC_PCM48;
         return true;
     }
+    if (string_eq(value, "opus")) {
+        *out = IC_CODEC_OPUS;
+        return true;
+    }
     return false;
 }
 
 static size_t codec_samples_per_frame(ic_codec_t codec)
 {
     switch (codec) {
+    case IC_CODEC_OPUS:
+        return IC_OPUS_SAMPLES_PER_FRAME;
     case IC_CODEC_PCM24:
         return IC_PCM24_SAMPLES_PER_FRAME;
     case IC_CODEC_PCM48:
@@ -986,10 +1140,33 @@ static size_t codec_samples_per_frame(ic_codec_t codec)
     }
 }
 
-static size_t codec_payload_bytes(ic_codec_t codec)
+#if CONFIG_INTERCOM_OPUS
+static esp_err_t opus_codec_init(void)
 {
-    return codec_samples_per_frame(codec) * sizeof(int16_t);
+    int err = OPUS_OK;
+    s_opus_encoder = opus_encoder_create(IC_PCM24_SAMPLE_RATE, 1, OPUS_APPLICATION_VOIP, &err);
+    if (!s_opus_encoder || err != OPUS_OK) {
+        ESP_LOGE(TAG, "failed to create Opus encoder: %d", err);
+        return ESP_FAIL;
+    }
+    s_opus_decoder = opus_decoder_create(IC_PCM24_SAMPLE_RATE, 1, &err);
+    if (!s_opus_decoder || err != OPUS_OK) {
+        ESP_LOGE(TAG, "failed to create Opus decoder: %d", err);
+        return ESP_FAIL;
+    }
+    opus_encoder_ctl(s_opus_encoder, OPUS_SET_BITRATE(CONFIG_INTERCOM_OPUS_BITRATE_BPS));
+    opus_encoder_ctl(s_opus_encoder, OPUS_SET_COMPLEXITY(CONFIG_INTERCOM_OPUS_COMPLEXITY));
+    opus_encoder_ctl(s_opus_encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+    opus_encoder_ctl(s_opus_encoder, OPUS_SET_BANDWIDTH(OPUS_BANDWIDTH_SUPERWIDEBAND));
+    opus_encoder_ctl(s_opus_encoder, OPUS_SET_PACKET_LOSS_PERC(5));
+    ESP_LOGI(TAG,
+             "Opus codec initialized: rate=%u bitrate=%u complexity=%u",
+             (unsigned)IC_PCM24_SAMPLE_RATE,
+             (unsigned)CONFIG_INTERCOM_OPUS_BITRATE_BPS,
+             (unsigned)CONFIG_INTERCOM_OPUS_COMPLEXITY);
+    return ESP_OK;
 }
+#endif
 
 static int16_t clamp_i32_to_i16(int32_t value)
 {
@@ -1467,6 +1644,113 @@ static bool gpio_supports_internal_pullup(int gpio)
     return gpio >= 0 && !(gpio >= 34 && gpio <= 39);
 }
 
+static void ui_mark_changed_locked(void)
+{
+    s_ui_state_version++;
+}
+
+static void ui_seed_buttons_locked(void)
+{
+    for (size_t i = 0; i < MAX_BUTTONS; i++) {
+        physical_button_t *button = &s_dedicated_buttons[i];
+        memset(&s_ui_state.buttons[i], 0, sizeof(s_ui_state.buttons[i]));
+        strlcpy(s_ui_state.buttons[i].id, button->id ? button->id : "", sizeof(s_ui_state.buttons[i].id));
+        strlcpy(s_ui_state.buttons[i].label,
+                button->label && button->label[0] ? button->label : s_ui_state.buttons[i].id,
+                sizeof(s_ui_state.buttons[i].label));
+        s_ui_state.buttons[i].enabled = physical_button_enabled(button);
+    }
+}
+
+static void ui_state_init(void)
+{
+    taskENTER_CRITICAL(&s_ui_lock);
+    memset(&s_ui_state, 0, sizeof(s_ui_state));
+    s_ui_state.user_id = CONFIG_INTERCOM_USER_ID;
+    strlcpy(s_ui_state.blocking_status, "Starting", sizeof(s_ui_state.blocking_status));
+    ui_seed_buttons_locked();
+    ui_mark_changed_locked();
+    taskEXIT_CRITICAL(&s_ui_lock);
+}
+
+static ui_state_t ui_state_snapshot(void)
+{
+    ui_state_t snapshot;
+    taskENTER_CRITICAL(&s_ui_lock);
+    snapshot = s_ui_state;
+    taskEXIT_CRITICAL(&s_ui_lock);
+    return snapshot;
+}
+
+static void ui_set_wifi_connected(bool connected)
+{
+    taskENTER_CRITICAL(&s_ui_lock);
+    if (s_ui_state.wifi_connected != connected) {
+        s_ui_state.wifi_connected = connected;
+        if (!connected) {
+            s_ui_state.control_connected = false;
+            s_ui_state.config_received = false;
+        }
+        ui_mark_changed_locked();
+    }
+    taskEXIT_CRITICAL(&s_ui_lock);
+}
+
+static void ui_set_control_connected(bool connected)
+{
+    taskENTER_CRITICAL(&s_ui_lock);
+    if (s_ui_state.control_connected != connected) {
+        s_ui_state.control_connected = connected;
+        if (!connected) {
+            s_ui_state.config_received = false;
+        }
+        ui_mark_changed_locked();
+    }
+    taskEXIT_CRITICAL(&s_ui_lock);
+}
+
+static void ui_set_blocking_status(const char *status)
+{
+    taskENTER_CRITICAL(&s_ui_lock);
+    strlcpy(s_ui_state.blocking_status, status && status[0] ? status : "", sizeof(s_ui_state.blocking_status));
+    ui_mark_changed_locked();
+    taskEXIT_CRITICAL(&s_ui_lock);
+}
+
+static void ui_set_transient_status(const char *status)
+{
+    taskENTER_CRITICAL(&s_ui_lock);
+    strlcpy(s_ui_state.transient_status, status && status[0] ? status : "", sizeof(s_ui_state.transient_status));
+    s_ui_state.transient_until_us = status && status[0] ? esp_timer_get_time() + DISPLAY_TRANSIENT_US : 0;
+    ui_mark_changed_locked();
+    taskEXIT_CRITICAL(&s_ui_lock);
+}
+
+static void ui_set_reply_state(bool held, uint16_t target)
+{
+    taskENTER_CRITICAL(&s_ui_lock);
+    s_ui_state.reply_held = held;
+    s_ui_state.reply_target = target;
+    if (!held) {
+        s_ui_state.reply_target = 0;
+    }
+    ui_mark_changed_locked();
+    taskEXIT_CRITICAL(&s_ui_lock);
+}
+
+static void ui_set_button_active(const char *id, bool active)
+{
+    taskENTER_CRITICAL(&s_ui_lock);
+    for (size_t i = 0; i < MAX_BUTTONS; i++) {
+        if (string_eq(s_ui_state.buttons[i].id, id)) {
+            s_ui_state.buttons[i].active = active;
+            ui_mark_changed_locked();
+            break;
+        }
+    }
+    taskEXIT_CRITICAL(&s_ui_lock);
+}
+
 static void control_connected_set(bool connected)
 {
     taskENTER_CRITICAL(&s_control_state_lock);
@@ -1479,6 +1763,7 @@ static void control_connected_set(bool connected)
         s_control_startup_config_pending = false;
     }
     taskEXIT_CRITICAL(&s_control_state_lock);
+    ui_set_control_connected(connected);
 }
 
 static bool control_connected_snapshot(void)
@@ -1488,6 +1773,48 @@ static bool control_connected_snapshot(void)
     connected = s_control_connected;
     taskEXIT_CRITICAL(&s_control_state_lock);
     return connected;
+}
+
+static void watchdog_init_if_enabled(void)
+{
+#if CONFIG_INTERCOM_TASK_WATCHDOG
+    esp_task_wdt_config_t config = {
+        .timeout_ms = CONFIG_INTERCOM_TASK_WATCHDOG_TIMEOUT_SECONDS * 1000,
+        .idle_core_mask = 0,
+        .trigger_panic = true,
+    };
+    esp_err_t err = esp_task_wdt_init(&config);
+    if (err == ESP_ERR_INVALID_STATE) {
+        ESP_LOGI(TAG, "task watchdog already initialized");
+    } else if (err != ESP_OK) {
+        ESP_LOGW(TAG, "failed to initialize task watchdog: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG,
+                 "task watchdog initialized: timeout=%u seconds",
+                 (unsigned)CONFIG_INTERCOM_TASK_WATCHDOG_TIMEOUT_SECONDS);
+    }
+#endif
+}
+
+static void watchdog_register_current_task(const char *name)
+{
+#if CONFIG_INTERCOM_TASK_WATCHDOG
+    esp_err_t err = esp_task_wdt_add(NULL);
+    if (err == ESP_ERR_INVALID_STATE || err == ESP_ERR_INVALID_ARG) {
+        ESP_LOGW(TAG, "task watchdog unavailable for %s: %s", name, esp_err_to_name(err));
+    } else if (err != ESP_OK) {
+        ESP_LOGW(TAG, "failed to register %s with task watchdog: %s", name, esp_err_to_name(err));
+    }
+#else
+    (void)name;
+#endif
+}
+
+static void watchdog_reset_current_task(void)
+{
+#if CONFIG_INTERCOM_TASK_WATCHDOG
+    (void)esp_task_wdt_reset();
+#endif
 }
 
 static bool control_take_hello_pending(void)
@@ -1668,6 +1995,9 @@ static void send_hello(void)
     cJSON_AddItemToArray(codecs, cJSON_CreateString("pcm16"));
     cJSON_AddItemToArray(codecs, cJSON_CreateString("pcm24"));
     cJSON_AddItemToArray(codecs, cJSON_CreateString("pcm48"));
+#if CONFIG_INTERCOM_OPUS
+    cJSON_AddItemToArray(codecs, cJSON_CreateString("opus"));
+#endif
     cJSON_AddItemToObject(root, "codecs", codecs);
     cJSON *codec_config = codec_config_json();
     if (codec_config) {
@@ -1732,6 +2062,85 @@ static void send_button_control(const char *button_id, bool pressed)
     cJSON_Delete(root);
 }
 
+static void send_ack_alert_control(uint64_t alert_id)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "ack_alert");
+    cJSON_AddNumberToObject(root, "user_id", current_user_id());
+    cJSON_AddNumberToObject(root, "alert_id", (double)alert_id);
+    log_control_send_result("ack alert", send_json(root), true);
+    cJSON_Delete(root);
+}
+
+static void send_direct_call_control(uint16_t target_user_id, bool active)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "direct_call");
+    cJSON_AddNumberToObject(root, "user_id", current_user_id());
+    cJSON_AddNumberToObject(root, "target_user_id", target_user_id);
+    cJSON_AddBoolToObject(root, "active", active);
+    cJSON_AddBoolToObject(root, "duck", false);
+    log_control_send_result("direct call", send_json(root), true);
+    cJSON_Delete(root);
+}
+
+static void clear_local_transmit_state(bool send_releases, const char *reason)
+{
+    bool release_regular = false;
+    char release_button_ids[MAX_BUTTONS][MAX_BUTTON_ID];
+    size_t release_button_count = 0;
+    uint16_t release_reply_target = 0;
+
+    xSemaphoreTake(s_config_lock, portMAX_DELAY);
+    if (s_config.regular_talk_active) {
+        release_regular = true;
+        s_config.regular_talk_active = false;
+    }
+    for (size_t i = 0; i < s_config.button_count && release_button_count < MAX_BUTTONS; i++) {
+        if (!s_config.buttons[i].active) {
+            continue;
+        }
+        strlcpy(release_button_ids[release_button_count],
+                s_config.buttons[i].id,
+                sizeof(release_button_ids[release_button_count]));
+        release_button_count++;
+        s_config.buttons[i].active = false;
+    }
+    xSemaphoreGive(s_config_lock);
+
+    release_reply_target = s_reply_active_target;
+    s_reply_active_target = 0;
+    ui_set_reply_state(false, 0);
+
+    for (size_t i = 0; i < MAX_BUTTONS; i++) {
+        ui_set_button_active(s_dedicated_buttons[i].id, false);
+    }
+
+    if (!release_regular && release_button_count == 0 && release_reply_target == 0) {
+        return;
+    }
+
+    ESP_LOGW(TAG,
+             "clearing local transmit state: reason=%s regular=%s buttons=%u reply_target=%u",
+             reason ? reason : "unknown",
+             release_regular ? "true" : "false",
+             (unsigned)release_button_count,
+             (unsigned)release_reply_target);
+
+    if (!send_releases || !websocket_ready()) {
+        return;
+    }
+    if (release_regular) {
+        send_talk_control(false);
+    }
+    for (size_t i = 0; i < release_button_count; i++) {
+        send_button_control(release_button_ids[i], false);
+    }
+    if (release_reply_target != 0) {
+        send_direct_call_control(release_reply_target, false);
+    }
+}
+
 static void send_ping(void)
 {
     cJSON *root = cJSON_CreateObject();
@@ -1792,6 +2201,118 @@ static cJSON *codec_config_json(void)
     return config;
 }
 
+static uint32_t task_stack_high_water(TaskHandle_t handle)
+{
+    return handle ? (uint32_t)uxTaskGetStackHighWaterMark(handle) : 0;
+}
+
+static cJSON *wifi_health_json(void)
+{
+    cJSON *wifi = cJSON_CreateObject();
+    if (!wifi) {
+        return NULL;
+    }
+    wifi_ap_record_t ap = {0};
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        cJSON_AddNumberToObject(wifi, "rssi_dbm", ap.rssi);
+    }
+    cJSON_AddNumberToObject(wifi, "connect_count", s_wifi_connect_count);
+    cJSON_AddNumberToObject(wifi, "disconnect_count", s_wifi_disconnect_count);
+    cJSON_AddNumberToObject(wifi, "control_connect_count", s_control_connect_count);
+    cJSON_AddNumberToObject(wifi, "control_disconnect_count", s_control_disconnect_count);
+    return wifi;
+}
+
+static cJSON *transport_health_json(void)
+{
+    cJSON *transport = cJSON_CreateObject();
+    if (!transport) {
+        return NULL;
+    }
+    cJSON_AddNumberToObject(transport, "udp_rx_packets", s_udp_rx_packets);
+    cJSON_AddNumberToObject(transport, "udp_decode_errors", s_udp_decode_errors);
+    cJSON_AddNumberToObject(transport, "udp_codec_drops", s_udp_codec_drops);
+    cJSON_AddNumberToObject(transport, "udp_sequence_gaps", s_udp_sequence_gaps);
+    cJSON_AddNumberToObject(transport, "udp_payload_decode_errors", s_udp_payload_decode_errors);
+    cJSON_AddNumberToObject(transport, "udp_tx_send_failures", s_udp_tx_send_failures);
+    cJSON_AddNumberToObject(transport, "audio_tx_queue_drops", s_audio_tx_queue_drops);
+#if CONFIG_INTERCOM_OPUS
+    cJSON_AddNumberToObject(transport, "opus_encode_failures", s_opus_encode_failures);
+    cJSON_AddNumberToObject(transport, "opus_decode_failures", s_opus_decode_failures);
+#else
+    cJSON_AddNumberToObject(transport, "opus_encode_failures", 0);
+    cJSON_AddNumberToObject(transport, "opus_decode_failures", 0);
+#endif
+    return transport;
+}
+
+static cJSON *memory_health_json(void)
+{
+    cJSON *memory = cJSON_CreateObject();
+    if (!memory) {
+        return NULL;
+    }
+    cJSON_AddNumberToObject(memory, "free_heap_bytes", esp_get_free_heap_size());
+    cJSON_AddNumberToObject(memory, "min_free_heap_bytes", esp_get_minimum_free_heap_size());
+    cJSON_AddNumberToObject(memory, "internal_free_heap_bytes", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(memory,
+                            "internal_largest_free_block_bytes",
+                            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    cJSON_AddNumberToObject(memory, "spiram_free_heap_bytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    cJSON_AddNumberToObject(memory,
+                            "spiram_largest_free_block_bytes",
+                            heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    return memory;
+}
+
+static cJSON *task_stack_health_json(void)
+{
+    cJSON *stack = cJSON_CreateObject();
+    if (!stack) {
+        return NULL;
+    }
+    cJSON_AddNumberToObject(stack, "udp", task_stack_high_water(s_udp_task_handle));
+    cJSON_AddNumberToObject(stack, "registration", task_stack_high_water(s_registration_task_handle));
+    cJSON_AddNumberToObject(stack, "playback", task_stack_high_water(s_playback_task_handle));
+    cJSON_AddNumberToObject(stack, "capture", task_stack_high_water(s_capture_task_handle));
+    cJSON_AddNumberToObject(stack, "buttons", task_stack_high_water(s_button_task_handle));
+#if CONFIG_INTERCOM_DISPLAY_ST7789
+    cJSON_AddNumberToObject(stack, "display", task_stack_high_water(s_display_task_handle));
+#endif
+    return stack;
+}
+
+static cJSON *display_health_json(void)
+{
+    cJSON *display = cJSON_CreateObject();
+    if (!display) {
+        return NULL;
+    }
+#if CONFIG_INTERCOM_DISPLAY_ST7789
+    cJSON_AddBoolToObject(display, "enabled", true);
+    cJSON_AddBoolToObject(display, "initialized", s_display_initialized);
+    cJSON_AddBoolToObject(display, "framebuffer_in_psram", s_display_framebuffer_in_psram);
+    cJSON_AddNumberToObject(display, "framebuffer_bytes", s_display_framebuffer_bytes);
+#else
+    cJSON_AddBoolToObject(display, "enabled", false);
+    cJSON_AddBoolToObject(display, "initialized", false);
+    cJSON_AddBoolToObject(display, "framebuffer_in_psram", false);
+    cJSON_AddNumberToObject(display, "framebuffer_bytes", 0);
+#endif
+    return display;
+}
+
+static cJSON *battery_health_json(void)
+{
+    cJSON *battery = cJSON_CreateObject();
+    if (!battery) {
+        return NULL;
+    }
+    cJSON_AddStringToObject(battery, "status", "unknown");
+    cJSON_AddBoolToObject(battery, "present", false);
+    return battery;
+}
+
 static void send_capture_health(void)
 {
     capture_health_report_t report;
@@ -1809,6 +2330,7 @@ static void send_capture_health(void)
     cJSON_AddNumberToObject(root, "user_id", current_user_id());
 
     cJSON *health = cJSON_CreateObject();
+    cJSON_AddNumberToObject(health, "uptime_ms", (double)(esp_timer_get_time() / 1000));
     esp32_audio_config_t audio = audio_config_snapshot();
     cJSON *codec_config = codec_config_json();
     if (codec_config) {
@@ -1840,6 +2362,30 @@ static void send_capture_health(void)
     cJSON_AddNumberToObject(health, "playback_i2s_short_warnings", s_audio_hw_write_short_warnings);
     cJSON_AddNumberToObject(health, "free_heap_bytes", esp_get_free_heap_size());
     cJSON_AddNumberToObject(health, "min_free_heap_bytes", esp_get_minimum_free_heap_size());
+    cJSON *wifi = wifi_health_json();
+    if (wifi) {
+        cJSON_AddItemToObject(health, "wifi", wifi);
+    }
+    cJSON *transport = transport_health_json();
+    if (transport) {
+        cJSON_AddItemToObject(health, "transport", transport);
+    }
+    cJSON *memory = memory_health_json();
+    if (memory) {
+        cJSON_AddItemToObject(health, "memory", memory);
+    }
+    cJSON *stack = task_stack_health_json();
+    if (stack) {
+        cJSON_AddItemToObject(health, "task_stack_high_water_bytes", stack);
+    }
+    cJSON *display = display_health_json();
+    if (display) {
+        cJSON_AddItemToObject(health, "display", display);
+    }
+    cJSON *battery = battery_health_json();
+    if (battery) {
+        cJSON_AddItemToObject(health, "battery", battery);
+    }
     cJSON_AddNumberToObject(health, "raw_clipped_samples", report.raw_clipped_samples);
     cJSON_AddNumberToObject(health, "software_clipped_samples", report.software_clipped_samples);
     cJSON_AddNumberToObject(health, "tx_target_count", report.tx_target_count);
@@ -2012,6 +2558,96 @@ static bool parse_esp32_audio_config(cJSON *object, esp32_audio_config_t *out)
     return true;
 }
 
+static uint64_t json_u64_value(cJSON *object, const char *key, uint64_t fallback)
+{
+    cJSON *item = cJSON_GetObjectItem(object, key);
+    if (!cJSON_IsNumber(item) || item->valuedouble < 0) {
+        return fallback;
+    }
+    return (uint64_t)item->valuedouble;
+}
+
+static void ui_apply_config_update(cJSON *root, const runtime_config_t *config)
+{
+    if (!root || !config) {
+        return;
+    }
+
+    taskENTER_CRITICAL(&s_ui_lock);
+    s_ui_state.config_received = true;
+    s_ui_state.blocking_status[0] = '\0';
+
+    cJSON *user_id = cJSON_GetObjectItem(root, "user_id");
+    if (cJSON_IsNumber(user_id) && user_id->valuedouble > 0 && user_id->valuedouble <= UINT16_MAX) {
+        s_ui_state.user_id = (uint16_t)user_id->valuedouble;
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    strlcpy(s_ui_state.unit_name,
+            cJSON_IsString(name) ? cJSON_GetStringValue(name) : "",
+            sizeof(s_ui_state.unit_name));
+
+    ui_seed_buttons_locked();
+    for (size_t i = 0; i < MAX_BUTTONS; i++) {
+        for (size_t j = 0; j < config->button_count; j++) {
+            const button_route_t *route = &config->buttons[j];
+            if (!string_eq(s_ui_state.buttons[i].id, route->id)) {
+                continue;
+            }
+            s_ui_state.buttons[i].configured = true;
+            s_ui_state.buttons[i].active = route->active;
+            strlcpy(s_ui_state.buttons[i].label,
+                    route->label[0] ? route->label : route->id,
+                    sizeof(s_ui_state.buttons[i].label));
+            break;
+        }
+    }
+
+    memset(&s_ui_state.active_alert, 0, sizeof(s_ui_state.active_alert));
+    cJSON *active_alerts = cJSON_GetObjectItem(root, "active_alerts");
+    cJSON *alert = NULL;
+    cJSON_ArrayForEach(alert, active_alerts) {
+        cJSON *sender = cJSON_GetObjectItem(alert, "sender");
+        if (!cJSON_IsNumber(sender) || sender->valuedouble <= 0 || sender->valuedouble > UINT16_MAX) {
+            continue;
+        }
+        uint64_t created_at_ms = json_u64_value(alert, "created_at_ms", 0);
+        if (s_ui_state.active_alert.present && created_at_ms < s_ui_state.active_alert.created_at_ms) {
+            continue;
+        }
+        s_ui_state.active_alert.present = true;
+        s_ui_state.active_alert.id = json_u64_value(alert, "id", 0);
+        s_ui_state.active_alert.sender = (uint16_t)sender->valuedouble;
+        s_ui_state.active_alert.created_at_ms = created_at_ms;
+        cJSON *message = cJSON_GetObjectItem(alert, "message");
+        strlcpy(s_ui_state.active_alert.message,
+                cJSON_IsString(message) ? cJSON_GetStringValue(message) : "",
+                sizeof(s_ui_state.active_alert.message));
+    }
+
+    cJSON *last_direct_caller = cJSON_GetObjectItem(root, "last_direct_caller");
+    s_ui_state.has_last_direct_caller =
+        cJSON_IsNumber(last_direct_caller) && last_direct_caller->valuedouble > 0 &&
+        last_direct_caller->valuedouble <= UINT16_MAX;
+    s_ui_state.last_direct_caller =
+        s_ui_state.has_last_direct_caller ? (uint16_t)last_direct_caller->valuedouble : 0;
+
+    s_ui_state.active_direct_call_count = 0;
+    cJSON *active_direct_calls = cJSON_GetObjectItem(root, "active_direct_calls");
+    cJSON *call = NULL;
+    cJSON_ArrayForEach(call, active_direct_calls) {
+        if (cJSON_IsTrue(cJSON_GetObjectItem(call, "active")) ||
+            !cJSON_HasObjectItem(call, "active")) {
+            if (s_ui_state.active_direct_call_count < UINT16_MAX) {
+                s_ui_state.active_direct_call_count++;
+            }
+        }
+    }
+
+    ui_mark_changed_locked();
+    taskEXIT_CRITICAL(&s_ui_lock);
+}
+
 static void apply_config_update(cJSON *root)
 {
     cJSON *user_id = cJSON_GetObjectItem(root, "user_id");
@@ -2096,6 +2732,7 @@ static void apply_config_update(cJSON *root)
     ic_codec_t previous_codec = s_config.codec;
     s_config = next;
     xSemaphoreGive(s_config_lock);
+    ui_apply_config_update(root, &next);
 
     if (previous_codec != next.codec) {
         esp_err_t err = audio_i2s_set_codec(next.codec);
@@ -2139,12 +2776,16 @@ static void handle_control_json(const char *text, size_t len)
         }
         cJSON *enrollment = cJSON_GetObjectItem(root, "enrollment");
         if (cJSON_IsString(enrollment) && !string_eq(cJSON_GetStringValue(enrollment), "enrolled")) {
+            char status[MAX_UI_STATUS];
+            snprintf(status, sizeof(status), "Enrollment %s", cJSON_GetStringValue(enrollment));
+            ui_set_blocking_status(status);
             ESP_LOGW(TAG,
                      "server enrollment status is %s; waiting for admin approval and not seeding startup config",
                      cJSON_GetStringValue(enrollment));
             cJSON_Delete(root);
             return;
         }
+        ui_set_blocking_status("Waiting for config");
         if (!cJSON_IsTrue(cJSON_GetObjectItem(root, "preconfigured"))) {
             control_request_startup_config();
         }
@@ -2152,6 +2793,7 @@ static void handle_control_json(const char *text, size_t len)
         apply_config_update(root);
     } else if (string_eq(type_text, "error")) {
         cJSON *message = cJSON_GetObjectItem(root, "message");
+        ui_set_blocking_status(cJSON_IsString(message) ? cJSON_GetStringValue(message) : "Server error");
         ESP_LOGW(TAG, "server control error: %s", cJSON_IsString(message) ? cJSON_GetStringValue(message) : "unknown");
     }
 
@@ -2230,11 +2872,14 @@ static void websocket_event_handler(void *handler_args,
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "control connected");
+        s_control_connect_count++;
         control_connected_set(true);
         audio_cue_replace(AUDIO_CUE_CONNECTED);
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "control disconnected");
+        s_control_disconnect_count++;
+        clear_local_transmit_state(false, "control disconnected");
         control_connected_set(false);
         audio_cue_replace(AUDIO_CUE_DISCONNECTED);
         reset_control_rx_buffer();
@@ -2244,6 +2889,8 @@ static void websocket_event_handler(void *handler_args,
         break;
     case WEBSOCKET_EVENT_ERROR:
         ESP_LOGW(TAG, "control websocket error");
+        s_control_disconnect_count++;
+        clear_local_transmit_state(false, "control websocket error");
         control_connected_set(false);
         break;
     default:
@@ -2255,15 +2902,21 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 {
     (void)arg;
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        ui_set_wifi_connected(false);
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
+        s_wifi_disconnect_count++;
+        clear_local_transmit_state(true, "Wi-Fi disconnected");
+        ui_set_wifi_connected(false);
         ESP_LOGW(TAG, "Wi-Fi disconnected; reconnecting");
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        s_wifi_connect_count++;
         ESP_LOGI(TAG, "Wi-Fi connected: " IPSTR, IP2STR(&event->ip_info.ip));
         esp_wifi_set_ps(WIFI_PS_NONE);
+        ui_set_wifi_connected(true);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }
 }
@@ -2921,6 +3574,13 @@ static void buttons_init(void)
             floating_mask |= 1ULL << (unsigned)ptt_gpio;
         }
     }
+    if (s_reply_button.gpio >= 0) {
+        if (gpio_supports_internal_pullup(s_reply_button.gpio)) {
+            pullup_mask |= 1ULL << (unsigned)s_reply_button.gpio;
+        } else {
+            floating_mask |= 1ULL << (unsigned)s_reply_button.gpio;
+        }
+    }
     for (size_t i = 0; i < sizeof(s_dedicated_buttons) / sizeof(s_dedicated_buttons[0]); i++) {
         if (physical_button_enabled(&s_dedicated_buttons[i])) {
             int button_gpio = s_dedicated_buttons[i].gpio;
@@ -3025,7 +3685,99 @@ static bool enqueue_audio_payload(ic_target_kind_t kind,
         return false;
     }
     tx->len = (uint16_t)written;
-    return xQueueSend(s_audio_tx_queue, tx, 0) == pdTRUE;
+    if (xQueueSend(s_audio_tx_queue, tx, 0) != pdTRUE) {
+        s_audio_tx_queue_drops++;
+        return false;
+    }
+    return true;
+}
+
+static bool build_encoded_audio_payload(ic_codec_t codec,
+                                        const int16_t *pcm,
+                                        size_t samples,
+                                        uint8_t *out,
+                                        size_t out_len,
+                                        uint16_t *payload_len)
+{
+    if (!pcm || !out || !payload_len) {
+        return false;
+    }
+#if CONFIG_INTERCOM_OPUS
+    if (codec == IC_CODEC_OPUS) {
+        if (!s_opus_encoder || samples != IC_OPUS_SAMPLES_PER_FRAME) {
+            return false;
+        }
+        int encoded = opus_encode(s_opus_encoder, pcm, (int)samples, out, (opus_int32)out_len);
+        if (encoded < 0) {
+            s_opus_encode_failures++;
+            ESP_LOGW(TAG, "Opus encode failed: %d", encoded);
+            return false;
+        }
+        *payload_len = (uint16_t)encoded;
+        return true;
+    }
+#else
+    if (codec == IC_CODEC_OPUS) {
+        return false;
+    }
+#endif
+    size_t bytes = samples * sizeof(int16_t);
+    if (bytes > out_len || bytes > UINT16_MAX) {
+        return false;
+    }
+    for (size_t i = 0; i < samples; i++) {
+        out[i * 2] = (uint8_t)pcm[i];
+        out[i * 2 + 1] = (uint8_t)((uint16_t)pcm[i] >> 8);
+    }
+    *payload_len = (uint16_t)bytes;
+    return true;
+}
+
+static bool decode_packet_audio_payload(const ic_audio_packet_t *packet, ic_codec_t codec, int16_t *out)
+{
+    if (!packet || !out || packet->codec != codec) {
+        return false;
+    }
+#if CONFIG_INTERCOM_OPUS
+    if (codec == IC_CODEC_OPUS) {
+        if (!s_opus_decoder || packet->payload_len == 0 || packet->payload_len > IC_OPUS_MAX_BYTES_PER_FRAME) {
+            s_opus_decode_failures++;
+            return false;
+        }
+        int decoded = opus_decode(s_opus_decoder,
+                                  packet->payload,
+                                  packet->payload_len,
+                                  out,
+                                  IC_OPUS_SAMPLES_PER_FRAME,
+                                  0);
+        if (decoded != IC_OPUS_SAMPLES_PER_FRAME) {
+            s_opus_decode_failures++;
+            ESP_LOGW(TAG, "Opus decode failed or returned unexpected frame: %d", decoded);
+            return false;
+        }
+        return true;
+    }
+#else
+    if (codec == IC_CODEC_OPUS) {
+        return false;
+    }
+#endif
+    size_t samples = codec_samples_per_frame(codec);
+    size_t mono_payload_len = samples * sizeof(int16_t);
+    bool stereo_payload = packet->payload_len == mono_payload_len * 2;
+    if (packet->payload_len != mono_payload_len && !stereo_payload) {
+        return false;
+    }
+    for (size_t i = 0; i < samples; i++) {
+        if (stereo_payload) {
+            int16_t left = read_le_i16(&packet->payload[i * 4]);
+            int16_t right = read_le_i16(&packet->payload[i * 4 + 2]);
+            out[i] = (int16_t)(((int)left + (int)right) / 2);
+        } else {
+            out[i] = read_le_i16(&packet->payload[i * 2]);
+        }
+    }
+    return true;
 }
 
 static void drain_audio_tx_queue(int sock)
@@ -3038,6 +3790,7 @@ static void drain_audio_tx_queue(int sock)
                  s_audio_tx_send_packet.bytes,
                  s_audio_tx_send_packet.len,
                  0) != (int)s_audio_tx_send_packet.len) {
+            s_udp_tx_send_failures++;
             ESP_LOGW(TAG, "UDP audio send failed: errno=%d", errno);
         }
     }
@@ -3070,12 +3823,18 @@ static void send_registration(void)
 static void udp_task(void *arg)
 {
     (void)arg;
+    watchdog_register_current_task("ic_udp");
     ESP_LOGI(TAG, "task ic_udp running on core %d", xPortGetCoreID());
     struct sockaddr_storage server_addr;
     socklen_t server_len = 0;
 
     for (;;) {
-        xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
+        watchdog_reset_current_task();
+        EventBits_t bits =
+            xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, false, true, pdMS_TO_TICKS(1000));
+        if ((bits & WIFI_CONNECTED_BIT) == 0) {
+            continue;
+        }
         if (resolve_server(&server_addr, &server_len, CONFIG_INTERCOM_AUDIO_PORT) != ESP_OK) {
             ESP_LOGW(TAG, "failed to resolve audio server %s", CONFIG_INTERCOM_SERVER_HOST);
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -3102,10 +3861,12 @@ static void udp_task(void *arg)
         (void)setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
         s_audio_sock = sock;
+        s_udp_have_last_seq = false;
         ESP_LOGI(TAG, "UDP audio connected to %s:%d", CONFIG_INTERCOM_SERVER_HOST, CONFIG_INTERCOM_AUDIO_PORT);
         send_registration();
 
         for (;;) {
+            watchdog_reset_current_task();
             drain_audio_tx_queue(sock);
             int len = recv(sock, s_udp_rx_packet, sizeof(s_udp_rx_packet), 0);
             if (len <= 0) {
@@ -3117,25 +3878,29 @@ static void udp_task(void *arg)
             }
             ic_audio_packet_t packet;
             if (!ic_decode_audio_packet(s_udp_rx_packet, len, &packet)) {
+                s_udp_decode_errors++;
                 continue;
             }
+            s_udp_rx_packets++;
             ic_codec_t codec = runtime_codec_snapshot();
             size_t packet_samples_per_frame = codec_samples_per_frame(codec);
-            size_t mono_payload_len = codec_payload_bytes(codec);
-            bool stereo_payload = packet.codec == codec && packet.payload_len == mono_payload_len * 2;
-            if (packet.target_kind != IC_TARGET_MIXED || packet.codec != codec ||
-                (packet.payload_len != mono_payload_len && !stereo_payload)) {
+            if (packet.target_kind != IC_TARGET_MIXED || packet.codec != codec) {
+                s_udp_codec_drops++;
                 continue;
             }
-            memset(s_udp_packet_frame, 0, sizeof(s_udp_packet_frame));
-            for (size_t i = 0; i < packet_samples_per_frame; i++) {
-                if (stereo_payload) {
-                    int16_t left = read_le_i16(&packet.payload[i * 4]);
-                    int16_t right = read_le_i16(&packet.payload[i * 4 + 2]);
-                    s_udp_packet_frame[i] = (int16_t)(((int)left + (int)right) / 2);
-                } else {
-                    s_udp_packet_frame[i] = read_le_i16(&packet.payload[i * 2]);
+            if (s_udp_have_last_seq) {
+                uint16_t expected = (uint16_t)(s_udp_last_seq + 1);
+                if (packet.seq != expected) {
+                    uint16_t gap = (uint16_t)(packet.seq - expected);
+                    s_udp_sequence_gaps += gap == 0 ? 1 : gap;
                 }
+            }
+            s_udp_have_last_seq = true;
+            s_udp_last_seq = packet.seq;
+            memset(s_udp_packet_frame, 0, sizeof(s_udp_packet_frame));
+            if (!decode_packet_audio_payload(&packet, codec, s_udp_packet_frame)) {
+                s_udp_payload_decode_errors++;
+                continue;
             }
             resample_network_to_hw(s_udp_packet_frame, packet_samples_per_frame, s_udp_playback_frame);
             ic_pcm_frame_ring_push(&s_playback_ring, s_udp_playback_frame);
@@ -3150,6 +3915,7 @@ static void udp_task(void *arg)
 static void registration_task(void *arg)
 {
     (void)arg;
+    watchdog_register_current_task("ic_register");
     ESP_LOGI(TAG, "task ic_register running on core %d", xPortGetCoreID());
     int64_t last_reconnect_cue_us = 0;
     int64_t last_ping_us = 0;
@@ -3187,6 +3953,7 @@ static void registration_task(void *arg)
                 last_reconnect_cue_us = now_us;
             }
         }
+        watchdog_reset_current_task();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -3244,6 +4011,7 @@ static void audio_config_apply_task(void *arg)
 static void playback_task(void *arg)
 {
     (void)arg;
+    watchdog_register_current_task("ic_playback");
     ESP_LOGI(TAG, "task ic_playback running on core %d", xPortGetCoreID());
     bool playback_started = false;
     int16_t last_playback_sample = 0;
@@ -3312,6 +4080,7 @@ static void playback_task(void *arg)
         } else {
             playback_codec_mute_gate_update(&mute_gate, frame_active);
         }
+        watchdog_reset_current_task();
     }
 }
 
@@ -3620,6 +4389,7 @@ static void diagnostic_local_loopback(void)
 static void capture_task(void *arg)
 {
     (void)arg;
+    watchdog_register_current_task("ic_capture");
     ESP_LOGI(TAG, "task ic_capture running on core %d", xPortGetCoreID());
     capture_health_accumulator_t capture_health = {0};
 
@@ -3627,7 +4397,7 @@ static void capture_task(void *arg)
         ic_codec_t codec = runtime_codec_snapshot();
         size_t hw_samples_per_frame = ESP32_AUDIO_HW_SAMPLES_PER_FRAME;
         size_t packet_samples_per_frame = codec_samples_per_frame(codec);
-        size_t payload_bytes = codec_payload_bytes(codec);
+        uint16_t payload_bytes = 0;
         esp_err_t err = audio_hw_read(s_capture_stereo_frame, ESP32_AUDIO_HW_FRAME_BYTES);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "codec capture read failed: %s", esp_err_to_name(err));
@@ -3655,14 +4425,19 @@ static void capture_task(void *arg)
             capture_health.samples++;
         }
         resample_hw_to_network(s_capture_mono_frame, s_capture_packet_frame, packet_samples_per_frame);
-        for (size_t i = 0; i < packet_samples_per_frame; i++) {
-            s_capture_payload[i * 2] = (uint8_t)s_capture_packet_frame[i];
-            s_capture_payload[i * 2 + 1] = (uint8_t)((uint16_t)s_capture_packet_frame[i] >> 8);
-        }
         capture_health_maybe_publish(&capture_health, esp_timer_get_time());
 
         if (audio.sidetone_mode == ESP32_SIDETONE_FIRMWARE) {
             ic_pcm_frame_ring_push(&s_sidetone_ring, s_capture_mono_frame);
+        }
+        if (!build_encoded_audio_payload(codec,
+                                         s_capture_packet_frame,
+                                         packet_samples_per_frame,
+                                         s_capture_payload,
+                                         sizeof(s_capture_payload),
+                                         &payload_bytes)) {
+            capture_health.tx_send_failures++;
+            continue;
         }
         size_t count = build_tx_targets(s_capture_targets, sizeof(s_capture_targets) / sizeof(s_capture_targets[0]));
         capture_health.tx_target_count = (uint16_t)count;
@@ -3671,12 +4446,13 @@ static void capture_task(void *arg)
                                       s_capture_targets[i].id,
                                       codec,
                                       s_capture_payload,
-                                      (uint16_t)payload_bytes)) {
+                                      payload_bytes)) {
                 capture_health.tx_packets_sent++;
             } else {
                 capture_health.tx_send_failures++;
             }
         }
+        watchdog_reset_current_task();
     }
 }
 
@@ -3687,13 +4463,15 @@ static void set_local_regular_talk(bool active)
     xSemaphoreGive(s_config_lock);
 }
 
-static void set_local_button_pressed(const char *id, bool pressed)
+static bool set_local_button_pressed(const char *id, bool pressed, bool *active_out)
 {
+    bool found = false;
     xSemaphoreTake(s_config_lock, portMAX_DELAY);
     for (size_t i = 0; i < s_config.button_count; i++) {
         if (!string_eq(s_config.buttons[i].id, id)) {
             continue;
         }
+        found = true;
         if (s_config.buttons[i].latching) {
             if (pressed) {
                 s_config.buttons[i].active = !s_config.buttons[i].active;
@@ -3701,9 +4479,13 @@ static void set_local_button_pressed(const char *id, bool pressed)
         } else {
             s_config.buttons[i].active = pressed;
         }
+        if (active_out) {
+            *active_out = s_config.buttons[i].active;
+        }
         break;
     }
     xSemaphoreGive(s_config_lock);
+    return found;
 }
 
 static void handle_physical_button(physical_button_t *button, bool is_ptt, bool pressed)
@@ -3715,8 +4497,54 @@ static void handle_physical_button(physical_button_t *button, bool is_ptt, bool 
         return;
     }
     ESP_LOGI(TAG, "button %s %s", button->id, pressed ? "down" : "up");
-    set_local_button_pressed(button->id, pressed);
+    bool active = pressed;
+    if (set_local_button_pressed(button->id, pressed, &active)) {
+        ui_set_button_active(button->id, active);
+    } else {
+        ui_set_button_active(button->id, pressed);
+    }
     send_button_control(button->id, pressed);
+}
+
+static void handle_reply_button(bool pressed)
+{
+    if (pressed) {
+        ui_state_t ui = ui_state_snapshot();
+        uint64_t alert_id = 0;
+        uint16_t target = 0;
+        if (ui.active_alert.present) {
+            alert_id = ui.active_alert.id;
+            if (ui.active_alert.sender != 0 && ui.active_alert.sender != current_user_id()) {
+                target = ui.active_alert.sender;
+            }
+        }
+        if (target == 0 && ui.has_last_direct_caller && ui.last_direct_caller != current_user_id()) {
+            target = ui.last_direct_caller;
+        }
+        if (alert_id != 0) {
+            send_ack_alert_control(alert_id);
+        }
+        if (target == 0) {
+            ESP_LOGI(TAG, "reply button down with no alert sender or last direct caller");
+            ui_set_transient_status("No reply target");
+            ui_set_reply_state(false, 0);
+            s_reply_active_target = 0;
+            return;
+        }
+        ESP_LOGI(TAG, "reply button down: direct call target=%u", (unsigned)target);
+        s_reply_active_target = target;
+        ui_set_reply_state(true, target);
+        send_direct_call_control(target, true);
+        return;
+    }
+
+    uint16_t target = s_reply_active_target;
+    s_reply_active_target = 0;
+    ui_set_reply_state(false, 0);
+    if (target != 0) {
+        ESP_LOGI(TAG, "reply button up: direct call target=%u", (unsigned)target);
+        send_direct_call_control(target, false);
+    }
 }
 
 static void poll_button_state(physical_button_t *button, bool is_ptt)
@@ -3736,9 +4564,27 @@ static void poll_button_state(physical_button_t *button, bool is_ptt)
     }
 }
 
+static void poll_reply_button_state(void)
+{
+    if (s_reply_button.gpio < 0) {
+        return;
+    }
+    bool raw_pressed = gpio_get_level(s_reply_button.gpio) == 0;
+    int64_t now = esp_timer_get_time();
+    if (raw_pressed != s_reply_button.last_raw_pressed) {
+        s_reply_button.last_raw_pressed = raw_pressed;
+        s_reply_button.last_change_us = now;
+    }
+    if (raw_pressed != s_reply_button.stable_pressed && now - s_reply_button.last_change_us >= BUTTON_DEBOUNCE_US) {
+        s_reply_button.stable_pressed = raw_pressed;
+        handle_reply_button(raw_pressed);
+    }
+}
+
 static void button_task(void *arg)
 {
     (void)arg;
+    watchdog_register_current_task("ic_buttons");
     ESP_LOGI(TAG, "task ic_buttons running on core %d", xPortGetCoreID());
     physical_button_t ptt = {CONFIG_INTERCOM_PTT_GPIO, "regular", "PTT", false, false, 0};
     for (;;) {
@@ -3746,9 +4592,505 @@ static void button_task(void *arg)
         for (size_t i = 0; i < sizeof(s_dedicated_buttons) / sizeof(s_dedicated_buttons[0]); i++) {
             poll_button_state(&s_dedicated_buttons[i], false);
         }
+        poll_reply_button_state();
+        watchdog_reset_current_task();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+
+#if CONFIG_INTERCOM_DISPLAY_ST7789
+static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
+{
+    return (uint16_t)(((uint16_t)(r & 0xF8) << 8) | ((uint16_t)(g & 0xFC) << 3) | (b >> 3));
+}
+
+static void display_fill(uint16_t color)
+{
+    if (!s_display_framebuffer) {
+        return;
+    }
+    for (size_t i = 0; i < DISPLAY_PIXELS; i++) {
+        s_display_framebuffer[i] = color;
+    }
+}
+
+static void display_fill_rect(int x, int y, int w, int h, uint16_t color)
+{
+    if (!s_display_framebuffer || w <= 0 || h <= 0) {
+        return;
+    }
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = x + w > DISPLAY_WIDTH ? DISPLAY_WIDTH : x + w;
+    int y1 = y + h > DISPLAY_HEIGHT ? DISPLAY_HEIGHT : y + h;
+    for (int yy = y0; yy < y1; yy++) {
+        for (int xx = x0; xx < x1; xx++) {
+            s_display_framebuffer[yy * DISPLAY_WIDTH + xx] = color;
+        }
+    }
+}
+
+static void display_draw_rect(int x, int y, int w, int h, uint16_t color)
+{
+    display_fill_rect(x, y, w, 1, color);
+    display_fill_rect(x, y + h - 1, w, 1, color);
+    display_fill_rect(x, y, 1, h, color);
+    display_fill_rect(x + w - 1, y, 1, h, color);
+}
+
+#define GLYPH(g0, g1, g2, g3, g4) \
+    do {                          \
+        out[0] = (g0);            \
+        out[1] = (g1);            \
+        out[2] = (g2);            \
+        out[3] = (g3);            \
+        out[4] = (g4);            \
+        return true;              \
+    } while (0)
+
+static bool display_glyph(char input, uint8_t out[5])
+{
+    char c = input;
+    if (c >= 'a' && c <= 'z') {
+        c = (char)(c - 'a' + 'A');
+    }
+    switch (c) {
+    case ' ':
+        GLYPH(0x00, 0x00, 0x00, 0x00, 0x00);
+    case '!':
+        GLYPH(0x00, 0x00, 0x5F, 0x00, 0x00);
+    case '%':
+        GLYPH(0x23, 0x13, 0x08, 0x64, 0x62);
+    case '+':
+        GLYPH(0x08, 0x08, 0x3E, 0x08, 0x08);
+    case '-':
+        GLYPH(0x08, 0x08, 0x08, 0x08, 0x08);
+    case '.':
+        GLYPH(0x00, 0x60, 0x60, 0x00, 0x00);
+    case '/':
+        GLYPH(0x20, 0x10, 0x08, 0x04, 0x02);
+    case ':':
+        GLYPH(0x00, 0x36, 0x36, 0x00, 0x00);
+    case '?':
+        GLYPH(0x02, 0x01, 0x51, 0x09, 0x06);
+    case '_':
+        GLYPH(0x40, 0x40, 0x40, 0x40, 0x40);
+    case '0':
+        GLYPH(0x3E, 0x51, 0x49, 0x45, 0x3E);
+    case '1':
+        GLYPH(0x00, 0x42, 0x7F, 0x40, 0x00);
+    case '2':
+        GLYPH(0x42, 0x61, 0x51, 0x49, 0x46);
+    case '3':
+        GLYPH(0x21, 0x41, 0x45, 0x4B, 0x31);
+    case '4':
+        GLYPH(0x18, 0x14, 0x12, 0x7F, 0x10);
+    case '5':
+        GLYPH(0x27, 0x45, 0x45, 0x45, 0x39);
+    case '6':
+        GLYPH(0x3C, 0x4A, 0x49, 0x49, 0x30);
+    case '7':
+        GLYPH(0x01, 0x71, 0x09, 0x05, 0x03);
+    case '8':
+        GLYPH(0x36, 0x49, 0x49, 0x49, 0x36);
+    case '9':
+        GLYPH(0x06, 0x49, 0x49, 0x29, 0x1E);
+    case 'A':
+        GLYPH(0x7E, 0x11, 0x11, 0x11, 0x7E);
+    case 'B':
+        GLYPH(0x7F, 0x49, 0x49, 0x49, 0x36);
+    case 'C':
+        GLYPH(0x3E, 0x41, 0x41, 0x41, 0x22);
+    case 'D':
+        GLYPH(0x7F, 0x41, 0x41, 0x22, 0x1C);
+    case 'E':
+        GLYPH(0x7F, 0x49, 0x49, 0x49, 0x41);
+    case 'F':
+        GLYPH(0x7F, 0x09, 0x09, 0x09, 0x01);
+    case 'G':
+        GLYPH(0x3E, 0x41, 0x49, 0x49, 0x7A);
+    case 'H':
+        GLYPH(0x7F, 0x08, 0x08, 0x08, 0x7F);
+    case 'I':
+        GLYPH(0x00, 0x41, 0x7F, 0x41, 0x00);
+    case 'J':
+        GLYPH(0x20, 0x40, 0x41, 0x3F, 0x01);
+    case 'K':
+        GLYPH(0x7F, 0x08, 0x14, 0x22, 0x41);
+    case 'L':
+        GLYPH(0x7F, 0x40, 0x40, 0x40, 0x40);
+    case 'M':
+        GLYPH(0x7F, 0x02, 0x0C, 0x02, 0x7F);
+    case 'N':
+        GLYPH(0x7F, 0x04, 0x08, 0x10, 0x7F);
+    case 'O':
+        GLYPH(0x3E, 0x41, 0x41, 0x41, 0x3E);
+    case 'P':
+        GLYPH(0x7F, 0x09, 0x09, 0x09, 0x06);
+    case 'Q':
+        GLYPH(0x3E, 0x41, 0x51, 0x21, 0x5E);
+    case 'R':
+        GLYPH(0x7F, 0x09, 0x19, 0x29, 0x46);
+    case 'S':
+        GLYPH(0x46, 0x49, 0x49, 0x49, 0x31);
+    case 'T':
+        GLYPH(0x01, 0x01, 0x7F, 0x01, 0x01);
+    case 'U':
+        GLYPH(0x3F, 0x40, 0x40, 0x40, 0x3F);
+    case 'V':
+        GLYPH(0x1F, 0x20, 0x40, 0x20, 0x1F);
+    case 'W':
+        GLYPH(0x3F, 0x40, 0x38, 0x40, 0x3F);
+    case 'X':
+        GLYPH(0x63, 0x14, 0x08, 0x14, 0x63);
+    case 'Y':
+        GLYPH(0x07, 0x08, 0x70, 0x08, 0x07);
+    case 'Z':
+        GLYPH(0x61, 0x51, 0x49, 0x45, 0x43);
+    default:
+        GLYPH(0x00, 0x00, 0x00, 0x00, 0x00);
+    }
+}
+
+#undef GLYPH
+
+static int display_text_width(const char *text, int scale)
+{
+    return text ? (int)strlen(text) * 6 * scale : 0;
+}
+
+static void display_draw_char(int x, int y, char c, uint16_t fg, uint16_t bg, int scale, bool fill_bg)
+{
+    uint8_t glyph[5];
+    display_glyph(c, glyph);
+    if (fill_bg) {
+        display_fill_rect(x, y, 6 * scale, 8 * scale, bg);
+    }
+    for (int col = 0; col < 5; col++) {
+        for (int row = 0; row < 7; row++) {
+            if (glyph[col] & (1U << row)) {
+                display_fill_rect(x + col * scale, y + row * scale, scale, scale, fg);
+            }
+        }
+    }
+}
+
+static void display_draw_text_clipped(int x, int y, int max_w, const char *text, uint16_t fg, uint16_t bg, int scale)
+{
+    if (!text || max_w <= 0) {
+        return;
+    }
+    int cursor = x;
+    for (size_t i = 0; text[i] != '\0'; i++) {
+        if (cursor + 6 * scale > x + max_w) {
+            break;
+        }
+        display_draw_char(cursor, y, text[i], fg, bg, scale, true);
+        cursor += 6 * scale;
+    }
+}
+
+static void display_draw_centered_text(int y, const char *text, uint16_t fg, uint16_t bg, int scale)
+{
+    int width = display_text_width(text, scale);
+    int x = (DISPLAY_WIDTH - width) / 2;
+    if (x < 0) {
+        x = 0;
+    }
+    display_draw_text_clipped(x, y, DISPLAY_WIDTH - x, text, fg, bg, scale);
+}
+
+static void display_draw_button_box(size_t index, const ui_button_state_t *button)
+{
+    const uint16_t white = rgb565(245, 247, 250);
+    const uint16_t dim = rgb565(108, 117, 125);
+    const uint16_t border = rgb565(82, 94, 105);
+    const uint16_t active_bg = rgb565(12, 122, 80);
+    const uint16_t inactive_bg = rgb565(18, 24, 30);
+    const uint16_t disabled_bg = rgb565(8, 11, 14);
+    int x = (index == 1 || index == 3) ? 132 : 8;
+    int y = index < 2 ? 76 : 164;
+    int w = 100;
+    int h = 36;
+    uint16_t bg = button->active ? active_bg : (button->enabled && button->configured ? inactive_bg : disabled_bg);
+    uint16_t fg = button->enabled && button->configured ? white : dim;
+    display_fill_rect(x, y, w, h, bg);
+    display_draw_rect(x, y, w, h, button->active ? white : border);
+    char label[48];
+    const char corner = (char)('A' + index);
+    if (button->label[0]) {
+        snprintf(label, sizeof(label), "%c %s", corner, button->label);
+    } else {
+        snprintf(label, sizeof(label), "%c", corner);
+    }
+    display_draw_text_clipped(x + 6, y + 11, w - 12, label, fg, bg, 1);
+}
+
+static void display_render_fullscreen(const ui_state_t *ui)
+{
+    const uint16_t bg = rgb565(5, 8, 12);
+    const uint16_t fg = rgb565(245, 247, 250);
+    const uint16_t muted = rgb565(136, 146, 158);
+    display_fill(bg);
+
+    const char *headline = "STARTING";
+    char detail[MAX_UI_STATUS] = "";
+    if (!ui->wifi_connected) {
+        headline = "WIFI";
+        strlcpy(detail, "CONNECTING", sizeof(detail));
+    } else if (!ui->control_connected) {
+        headline = "SERVER";
+        strlcpy(detail, "CONNECTING", sizeof(detail));
+    } else if (!ui->config_received) {
+        headline = "CONFIG";
+        strlcpy(detail,
+                ui->blocking_status[0] ? ui->blocking_status : "WAITING",
+                sizeof(detail));
+    }
+
+    display_draw_centered_text(82, headline, fg, bg, 3);
+    display_draw_centered_text(124, detail, muted, bg, 2);
+
+    char identity[64];
+    snprintf(identity,
+             sizeof(identity),
+             "ID %u REQ %u",
+             (unsigned)ui->user_id,
+             (unsigned)CONFIG_INTERCOM_USER_ID);
+    display_draw_centered_text(166, identity, muted, bg, 1);
+    display_draw_centered_text(182, CONFIG_INTERCOM_SERVER_HOST, muted, bg, 1);
+    char uid[32];
+    snprintf(uid, sizeof(uid), "UID %.8s", s_client_uid[0] ? s_client_uid : "--------");
+    display_draw_centered_text(198, uid, muted, bg, 1);
+}
+
+static void display_render_normal(const ui_state_t *ui)
+{
+    const uint16_t bg = rgb565(4, 7, 10);
+    const uint16_t panel = rgb565(12, 17, 22);
+    const uint16_t white = rgb565(245, 247, 250);
+    const uint16_t muted = rgb565(140, 150, 160);
+    const uint16_t ok = rgb565(77, 171, 122);
+    const uint16_t alert = rgb565(174, 36, 44);
+    const uint16_t call = rgb565(28, 99, 170);
+    display_fill(bg);
+
+    display_fill_rect(0, 0, DISPLAY_WIDTH, 20, panel);
+    display_draw_text_clipped(4, 6, 62, "BAT --", muted, panel, 1);
+    display_draw_text_clipped(84, 6, 62, ui->wifi_connected ? "WIFI OK" : "WIFI --", ui->wifi_connected ? ok : muted, panel, 1);
+    display_draw_text_clipped(166, 6, 70, ui->control_connected ? "SRV OK" : "SRV --", ui->control_connected ? ok : muted, panel, 1);
+
+    uint16_t banner_bg = panel;
+    char banner[96] = "";
+    uint16_t banner_fg = muted;
+    int64_t now = esp_timer_get_time();
+    if (ui->reply_held && ui->reply_target != 0) {
+        banner_bg = call;
+        banner_fg = white;
+        snprintf(banner, sizeof(banner), "CALLING USER %u", (unsigned)ui->reply_target);
+    } else if (ui->active_alert.present) {
+        banner_bg = alert;
+        banner_fg = white;
+        if (ui->active_alert.message[0]) {
+            snprintf(banner, sizeof(banner), "ALERT %u %s", (unsigned)ui->active_alert.sender, ui->active_alert.message);
+        } else {
+            snprintf(banner, sizeof(banner), "ALERT FROM %u", (unsigned)ui->active_alert.sender);
+        }
+    } else if (ui->transient_status[0] && now < ui->transient_until_us) {
+        banner_bg = panel;
+        banner_fg = white;
+        strlcpy(banner, ui->transient_status, sizeof(banner));
+    } else if (ui->active_direct_call_count > 0) {
+        banner_bg = call;
+        banner_fg = white;
+        snprintf(banner, sizeof(banner), "%u DIRECT CALL", (unsigned)ui->active_direct_call_count);
+    } else {
+        strlcpy(banner, "READY", sizeof(banner));
+    }
+    display_fill_rect(0, 24, DISPLAY_WIDTH, 36, banner_bg);
+    display_draw_centered_text(35, banner, banner_fg, banner_bg, 1);
+
+    for (size_t i = 0; i < MAX_BUTTONS; i++) {
+        display_draw_button_box(i, &ui->buttons[i]);
+    }
+
+    char identity[96];
+    if (ui->unit_name[0]) {
+        snprintf(identity, sizeof(identity), "ID %u  %s", (unsigned)ui->user_id, ui->unit_name);
+    } else {
+        snprintf(identity, sizeof(identity), "ID %u", (unsigned)ui->user_id);
+    }
+    display_draw_centered_text(226, identity, white, bg, 1);
+}
+
+static void display_render(void)
+{
+    if (!s_display_panel || !s_display_framebuffer) {
+        return;
+    }
+    ui_state_t ui = ui_state_snapshot();
+    if (!ui.wifi_connected || !ui.control_connected || !ui.config_received) {
+        display_render_fullscreen(&ui);
+    } else {
+        display_render_normal(&ui);
+    }
+    esp_err_t err = esp_lcd_panel_draw_bitmap(s_display_panel, 0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, s_display_framebuffer);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "display draw failed: %s", esp_err_to_name(err));
+    }
+}
+
+static spi_host_device_t display_spi_host(void)
+{
+    switch (CONFIG_INTERCOM_DISPLAY_SPI_HOST) {
+    case 1:
+        return SPI1_HOST;
+    case 3:
+        return SPI3_HOST;
+    case 2:
+    default:
+        return SPI2_HOST;
+    }
+}
+
+static bool display_required_pins_configured(void)
+{
+    return CONFIG_INTERCOM_DISPLAY_SPI_MOSI_GPIO >= 0 &&
+           CONFIG_INTERCOM_DISPLAY_SPI_SCLK_GPIO >= 0 &&
+           CONFIG_INTERCOM_DISPLAY_SPI_CS_GPIO >= 0 &&
+           CONFIG_INTERCOM_DISPLAY_DC_GPIO >= 0;
+}
+
+static esp_err_t display_apply_rotation(void)
+{
+#if CONFIG_INTERCOM_DISPLAY_ROTATION_90
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(s_display_panel, true), TAG, "display swap xy");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_display_panel, true, false), TAG, "display mirror");
+#elif CONFIG_INTERCOM_DISPLAY_ROTATION_180
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(s_display_panel, false), TAG, "display swap xy");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_display_panel, true, true), TAG, "display mirror");
+#elif CONFIG_INTERCOM_DISPLAY_ROTATION_270
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(s_display_panel, true), TAG, "display swap xy");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_display_panel, false, true), TAG, "display mirror");
+#else
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_swap_xy(s_display_panel, false), TAG, "display swap xy");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_mirror(s_display_panel, false, false), TAG, "display mirror");
+#endif
+    return ESP_OK;
+}
+
+static esp_err_t display_init(void)
+{
+    if (!display_required_pins_configured()) {
+        ESP_LOGW(TAG, "ST7789 display enabled but required SPI/DC pins are not configured");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (CONFIG_INTERCOM_DISPLAY_BACKLIGHT_GPIO >= 0) {
+        gpio_config_t backlight = {
+            .pin_bit_mask = 1ULL << (unsigned)CONFIG_INTERCOM_DISPLAY_BACKLIGHT_GPIO,
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ESP_RETURN_ON_ERROR(gpio_config(&backlight), TAG, "configure display backlight");
+        gpio_set_level(CONFIG_INTERCOM_DISPLAY_BACKLIGHT_GPIO,
+#if CONFIG_INTERCOM_DISPLAY_BACKLIGHT_ACTIVE_LOW
+                       1
+#else
+                       0
+#endif
+        );
+    }
+
+    spi_bus_config_t buscfg = {
+        .mosi_io_num = CONFIG_INTERCOM_DISPLAY_SPI_MOSI_GPIO,
+        .miso_io_num = -1,
+        .sclk_io_num = CONFIG_INTERCOM_DISPLAY_SPI_SCLK_GPIO,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = DISPLAY_WIDTH * 40 * sizeof(uint16_t),
+    };
+    ESP_RETURN_ON_ERROR(spi_bus_initialize(display_spi_host(), &buscfg, SPI_DMA_CH_AUTO), TAG, "initialize display SPI bus");
+
+    esp_lcd_panel_io_handle_t io_handle = NULL;
+    esp_lcd_panel_io_spi_config_t io_config = {
+        .dc_gpio_num = CONFIG_INTERCOM_DISPLAY_DC_GPIO,
+        .cs_gpio_num = CONFIG_INTERCOM_DISPLAY_SPI_CS_GPIO,
+        .pclk_hz = CONFIG_INTERCOM_DISPLAY_SPI_CLOCK_HZ,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .spi_mode = 0,
+        .trans_queue_depth = 10,
+    };
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)display_spi_host(), &io_config, &io_handle),
+                        TAG,
+                        "create display panel IO");
+
+    esp_lcd_panel_dev_config_t panel_config = {
+        .reset_gpio_num = CONFIG_INTERCOM_DISPLAY_RST_GPIO,
+        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+        .bits_per_pixel = 16,
+    };
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_st7789(io_handle, &panel_config, &s_display_panel), TAG, "create ST7789 panel");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_display_panel), TAG, "reset ST7789");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_display_panel), TAG, "init ST7789");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_invert_color(s_display_panel, true), TAG, "invert ST7789 colors");
+    ESP_RETURN_ON_ERROR(display_apply_rotation(), TAG, "rotate ST7789");
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_display_panel, true), TAG, "enable ST7789 display");
+
+    s_display_framebuffer = heap_caps_malloc(DISPLAY_PIXELS * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_display_framebuffer_in_psram = s_display_framebuffer && esp_ptr_external_ram(s_display_framebuffer);
+    if (!s_display_framebuffer) {
+        s_display_framebuffer = heap_caps_malloc(DISPLAY_PIXELS * sizeof(uint16_t), MALLOC_CAP_8BIT);
+        s_display_framebuffer_in_psram = false;
+    }
+    if (!s_display_framebuffer) {
+        return ESP_ERR_NO_MEM;
+    }
+    s_display_framebuffer_bytes = DISPLAY_PIXELS * sizeof(uint16_t);
+
+    if (CONFIG_INTERCOM_DISPLAY_BACKLIGHT_GPIO >= 0) {
+        gpio_set_level(CONFIG_INTERCOM_DISPLAY_BACKLIGHT_GPIO,
+#if CONFIG_INTERCOM_DISPLAY_BACKLIGHT_ACTIVE_LOW
+                       0
+#else
+                       1
+#endif
+        );
+    }
+    display_render();
+    s_display_initialized = true;
+    ESP_LOGI(TAG, "ST7789 display initialized");
+    return ESP_OK;
+}
+
+static void display_task(void *arg)
+{
+    (void)arg;
+    watchdog_register_current_task("ic_display");
+    ESP_LOGI(TAG, "task ic_display running on core %d", xPortGetCoreID());
+    uint32_t last_version = UINT32_MAX;
+    int64_t last_render_us = 0;
+    for (;;) {
+        int64_t now = esp_timer_get_time();
+        uint32_t version = s_ui_state_version;
+        ui_state_t ui = ui_state_snapshot();
+        bool transient_active = ui.transient_status[0] && now < ui.transient_until_us;
+        bool due_to_change = version != last_version && now - last_render_us >= DISPLAY_REFRESH_MIN_US;
+        bool due_to_idle = now - last_render_us >= DISPLAY_IDLE_REFRESH_US;
+        bool due_to_transient = transient_active && now - last_render_us >= DISPLAY_REFRESH_MIN_US;
+        if (due_to_change || due_to_idle || due_to_transient) {
+            display_render();
+            last_version = version;
+            last_render_us = now;
+        }
+        watchdog_reset_current_task();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+#endif
 
 static void runtime_config_init(void)
 {
@@ -3768,6 +5110,7 @@ void app_main(void)
     audio_diagnostic_mode_t diagnostic_mode = audio_diagnostic_mode();
     ESP_LOGW(TAG, "audio diagnostic mode: %s", audio_diagnostic_mode_name(diagnostic_mode));
     runtime_config_init();
+    ui_state_init();
     audio_config_init();
     audio_cue_lut_init();
     s_ws_send_lock = xSemaphoreCreateMutex();
@@ -3780,8 +5123,23 @@ void app_main(void)
     ESP_ERROR_CHECK(s_audio_tx_queue ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(ic_pcm_frame_ring_init(&s_playback_ring, CONFIG_INTERCOM_JITTER_FRAMES));
     ESP_ERROR_CHECK(ic_pcm_frame_ring_init(&s_sidetone_ring, 1));
+#if CONFIG_INTERCOM_OPUS
+    ESP_ERROR_CHECK(opus_codec_init());
+#endif
+    watchdog_init_if_enabled();
     if (diagnostic_mode == AUDIO_DIAGNOSTIC_NORMAL) {
         buttons_init();
+#if CONFIG_INTERCOM_DISPLAY_ST7789
+        if (display_init() == ESP_OK) {
+            xTaskCreatePinnedToCore(display_task,
+                                    "ic_display",
+                                    4096,
+                                    NULL,
+                                    2,
+                                    &s_display_task_handle,
+                                    task_core(CONFIG_INTERCOM_NET_TASK_CORE));
+        }
+#endif
     }
 
     ESP_ERROR_CHECK(i2c_init());
@@ -3803,7 +5161,7 @@ void app_main(void)
                                 CONFIG_INTERCOM_PLAYBACK_TASK_STACK_SIZE,
                                 NULL,
                                 10,
-                                NULL,
+                                &s_playback_task_handle,
                                 task_core(CONFIG_INTERCOM_AUDIO_TASK_CORE));
         vTaskDelay(pdMS_TO_TICKS(PLAYBACK_STARTUP_SETTLE_MS));
         audio_cue_start(AUDIO_CUE_RECONNECTING);
@@ -3829,22 +5187,28 @@ void app_main(void)
                             CONFIG_INTERCOM_UDP_TASK_STACK_SIZE,
                             NULL,
                             8,
-                            NULL,
+                            &s_udp_task_handle,
                             task_core(CONFIG_INTERCOM_NET_TASK_CORE));
-    xTaskCreatePinnedToCore(registration_task, "ic_register", 4096, NULL, 4, NULL, task_core(CONFIG_INTERCOM_NET_TASK_CORE));
+    xTaskCreatePinnedToCore(registration_task,
+                            "ic_register",
+                            4096,
+                            NULL,
+                            4,
+                            &s_registration_task_handle,
+                            task_core(CONFIG_INTERCOM_NET_TASK_CORE));
     xTaskCreatePinnedToCore(capture_task,
                             "ic_capture",
                             CONFIG_INTERCOM_CAPTURE_TASK_STACK_SIZE,
                             NULL,
                             8,
-                            NULL,
+                            &s_capture_task_handle,
                             task_core(CONFIG_INTERCOM_AUDIO_TASK_CORE));
     xTaskCreatePinnedToCore(button_task,
                             "ic_buttons",
                             4096,
                             NULL,
                             5,
-                            NULL,
+                            &s_button_task_handle,
                             task_core(CONFIG_INTERCOM_NET_TASK_CORE));
 
     ESP_LOGI(TAG,

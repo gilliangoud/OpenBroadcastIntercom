@@ -148,7 +148,9 @@ If ESP-IDF refuses to clean a stale partial `clients/esp32/build` folder, run
 
 The first ESP32 firmware target is the Ai-Thinker ESP32 Audio Kit V2.2 /
 ESP32-A1S with ES8388, PCM16/PCM24/PCM48, WebSocket control, UDP mixed receive,
-microphone transmit, active-low PTT, and two advertised dedicated button slots.
+microphone transmit, active-low PTT, four advertised A-D dedicated button slots,
+an optional reply/alert button, optional mono Opus, and an optional 240x240
+ST7789 status display.
 Configure Wi-Fi, server IP, requested user ID, optional stable client UID,
 ES8388 ADC input, mic PGA gain, capture channel, GPIOs, and optional local
 sidetone in `tools/esp32 menuconfig`.
@@ -160,13 +162,14 @@ ES8388 line-bypass config fields are retained for visibility, but codec-bypass
 sidetone is forced off until the fixed playback/capture baseline is stable.
 The ESP32 ES8388/I2S hardware path stays fixed at `48 kHz`, `16-bit`, stereo.
 Network codec changes are software conversion only: `pcm16` sends 16 kHz
-packets, `pcm24` sends 24 kHz packets, and `pcm48` stays native at 48 kHz.
+packets, `pcm24` sends 24 kHz packets, `pcm48` stays native at 48 kHz, and
+Opus currently targets the default 24 kHz speech profile on ESP32.
 Start new hardware on `pcm16`, confirm clean capture health and packet TX, then
 switch to `pcm24` or `pcm48` in the admin UI for better playback and mic
 quality. `pcm48` is the current known-good ESP32 quality mode. `pcm16` now uses
 lightweight interpolation/FIR resampling on the ESP32, but it remains the
-bandwidth-saving speech tier rather than the quality baseline. ESP32 Opus
-remains deferred until CPU headroom is measured.
+bandwidth-saving speech tier rather than the quality baseline. Validate ESP32
+Opus CPU headroom on hardware before making it the field default.
 
 For ESP32 board-mic bring-up, start with:
 

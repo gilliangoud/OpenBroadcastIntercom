@@ -16,6 +16,7 @@ __pycache__/
 /clients/esp32/managed_components/
 /clients/esp32/sdkconfig
 /clients/esp32/sdkconfig.*
+!/clients/esp32/sdkconfig.defaults
 /clients/esp32/sdkconfig\ [0-9]*
 
 /clients/app/gen/apple/build/

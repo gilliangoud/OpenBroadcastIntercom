@@ -5450,6 +5450,7 @@ async fn clear_active_buttons(state: &ServerState, user_id: UserId) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let direct_call_targets = targets.clone();
     let active_buttons = sessions
         .get(&user_id)
         .map(|session| {
@@ -5478,6 +5479,9 @@ async fn clear_active_buttons(state: &ServerState, user_id: UserId) {
             }
         }
     }
+    for target_user_id in &direct_call_targets {
+        close_direct_call_history(&mut sessions, user_id, *target_user_id, now);
+    }
     if let Some(session) = sessions.get_mut(&user_id) {
         session.active_buttons.clear();
         session.regular_talk_active = false;
@@ -5490,6 +5494,26 @@ async fn clear_active_buttons(state: &ServerState, user_id: UserId) {
         push_config_update(state, target).await;
     }
     push_config_update(state, user_id).await;
+}
+
+fn close_direct_call_history(
+    sessions: &mut HashMap<UserId, Session>,
+    user_id: UserId,
+    target_user_id: UserId,
+    now: Instant,
+) {
+    for session_id in [user_id, target_user_id] {
+        if let Some(session) = sessions.get_mut(&session_id) {
+            if let Some(entry) = session.direct_call_history.iter_mut().rev().find(|entry| {
+                entry.caller == user_id
+                    && entry.target == target_user_id
+                    && entry.source_button.is_none()
+                    && entry.ended.is_none()
+            }) {
+                entry.ended = Some(now);
+            }
+        }
+    }
 }
 
 async fn clear_emergency_for_source(state: &ServerState, user_id: UserId) {
@@ -11149,6 +11173,13 @@ mod tests {
         CaptureHealthStatus {
             codec_config: None,
             desktop: None,
+            uptime_ms: 0,
+            wifi: None,
+            transport: None,
+            memory: None,
+            task_stack_high_water_bytes: None,
+            display: None,
+            battery: None,
             playback_queue_depth: 0,
             playback_underflows: 0,
             playback_overflows: 0,
@@ -11443,18 +11474,38 @@ mod tests {
             }],
         }];
         session.active_buttons.insert("pa".to_string());
+        session
+            .active_direct_calls
+            .insert(2, ActiveDirectCall { duck: false });
+        session.direct_call_history.push(DirectCallHistory {
+            caller: 1,
+            target: 2,
+            started: Instant::now(),
+            ended: None,
+            duck: false,
+            source_button: None,
+        });
+        let mut target = Session::new();
+        target.direct_call_history.push(DirectCallHistory {
+            caller: 1,
+            target: 2,
+            started: Instant::now(),
+            ended: None,
+            duck: false,
+            source_button: None,
+        });
         state.sessions.write().await.insert(1, session);
+        state.sessions.write().await.insert(2, target);
 
         clear_active_buttons(&state, 1).await;
 
-        assert!(state
-            .sessions
-            .read()
-            .await
-            .get(&1)
-            .unwrap()
-            .active_buttons
-            .is_empty());
+        let sessions = state.sessions.read().await;
+        let caller = sessions.get(&1).unwrap();
+        let target = sessions.get(&2).unwrap();
+        assert!(caller.active_buttons.is_empty());
+        assert!(caller.active_direct_calls.is_empty());
+        assert!(caller.direct_call_history.last().unwrap().ended.is_some());
+        assert!(target.direct_call_history.last().unwrap().ended.is_some());
     }
 
     #[tokio::test]

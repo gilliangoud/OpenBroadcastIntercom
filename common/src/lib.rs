@@ -862,6 +862,20 @@ pub struct CaptureHealthStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop: Option<DesktopCaptureHealthStatus>,
     #[serde(default)]
+    pub uptime_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wifi: Option<Esp32WifiHealthStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<Esp32TransportHealthStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<Esp32MemoryHealthStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_stack_high_water_bytes: Option<Esp32TaskStackHealthStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<Esp32DisplayHealthStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery: Option<Esp32BatteryHealthStatus>,
+    #[serde(default)]
     pub playback_queue_depth: u16,
     #[serde(default)]
     pub playback_underflows: u32,
@@ -897,6 +911,100 @@ pub struct CaptureHealthStatus {
     pub selected: CaptureChannelHealth,
     pub raw_clipped_samples: u32,
     pub software_clipped_samples: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32WifiHealthStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rssi_dbm: Option<i16>,
+    #[serde(default)]
+    pub connect_count: u32,
+    #[serde(default)]
+    pub disconnect_count: u32,
+    #[serde(default)]
+    pub control_connect_count: u32,
+    #[serde(default)]
+    pub control_disconnect_count: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32TransportHealthStatus {
+    #[serde(default)]
+    pub udp_rx_packets: u32,
+    #[serde(default)]
+    pub udp_decode_errors: u32,
+    #[serde(default)]
+    pub udp_codec_drops: u32,
+    #[serde(default)]
+    pub udp_sequence_gaps: u32,
+    #[serde(default)]
+    pub udp_payload_decode_errors: u32,
+    #[serde(default)]
+    pub udp_tx_send_failures: u32,
+    #[serde(default)]
+    pub audio_tx_queue_drops: u32,
+    #[serde(default)]
+    pub opus_encode_failures: u32,
+    #[serde(default)]
+    pub opus_decode_failures: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32MemoryHealthStatus {
+    #[serde(default)]
+    pub free_heap_bytes: u32,
+    #[serde(default)]
+    pub min_free_heap_bytes: u32,
+    #[serde(default)]
+    pub internal_free_heap_bytes: u32,
+    #[serde(default)]
+    pub internal_largest_free_block_bytes: u32,
+    #[serde(default)]
+    pub spiram_free_heap_bytes: u32,
+    #[serde(default)]
+    pub spiram_largest_free_block_bytes: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32TaskStackHealthStatus {
+    #[serde(default)]
+    pub udp: u32,
+    #[serde(default)]
+    pub registration: u32,
+    #[serde(default)]
+    pub playback: u32,
+    #[serde(default)]
+    pub capture: u32,
+    #[serde(default)]
+    pub buttons: u32,
+    #[serde(default)]
+    pub display: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32DisplayHealthStatus {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub initialized: bool,
+    #[serde(default)]
+    pub framebuffer_in_psram: bool,
+    #[serde(default)]
+    pub framebuffer_bytes: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32BatteryHealthStatus {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub millivolts: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charging: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -2056,6 +2164,54 @@ mod tests {
                 },
             }),
             desktop: None,
+            uptime_ms: 1234,
+            wifi: Some(Esp32WifiHealthStatus {
+                rssi_dbm: Some(-55),
+                connect_count: 1,
+                disconnect_count: 0,
+                control_connect_count: 1,
+                control_disconnect_count: 0,
+            }),
+            transport: Some(Esp32TransportHealthStatus {
+                udp_rx_packets: 10,
+                udp_decode_errors: 0,
+                udp_codec_drops: 1,
+                udp_sequence_gaps: 0,
+                udp_payload_decode_errors: 0,
+                udp_tx_send_failures: 0,
+                audio_tx_queue_drops: 0,
+                opus_encode_failures: 0,
+                opus_decode_failures: 0,
+            }),
+            memory: Some(Esp32MemoryHealthStatus {
+                free_heap_bytes: 100_000,
+                min_free_heap_bytes: 90_000,
+                internal_free_heap_bytes: 40_000,
+                internal_largest_free_block_bytes: 20_000,
+                spiram_free_heap_bytes: 500_000,
+                spiram_largest_free_block_bytes: 250_000,
+            }),
+            task_stack_high_water_bytes: Some(Esp32TaskStackHealthStatus {
+                udp: 1000,
+                registration: 1000,
+                playback: 1000,
+                capture: 1000,
+                buttons: 1000,
+                display: 0,
+            }),
+            display: Some(Esp32DisplayHealthStatus {
+                enabled: false,
+                initialized: false,
+                framebuffer_in_psram: false,
+                framebuffer_bytes: 0,
+            }),
+            battery: Some(Esp32BatteryHealthStatus {
+                status: "unknown".to_string(),
+                present: false,
+                percent: None,
+                millivolts: None,
+                charging: None,
+            }),
             playback_queue_depth: 2,
             playback_underflows: 3,
             playback_overflows: 4,
