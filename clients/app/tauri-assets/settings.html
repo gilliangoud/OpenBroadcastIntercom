@@ -22,7 +22,6 @@
         <section>
           <h2>Connection</h2>
           <label>Server Host<input id="server_host" autocomplete="off" placeholder="192.168.1.10" /></label>
-          <label>User ID<input id="user_id" type="number" min="1" max="65535" /></label>
           <label class="check"><input id="advanced_endpoints" type="checkbox" /> Use custom endpoint URLs</label>
           <details id="advanced-connection">
             <summary>Advanced Connection</summary>
@@ -33,19 +32,15 @@
         </section>
 
         <section>
-          <h2>Routing</h2>
-          <label>Default TX Channel<input id="tx_channel" type="number" min="1" max="65535" /></label>
-          <label>Default Listen Channel<input id="listen_channel" type="number" min="1" max="65535" /></label>
+          <h2>Buttons</h2>
           <label>Button Count<input id="button_count" type="number" min="0" max="24" step="1" /></label>
-          <label>Advertised Buttons<input id="buttons" placeholder="director=Director,pa=PA" /></label>
-          <label>Button Hotkeys<input id="button_keys" placeholder="director=d" /></label>
         </section>
 
         <section>
           <h2>Audio</h2>
           <label>Codec<select id="codec"><option value="pcm16">PCM Low CPU (16 kHz)</option><option value="pcm24">PCM Balanced (24 kHz)</option><option value="pcm48">PCM High Quality (48 kHz)</option><option value="opus">Opus</option></select></label>
-          <label>Mic Gain<input id="mic_gain" type="number" min="0" max="8" step="0.05" /></label>
-          <label>Speaker Gain<input id="speaker_gain" type="number" min="0" max="8" step="0.05" /></label>
+          <label>Mic Gain <output id="mic_gain_value"></output><input id="mic_gain" type="range" min="0" max="8" step="0.05" /></label>
+          <label>Speaker Gain <output id="speaker_gain_value"></output><input id="speaker_gain" type="range" min="0" max="8" step="0.05" /></label>
           <details>
             <summary>Advanced Audio</summary>
             <label>Opus Profile<select id="opus_profile"><option value="speech_16_low">Opus Speech 16 Low</option><option value="speech_24_standard">Opus Speech 24 Standard</option><option value="speech_48_high">Opus Speech 48 High</option><option value="music_48">Opus Music 48</option></select></label>

@@ -59,7 +59,7 @@ pub struct Args {
     pub server: SocketAddr,
     #[arg(long, default_value = "ws://127.0.0.1:40001")]
     pub control: String,
-    #[arg(long, required_unless_present = "list_devices")]
+    #[arg(long)]
     pub user_id: Option<u16>,
     #[arg(long)]
     pub client_uid: Option<String>,
@@ -445,7 +445,7 @@ pub async fn run_until_shutdown_with_local_api(
     }
     tokio::pin!(shutdown);
 
-    let user_id = args.user_id.context("--user-id is required")?;
+    let user_id = args.user_id.unwrap_or(0);
     let client_uid =
         load_or_create_client_uid(args.client_uid.as_deref(), args.identity_file.as_deref())?;
     let control_url = args.control.clone();
@@ -527,9 +527,21 @@ pub async fn run_until_shutdown_with_local_api(
     output_stream.play()?;
     let (control_tx, control_rx) = mpsc::channel::<ControlRequest>(16);
     let (connection_event_tx, connection_event_rx) = mpsc::channel::<ClientConnectionEvent>(8);
+    let (connection_cue_tx, connection_cue_rx) = mpsc::channel::<ClientConnectionEvent>(8);
+    let connection_status = Arc::new(Mutex::new(ClientConnectionEvent::Reconnecting));
     let control_config = Arc::clone(&runtime_config);
     let cue_playback = Arc::clone(&playback);
-    tokio::spawn(run_connection_cue_task(cue_playback, connection_event_rx));
+    tokio::spawn(run_connection_cue_task(cue_playback, connection_cue_rx));
+    {
+        let connection_status = Arc::clone(&connection_status);
+        tokio::spawn(async move {
+            let mut connection_event_rx = connection_event_rx;
+            while let Some(event) = connection_event_rx.recv().await {
+                *connection_status.lock().unwrap() = event;
+                let _ = connection_cue_tx.send(event).await;
+            }
+        });
+    }
     let control_task = tokio::spawn(async move {
         run_control_connection(
             control_url,
@@ -552,6 +564,7 @@ pub async fn run_until_shutdown_with_local_api(
         });
     }
     let capture_health_control_tx = control_tx.clone();
+    let capture_health_config = Arc::clone(&runtime_config);
     let capture_health_diagnostics = capture_diagnostics.clone();
     let capture_health_playback = Arc::clone(&playback);
     let capture_health_telemetry = telemetry_counters.clone();
@@ -576,6 +589,10 @@ pub async fn run_until_shutdown_with_local_api(
                 .try_into()
                 .unwrap_or(u64::MAX);
             *capture_health_latest.lock().unwrap() = Some(health.clone());
+            let user_id = capture_health_config.lock().unwrap().user_id;
+            if user_id == 0 {
+                continue;
+            }
             if let Err(err) = queue_control_message(
                 &capture_health_control_tx,
                 ControlMessage::CaptureHealth { user_id, health },
@@ -593,6 +610,7 @@ pub async fn run_until_shutdown_with_local_api(
         input_backend_status: Arc::clone(&input_backend_status),
         playback: Arc::clone(&playback),
         latest_telemetry: Arc::clone(&latest_telemetry),
+        connection_status: Arc::clone(&connection_status),
     };
     if let Some(local_api_tx) = local_api_tx {
         let _ = local_api_tx.send(local_api.clone());
@@ -614,7 +632,7 @@ pub async fn run_until_shutdown_with_local_api(
         &control_tx,
         ControlMessage::Hello {
             user_id: initial_config.user_id,
-            requested_user_id: Some(initial_config.user_id),
+            requested_user_id: (initial_config.user_id > 0).then_some(initial_config.user_id),
             client_uid: initial_config.client_uid.clone(),
             codecs: supported_codecs(),
             buttons: advertised_buttons.clone(),
@@ -927,6 +945,7 @@ pub struct LocalClientApi {
     input_backend_status: Arc<Mutex<InputBackendStatus>>,
     playback: Arc<Mutex<PlaybackBuffer>>,
     latest_telemetry: Arc<Mutex<Option<CaptureHealthStatus>>>,
+    connection_status: Arc<Mutex<ClientConnectionEvent>>,
 }
 
 type ApiState = LocalClientApi;
@@ -978,6 +997,7 @@ impl LocalClientApi {
         let playback = self.playback.lock().unwrap().stats();
         let telemetry = self.latest_telemetry.lock().unwrap().clone();
         let input_backend_status = self.input_backend_status.lock().unwrap().clone();
+        let server_connection = *self.connection_status.lock().unwrap();
         StateResponse::from_runtime_state(
             &snapshot,
             &self.audio_settings,
@@ -985,6 +1005,7 @@ impl LocalClientApi {
             macos_microphone_mode_status(),
             playback,
             telemetry,
+            server_connection,
         )
     }
 
@@ -3442,9 +3463,16 @@ mod tests {
                     SAMPLES_PER_FRAME,
                 ))),
                 latest_telemetry: Arc::new(Mutex::new(None)),
+                connection_status: Arc::new(Mutex::new(ClientConnectionEvent::Connected)),
             },
             control_rx,
         )
+    }
+
+    #[test]
+    fn user_id_is_optional_for_server_assigned_enrollment() {
+        let args = Args::try_parse_from(["desktop"]).unwrap();
+        assert_eq!(args.user_id, None);
     }
 
     #[test]
@@ -4056,7 +4084,10 @@ mod tests {
         assert!(LOCAL_UI_API_JS.contains("fetch("));
         assert!(!LOCAL_UI_JS.contains("fetch("));
         assert!(!LOCAL_UI_JS.contains("clientApi?.name || 'client'} controls"));
-        assert!(LOCAL_UI_JS.contains("'Hold Talk to transmit'"));
+        assert!(LOCAL_UI_HTML.contains("dock-status"));
+        assert!(LOCAL_UI_JS.contains("Server connected"));
+        assert!(LOCAL_UI_JS.contains("'Hold Talk'"));
+        assert!(LOCAL_UI_CSS.contains(".tag.connected"));
         assert!(LOCAL_UI_HTML.contains("route-editor"));
         assert!(LOCAL_UI_HTML.contains("talker-gain-editor"));
         assert!(LOCAL_UI_HTML.contains("ifb-editor"));

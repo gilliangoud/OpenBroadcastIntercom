@@ -82,19 +82,13 @@ async function openControls() {
   window.location.href = currentLocalUiUrl;
 }
 
-function parseList(value) {
-  return value.split(',').map(item => item.trim()).filter(Boolean);
-}
-
-function csv(value) {
-  return Array.isArray(value) ? value.join(',') : '';
-}
-
-function numberOrNull(value) {
-  const trimmed = String(value ?? '').trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  return Number.isFinite(parsed) ? parsed : null;
+function showGainValues() {
+  if ($('mic_gain_value') && $('mic_gain')) {
+    $('mic_gain_value').textContent = Number($('mic_gain').value || 1).toFixed(2);
+  }
+  if ($('speaker_gain_value') && $('speaker_gain')) {
+    $('speaker_gain_value').textContent = Number($('speaker_gain').value || 1).toFixed(2);
+  }
 }
 
 function normalizeHost(host) {
@@ -142,17 +136,13 @@ function fill(settings) {
   $('control').value = settings.control || 'ws://127.0.0.1:40001';
   $('admin').value = settings.admin || adminForHost(settings.server_host || DEFAULT_HOST);
   $('advanced_endpoints').checked = !!settings.advanced_endpoints;
-  $('user_id').value = settings.user_id ?? '';
   $('codec').value = settings.codec || 'pcm16';
   $('opus_profile').value = settings.opus_profile || 'speech_24_standard';
-  $('listen_channel').value = settings.listen_channel ?? 1;
-  $('tx_channel').value = settings.tx_channel ?? 1;
   $('mic_gain').value = settings.mic_gain ?? 1;
   $('speaker_gain').value = settings.speaker_gain ?? 1;
   $('button_count').value = settings.button_count ?? 6;
-  $('buttons').value = csv(settings.buttons);
-  $('button_keys').value = csv(settings.button_keys);
   setServerProfiles(settings.server_profiles || serverProfiles);
+  showGainValues();
   renderCodecFields();
   syncEndpointFields();
 }
@@ -166,16 +156,16 @@ function collect() {
     control: $('control').value.trim(),
     admin: $('admin').value.trim() || null,
     advanced_endpoints: $('advanced_endpoints').checked,
-    user_id: numberOrNull($('user_id').value),
+    user_id: null,
     codec: $('codec').value,
     opus_profile: $('opus_profile').value,
-    listen_channel: Number($('listen_channel').value || 1),
-    tx_channel: Number($('tx_channel').value || 1),
+    listen_channel: Number(current?.listen_channel || 1),
+    tx_channel: Number(current?.tx_channel || 1),
     mic_gain: Number($('mic_gain').value || 1),
     speaker_gain: Number($('speaker_gain').value || 1),
     button_count: Number($('button_count').value || 6),
-    buttons: parseList($('buttons').value),
-    button_keys: parseList($('button_keys').value),
+    buttons: [],
+    button_keys: [],
     server_profiles: serverProfiles,
     disable_local_ui: false,
     window_mode: 'native',
@@ -212,6 +202,8 @@ async function load() {
 $('codec').addEventListener('change', renderCodecFields);
 $('server_host').addEventListener('input', syncEndpointFields);
 $('advanced_endpoints').addEventListener('change', syncEndpointFields);
+$('mic_gain').addEventListener('input', showGainValues);
+$('speaker_gain').addEventListener('input', showGainValues);
 
 $('save').addEventListener('click', async event => {
   event.preventDefault();

@@ -47,7 +47,7 @@ struct Args {
     server: SocketAddr,
     #[arg(long, default_value = "ws://127.0.0.1:40001")]
     control: String,
-    #[arg(long, required_unless_present = "list_devices")]
+    #[arg(long)]
     user_id: Option<u16>,
     #[arg(long)]
     client_uid: Option<String>,
@@ -268,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let user_id = args.user_id.context("--user-id is required")?;
+    let user_id = args.user_id.unwrap_or(0);
     let client_uid =
         load_or_create_client_uid(args.client_uid.as_deref(), args.identity_file.as_deref())?;
     let advertised_buttons = merge_button_capabilities(
@@ -329,9 +329,21 @@ async fn main() -> anyhow::Result<()> {
 
     let (control_tx, control_rx) = mpsc::channel::<ControlRequest>(16);
     let (connection_event_tx, connection_event_rx) = mpsc::channel::<ClientConnectionEvent>(8);
+    let (connection_cue_tx, connection_cue_rx) = mpsc::channel::<ClientConnectionEvent>(8);
+    let connection_status = Arc::new(Mutex::new(ClientConnectionEvent::Reconnecting));
     let control_config = Arc::clone(&runtime_config);
     let cue_playback = Arc::clone(&playback);
-    tokio::spawn(run_connection_cue_task(cue_playback, connection_event_rx));
+    tokio::spawn(run_connection_cue_task(cue_playback, connection_cue_rx));
+    {
+        let connection_status = Arc::clone(&connection_status);
+        tokio::spawn(async move {
+            let mut connection_event_rx = connection_event_rx;
+            while let Some(event) = connection_event_rx.recv().await {
+                *connection_status.lock().unwrap() = event;
+                let _ = connection_cue_tx.send(event).await;
+            }
+        });
+    }
     let control_task = tokio::spawn(async move {
         run_control_connection(
             args.control,
@@ -347,7 +359,7 @@ async fn main() -> anyhow::Result<()> {
         &control_tx,
         ControlMessage::Hello {
             user_id: initial_config.user_id,
-            requested_user_id: Some(initial_config.user_id),
+            requested_user_id: (initial_config.user_id > 0).then_some(initial_config.user_id),
             client_uid: initial_config.client_uid.clone(),
             codecs: supported_codecs(),
             buttons: advertised_buttons.clone(),
@@ -397,6 +409,7 @@ async fn main() -> anyhow::Result<()> {
             control_tx: control_tx.clone(),
             playback: Arc::clone(&playback),
             latest_telemetry: Arc::clone(&latest_telemetry),
+            connection_status: Arc::clone(&connection_status),
         };
         let local_api_bind = args.local_api_bind;
         tokio::spawn(async move {
@@ -484,6 +497,9 @@ async fn main() -> anyhow::Result<()> {
         loop {
             interval.tick().await;
             let user_id = telemetry_config.lock().unwrap().user_id;
+            if user_id == 0 {
+                continue;
+            }
             let mut health = basic_client_telemetry(
                 "pi",
                 telemetry_playback.lock().unwrap().stats(),
@@ -725,6 +741,7 @@ struct ApiState {
     control_tx: mpsc::Sender<ControlRequest>,
     playback: Arc<Mutex<PlaybackBuffer>>,
     latest_telemetry: Arc<Mutex<Option<CaptureHealthStatus>>>,
+    connection_status: Arc<Mutex<ClientConnectionEvent>>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -739,6 +756,7 @@ struct ErrorResponse {
 
 #[derive(Debug, Serialize, PartialEq)]
 struct StateResponse {
+    server_connection: ClientConnectionEvent,
     user_id: u16,
     client_uid: String,
     name: String,
@@ -776,8 +794,10 @@ impl StateResponse {
         config: &ClientConfig,
         playback: PlaybackStats,
         telemetry: Option<CaptureHealthStatus>,
+        server_connection: ClientConnectionEvent,
     ) -> Self {
         Self {
+            server_connection,
             user_id: config.user_id,
             client_uid: config.client_uid.clone(),
             name: config.name.clone(),
@@ -959,7 +979,13 @@ async fn state_handler(State(state): State<ApiState>) -> Json<StateResponse> {
     let snapshot = state.config.lock().unwrap().clone();
     let playback = state.playback.lock().unwrap().stats();
     let telemetry = state.latest_telemetry.lock().unwrap().clone();
-    Json(StateResponse::from_state(&snapshot, playback, telemetry))
+    let server_connection = *state.connection_status.lock().unwrap();
+    Json(StateResponse::from_state(
+        &snapshot,
+        playback,
+        telemetry,
+        server_connection,
+    ))
 }
 
 async fn config_handler(
@@ -1765,9 +1791,16 @@ mod tests {
                     SAMPLES_PER_FRAME,
                 ))),
                 latest_telemetry: Arc::new(Mutex::new(None)),
+                connection_status: Arc::new(Mutex::new(ClientConnectionEvent::Connected)),
             },
             control_rx,
         )
+    }
+
+    #[test]
+    fn user_id_is_optional_for_server_assigned_enrollment() {
+        let args = Args::try_parse_from(["pi"]).unwrap();
+        assert_eq!(args.user_id, None);
     }
 
     #[test]
@@ -1942,7 +1975,10 @@ mod tests {
         assert!(LOCAL_UI_CSS.contains(".tag.tx.talking"));
         assert!(LOCAL_UI_JS.contains("contextmenu"));
         assert!(!LOCAL_UI_JS.contains("clientApi?.name || 'client'} controls"));
-        assert!(LOCAL_UI_JS.contains("'Hold Talk to transmit'"));
+        assert!(LOCAL_UI_HTML.contains("dock-status"));
+        assert!(LOCAL_UI_JS.contains("Server connected"));
+        assert!(LOCAL_UI_JS.contains("'Hold Talk'"));
+        assert!(LOCAL_UI_CSS.contains(".tag.connected"));
         assert!(!LOCAL_UI_JS.contains("fetch("));
         assert!(LOCAL_UI_API_JS.contains("fetch("));
         assert!(LOCAL_UI_CSS.contains(".phone-shell"));

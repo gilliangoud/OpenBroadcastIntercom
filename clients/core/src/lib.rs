@@ -411,7 +411,8 @@ fn parse_url_host_port(url: &str, scheme_prefix: &str) -> Option<(String, u16)> 
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ClientConnectionEvent {
     Connected,
     Disconnected,
@@ -1145,7 +1146,7 @@ pub async fn run_control_connection(
             let snapshot = config.lock().unwrap().clone();
             let hello = ControlMessage::Hello {
                 user_id: snapshot.user_id,
-                requested_user_id: Some(snapshot.user_id),
+                requested_user_id: (snapshot.user_id > 0).then_some(snapshot.user_id),
                 client_uid: snapshot.client_uid.clone(),
                 codecs: supported_codecs(),
                 buttons: snapshot.advertised_buttons,

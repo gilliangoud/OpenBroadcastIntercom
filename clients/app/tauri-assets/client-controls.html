@@ -13,7 +13,6 @@
           <h1 id="client-title" hidden>Client</h1>
           <div class="status-line">
             <span id="status-tag" class="tag offline">connecting</span>
-            <span id="connection-label" class="muted">waiting for state</span>
           </div>
         </div>
         <nav class="top-actions" aria-label="Console actions">
@@ -65,6 +64,10 @@
         <div class="bottom-controls">
           <button id="mute" class="control-button mute-button" type="button">Mute</button>
           <button id="talk" class="control-button talk-button-main" type="button">Talk</button>
+        </div>
+        <div class="dock-status">
+          <span id="operator-state">Ready</span>
+          <span id="connection-label">Hold Talk</span>
         </div>
       </div>
 

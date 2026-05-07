@@ -43,10 +43,6 @@
             <input id="server_host" autocomplete="off" inputmode="url" placeholder="192.168.1.10" />
           </label>
           <label>
-            User ID
-            <input id="user_id" type="number" min="1" max="65535" inputmode="numeric" />
-          </label>
-          <label>
             Codec
             <select id="codec">
               <option value="pcm16">PCM16</option>
@@ -65,32 +61,16 @@
             </select>
           </label>
           <label>
-            Listen Channel
-            <input id="listen_channel" type="number" min="1" max="65535" inputmode="numeric" />
+            Mic Gain <output id="mic_gain_value"></output>
+            <input id="mic_gain" type="range" min="0" max="8" step="0.05" />
           </label>
           <label>
-            TX Channel
-            <input id="tx_channel" type="number" min="1" max="65535" inputmode="numeric" />
-          </label>
-          <label>
-            Mic Gain
-            <input id="mic_gain" type="number" min="0" max="8" step="0.05" inputmode="decimal" />
-          </label>
-          <label>
-            Speaker Gain
-            <input id="speaker_gain" type="number" min="0" max="8" step="0.05" inputmode="decimal" />
+            Speaker Gain <output id="speaker_gain_value"></output>
+            <input id="speaker_gain" type="range" min="0" max="8" step="0.05" />
           </label>
           <label>
             Button Count
             <input id="button_count" type="number" min="0" max="24" step="1" inputmode="numeric" />
-          </label>
-          <label class="wide">
-            Buttons
-            <input id="buttons" autocomplete="off" placeholder="director=Director,pa=PA" />
-          </label>
-          <label class="wide">
-            Button Keys
-            <input id="button_keys" autocomplete="off" placeholder="director=d" />
           </label>
           <label class="check wide">
             <input id="advanced_endpoints" type="checkbox" />

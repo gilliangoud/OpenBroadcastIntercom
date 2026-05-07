@@ -319,8 +319,9 @@ async function refresh() {
     state = await api('/state');
     render();
   } catch (err) {
-    setText('status-tag', 'error');
-    $('status-tag')?.classList.add('error');
+    setText('status-tag', 'Server error');
+    const statusTag = $('status-tag');
+    if (statusTag) statusTag.className = 'tag error';
     message(String(err), 'error');
   }
 }
@@ -343,23 +344,21 @@ function render() {
 
 function renderStatus() {
   const statusTag = $('status-tag');
+  const activeChannels = [...activeTalkChannels()];
   if (statusTag) {
-    const muted = state.talk_mode === 'muted';
-    const openMic = state.talk_mode === 'open';
-    const talking = regularTalkActive();
-    statusTag.textContent = muted ? 'Muted' : openMic ? 'Open mic' : talking ? 'Talking' : 'Ready';
-    statusTag.className = `tag ${talking ? 'talk' : muted ? 'offline' : ''}`;
+    const connection = state.server_connection || 'reconnecting';
+    statusTag.textContent = serverConnectionLabel(connection);
+    statusTag.className = `tag ${serverConnectionClass(connection)}`;
   }
+  setText('operator-state', activeChannels.length ? 'Talking' : state.talk_mode === 'muted' ? 'Muted' : 'Ready');
   setText('client-title', state.name ? `${state.user_id} ${state.name}` : `Client ${state.user_id}`);
   setText(
     'connection-label',
     state.talk_mode === 'muted'
-      ? 'Talk controls are muted'
-      : state.talk_mode === 'open'
-        ? 'Audio is transmitting'
-        : regularTalkActive()
-          ? `Transmitting on ${csv([...activeTalkChannels()])}`
-          : 'Hold Talk to transmit'
+      ? 'Talk controls muted'
+      : activeChannels.length
+        ? `Talking on ${csv(activeChannels)}`
+        : 'Hold Talk'
   );
   setText('user', state.user_id);
   setText('name-label', state.name || '-');
@@ -382,13 +381,25 @@ function renderStatus() {
   setText('last-caller-label', state.last_direct_caller || '-');
   setText('input-backend-label', `${backendName(state.active_input_backend)} (requested ${backendName(state.requested_input_backend)})`);
   setText('lockout-label', lockedLabels().join(', ') || 'none');
-  setText('route-summary', `${(state.listen || []).length} listen / ${activeTalkChannels().size} talking`);
+  setText('route-summary', `${(state.listen || []).length} listen / ${activeChannels.length} talking`);
   setText('button-summary', `${(state.buttons || []).length} available`);
 
   const lockout = lockedLabels();
   const strip = $('lockout-strip');
   if (strip) strip.hidden = !lockout.length;
   setText('lockout-summary', lockout.join(', '));
+}
+
+function serverConnectionLabel(connection) {
+  if (connection === 'connected') return 'Server connected';
+  if (connection === 'disconnected') return 'Server disconnected';
+  return 'Server reconnecting';
+}
+
+function serverConnectionClass(connection) {
+  if (connection === 'connected') return 'connected';
+  if (connection === 'disconnected') return 'error';
+  return 'warning';
 }
 
 function renderChannels() {

@@ -10,7 +10,7 @@ use common::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{supported_codecs, AudioSettings, ClientConfig, PlaybackStats};
+use crate::{supported_codecs, AudioSettings, ClientConfig, ClientConnectionEvent, PlaybackStats};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -146,6 +146,7 @@ pub struct OkResponse {
 #[derive(Debug, Serialize, PartialEq)]
 pub struct StateResponse {
     pub build: BuildInfo,
+    pub server_connection: ClientConnectionEvent,
     pub user_id: u16,
     pub client_uid: String,
     pub name: String,
@@ -192,9 +193,11 @@ impl StateResponse {
         macos_microphone_mode: Option<MacosMicrophoneModeStatus>,
         playback: PlaybackStats,
         telemetry: Option<ClientTelemetryStatus>,
+        server_connection: ClientConnectionEvent,
     ) -> Self {
         Self {
             build: common::current_build_info(),
+            server_connection,
             user_id: config.user_id,
             client_uid: config.client_uid.clone(),
             name: config.name.clone(),

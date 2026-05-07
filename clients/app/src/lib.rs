@@ -220,7 +220,7 @@ impl Default for AppSettings {
             control: ClientServerEndpoint::default().control_url(),
             admin: None,
             advanced_endpoints: false,
-            user_id: Some(1),
+            user_id: None,
             client_uid: None,
             identity_file: None,
             tx_channel: 1,
@@ -1605,6 +1605,9 @@ mod mobile {
     }
 
     fn prepare_mobile_settings(settings: &mut AppSettings) {
+        settings.user_id = None;
+        settings.buttons.clear();
+        settings.button_keys.clear();
         settings.window_mode = AppWindowMode::Native;
         settings.disable_local_ui = true;
         settings.normalize_endpoints();
@@ -1743,7 +1746,7 @@ mod tests {
     fn defaults_match_desktop_launcher_defaults() {
         let settings = AppSettings::default();
 
-        assert_eq!(settings.user_id, Some(1));
+        assert_eq!(settings.user_id, None);
         assert_eq!(settings.server_host, "127.0.0.1");
         assert_eq!(settings.server, "127.0.0.1:40000".parse().unwrap());
         assert_eq!(settings.control, "ws://127.0.0.1:40001");
@@ -2209,10 +2212,18 @@ mod tests {
         assert!(settings_html.contains("button_count"));
         assert!(settings_html.contains("server_host"));
         assert!(settings_html.contains("advanced_endpoints"));
+        assert!(!settings_html.contains("User ID"));
+        assert!(!settings_html.contains("Default TX Channel"));
+        assert!(!settings_html.contains("Default Listen Channel"));
+        assert!(!settings_html.contains("Advertised Buttons"));
+        assert!(!settings_html.contains("Button Hotkeys"));
+        assert!(settings_html.contains("type=\"range\""));
         assert!(settings_js.contains("input_backend"));
         assert!(settings_js.contains("button_count"));
         assert!(settings_js.contains("server_host"));
         assert!(settings_js.contains("advanced_endpoints"));
+        assert!(settings_js.contains("buttons: []"));
+        assert!(settings_js.contains("button_keys: []"));
         assert!(settings_js.contains("invoke("));
         assert!(!settings_js.contains("fetch("));
         assert!(mobile_html.contains("mobile-form"));
@@ -2221,10 +2232,17 @@ mod tests {
         assert!(mobile_html.contains("button_count"));
         assert!(mobile_html.contains("server_host"));
         assert!(mobile_html.contains("advanced_endpoints"));
+        assert!(!mobile_html.contains("User ID"));
+        assert!(!mobile_html.contains("Listen Channel"));
+        assert!(!mobile_html.contains("TX Channel"));
+        assert!(!mobile_html.contains("Button Keys"));
+        assert!(mobile_html.contains("type=\"range\""));
         assert!(mobile_js.contains("invoke("));
         assert!(mobile_js.contains("button_count"));
         assert!(mobile_js.contains("server_host"));
         assert!(mobile_js.contains("advanced_endpoints"));
+        assert!(mobile_js.contains("buttons: []"));
+        assert!(mobile_js.contains("button_keys: []"));
         assert!(mobile_js.contains("mobile_start_client"));
         assert!(mobile_js.contains("mobile_open_controls"));
         assert!(mobile_js.contains("mobile_discover_servers"));
@@ -2242,6 +2260,9 @@ mod tests {
         assert!(controls_html.contains("client-api.js"));
         assert!(controls_html.contains("client-controls.js"));
         assert!(controls_html.contains("id=\"client-title\" hidden"));
+        assert!(controls_html.contains("dock-status"));
+        assert!(controls_js.contains("Server connected"));
+        assert!(controls_css.contains(".tag.connected"));
         assert!(controls_api.contains("invoke("));
         assert!(controls_api.contains("client_state"));
         assert!(controls_api.contains("client_talk_down"));
@@ -2260,7 +2281,7 @@ mod tests {
         assert!(!controls_js.contains(">regular tx<"));
         assert!(!controls_js.contains(">talking<"));
         assert!(!controls_js.contains("clientApi?.name || 'client'} controls"));
-        assert!(controls_js.contains("'Hold Talk to transmit'"));
+        assert!(controls_js.contains("'Hold Talk'"));
         assert!(!controls_js.contains("fetch("));
         assert!(!controls_api.contains("fetch("));
         assert!(controls_css.contains(".phone-shell"));

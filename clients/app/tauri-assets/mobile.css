@@ -180,6 +180,18 @@ select {
   text-transform: none;
 }
 
+input[type="range"] {
+  min-height: 34px;
+  padding: 0;
+  accent-color: var(--brand);
+}
+
+output {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
 .hint {
   min-height: 22px;
   margin: 0;
