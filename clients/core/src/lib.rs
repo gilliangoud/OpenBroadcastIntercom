@@ -2269,6 +2269,7 @@ mod tests {
                 client_uid: "test-client".to_string(),
                 channels: vec![ChannelPresenceRoster {
                     channel_id: 7,
+                    name: Some("Production PL".to_string()),
                     members: vec![common::ChannelPresenceMember {
                         user_id: 2,
                         name: "Director".to_string(),
@@ -2281,6 +2282,10 @@ mod tests {
 
         let config = config.lock().unwrap();
         assert_eq!(config.channel_rosters[0].channel_id, 7);
+        assert_eq!(
+            config.channel_rosters[0].name.as_deref(),
+            Some("Production PL")
+        );
         assert!(config.channel_rosters[0].members[0].transmitting);
     }
 

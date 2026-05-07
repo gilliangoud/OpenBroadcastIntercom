@@ -7196,6 +7196,14 @@ async fn channel_rosters_for_user(
     user_id: UserId,
 ) -> Vec<ChannelPresenceRoster> {
     let now = Instant::now();
+    let channel_names = state
+        .admin_state
+        .read()
+        .await
+        .channels
+        .iter()
+        .map(|channel| (channel.id, channel.name.clone()))
+        .collect::<HashMap<_, _>>();
     let sessions = state.sessions.read().await;
     let health = state.health.read().await;
     let Some(viewer) = sessions.get(&user_id) else {
@@ -7235,6 +7243,10 @@ async fn channel_rosters_for_user(
             } else {
                 Some(ChannelPresenceRoster {
                     channel_id,
+                    name: channel_names
+                        .get(&channel_id)
+                        .map(|name| name.trim().to_string())
+                        .filter(|name| !name.is_empty()),
                     members,
                 })
             }
@@ -7247,6 +7259,8 @@ async fn channel_rosters_for_user(
 fn configured_presence_channels(session: &Session) -> HashSet<ChannelId> {
     let mut channels = session.listen_channels.clone();
     channels.extend(session.tx_channels.iter().copied());
+    channels.extend(session.ifb.program.iter().copied());
+    channels.extend(session.ifb.interrupt.iter().copied());
     for button in &session.buttons {
         for action in &button.actions {
             if let TalkButtonAction::Transmit { channels: tx, .. } = action {
@@ -10709,6 +10723,7 @@ mod tests {
         let rosters = channel_rosters_for_user(&state, 1).await;
         assert_eq!(rosters.len(), 1);
         assert_eq!(rosters[0].channel_id, 1);
+        assert_eq!(rosters[0].name.as_deref(), Some("Program"));
         assert!(rosters[0]
             .members
             .iter()

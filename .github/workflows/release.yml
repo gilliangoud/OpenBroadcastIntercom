@@ -22,7 +22,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          lfs: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -37,6 +36,8 @@ jobs:
         run: tools/check-public-secrets.sh
       - name: Check version sync
         run: tools/check-version-sync.sh
+      - name: Check external model manifest
+        run: python3 tools/check-model-manifest.py
       - name: Test release version tool
         run: python3 -m unittest tools/test_release_version.py
       - name: Test client core
@@ -49,9 +50,6 @@ jobs:
         run: cargo test -p server --no-default-features
       - name: Test server app shell
         run: cargo test -p server-app
-      - name: Verify Git LFS objects
-        run: git lfs fsck
-
   ios-check:
     if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
     runs-on: macos-26
@@ -59,7 +57,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          lfs: true
       - name: Select Xcode 26.4
         run: |
           sudo xcode-select -s /Applications/Xcode_26.4.app/Contents/Developer
@@ -86,7 +83,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          lfs: true
       - name: Configure git author
         run: |
           git config user.name "github-actions[bot]"
@@ -120,7 +116,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.tag }}
-          lfs: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -156,7 +151,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.tag }}
-          lfs: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -189,7 +183,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.tag }}
-          lfs: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -225,7 +218,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.tag }}
-          lfs: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22

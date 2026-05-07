@@ -1934,6 +1934,11 @@ mod tests {
         assert!(LOCAL_UI_JS.contains("function renderButtons()"));
         assert!(LOCAL_UI_JS.contains("function renderCapabilityPanels()"));
         assert!(LOCAL_UI_JS.contains("data-requires-gain"));
+        assert!(LOCAL_UI_HTML.contains("channel-settings-modal"));
+        assert!(LOCAL_UI_JS.contains("function bindChannelSettingsGesture"));
+        assert!(LOCAL_UI_JS.contains("function channelIconTag"));
+        assert!(LOCAL_UI_CSS.contains(".tag.icon-tag"));
+        assert!(LOCAL_UI_JS.contains("contextmenu"));
         assert!(!LOCAL_UI_JS.contains("clientApi?.name || 'client'} controls"));
         assert!(LOCAL_UI_JS.contains("'Hold Talk to transmit'"));
         assert!(!LOCAL_UI_JS.contains("fetch("));

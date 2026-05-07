@@ -2247,6 +2247,15 @@ mod tests {
         assert!(controls_api.contains("client_talk_down"));
         assert!(controls_api.contains("client_config"));
         assert!(controls_js.contains("applyButtonColor"));
+        assert!(controls_html.contains("channel-settings-modal"));
+        assert!(controls_html.contains("channel-listen-toggle"));
+        assert!(controls_html.contains("channel-tx-toggle"));
+        assert!(controls_js.contains("function bindChannelSettingsGesture"));
+        assert!(controls_js.contains("function saveChannelSettings()"));
+        assert!(controls_js.contains("function channelIconTag"));
+        assert!(controls_css.contains(".tag.icon-tag"));
+        assert!(!controls_js.contains(">listening<"));
+        assert!(!controls_js.contains(">regular tx<"));
         assert!(!controls_js.contains("clientApi?.name || 'client'} controls"));
         assert!(controls_js.contains("'Hold Talk to transmit'"));
         assert!(!controls_js.contains("fetch("));

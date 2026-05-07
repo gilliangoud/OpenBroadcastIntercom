@@ -7,6 +7,8 @@ let dirty = false;
 let heldButtons = new Set();
 let expandedChannels = new Set();
 let regularTalkDown = false;
+let selectedChannelId = null;
+let suppressNextChannelClick = false;
 
 function message(text, kind = 'ok') {
   const el = $('message');
@@ -268,6 +270,21 @@ function removeNumberFrom(list, value) {
   markDirty();
 }
 
+function channelName(id) {
+  const roster = rosterForChannel(id);
+  const name = String(roster?.name || '').trim();
+  return name || `Channel ${id}`;
+}
+
+const channelIcons = {
+  listen: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><path d="M4 14h2a2 2 0 0 1 2 2v3a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2v-4Z"/><path d="M20 14h-2a2 2 0 0 0-2 2v3a1 1 0 0 0 1 1h1a2 2 0 0 0 2-2v-4Z"/></svg>',
+  tx: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/><path d="M8 22h8"/></svg>'
+};
+
+function channelIconTag(kind, label) {
+  return `<span class="tag icon-tag ${kind}" title="${label}" aria-label="${label}">${channelIcons[kind] || ''}</span>`;
+}
+
 function allDraftChannels() {
   const d = ensureDraft();
   const ids = new Set([
@@ -382,11 +399,17 @@ function renderChannels() {
     row.type = 'button';
     row.className = `channel-row ${expandedChannels.has(id) ? 'expanded' : ''}`;
     row.setAttribute('aria-expanded', expandedChannels.has(id) ? 'true' : 'false');
-    row.innerHTML = `<div><div class="channel-name">Channel ${id}</div><div class="muted">${state.vol?.[id] && state.vol[id] !== 1 ? `gain ${state.vol[id]}` : 'normal gain'}${roster?.members?.length ? ` | ${roster.members.length} present` : ''}</div></div><div class="channel-tags">${listening ? '<span class="tag listen">listening</span>' : ''}${regularTx ? '<span class="tag">regular tx</span>' : ''}${activeTalk ? '<span class="tag talk">talking</span>' : ''}</div>`;
+    row.innerHTML = `<div><div class="channel-name">${escapeHtml(channelName(id))}</div><div class="muted">${state.vol?.[id] && state.vol[id] !== 1 ? `gain ${state.vol[id]}` : 'normal gain'}${roster?.members?.length ? ` | ${roster.members.length} present` : ''}</div></div><div class="channel-tags">${listening ? channelIconTag('listen', 'Listening') : ''}${regularTx ? channelIconTag('tx', 'Regular TX') : ''}${activeTalk ? '<span class="tag talk">talking</span>' : ''}</div>`;
+    row.title = 'Click to show roster. Long-press or right-click for channel settings.';
     row.onclick = () => {
+      if (suppressNextChannelClick) {
+        suppressNextChannelClick = false;
+        return;
+      }
       expandedChannels.has(id) ? expandedChannels.delete(id) : expandedChannels.add(id);
       renderChannels();
     };
+    bindChannelSettingsGesture(row, id);
     item.appendChild(row);
     if (expandedChannels.has(id)) {
       const foldout = document.createElement('div');
@@ -399,6 +422,77 @@ function renderChannels() {
     }
     box.appendChild(item);
   }
+}
+
+function bindChannelSettingsGesture(row, id) {
+  let timer = null;
+  const clear = () => {
+    if (timer) window.clearTimeout(timer);
+    timer = null;
+  };
+  row.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    clear();
+    openChannelSettings(id);
+  });
+  row.addEventListener('pointerdown', event => {
+    if (event.button && event.button !== 0) return;
+    clear();
+    timer = window.setTimeout(() => {
+      suppressNextChannelClick = true;
+      row.setPointerCapture?.(event.pointerId);
+      openChannelSettings(id);
+    }, 550);
+  });
+  row.addEventListener('pointerup', clear);
+  row.addEventListener('pointercancel', clear);
+  row.addEventListener('pointerleave', clear);
+}
+
+function openChannelSettings(id) {
+  selectedChannelId = Number(id);
+  ensureDraft();
+  renderChannelSettings();
+  openModal('channel-settings-modal');
+}
+
+function renderChannelSettings() {
+  if (!selectedChannelId) return;
+  const d = ensureDraft();
+  setText('channel-settings-title', channelName(selectedChannelId));
+  setText('channel-settings-legend', `Channel ${selectedChannelId}`);
+  if ($('channel-listen-toggle')) $('channel-listen-toggle').checked = d.listen.includes(selectedChannelId);
+  if ($('channel-tx-toggle')) $('channel-tx-toggle').checked = d.tx.includes(selectedChannelId);
+  if ($('channel-gain-input')) $('channel-gain-input').value = d.vol[selectedChannelId] ?? 1;
+  setControl('channel-listen-toggle', allowed('allow_channels'), 'Channels locked by admin');
+  setControl('channel-tx-toggle', allowed('allow_channels'), 'Channels locked by admin');
+  setControl('channel-gain-input', allowed('allow_volumes'), 'Volumes locked by admin');
+  setControl('channel-settings-remove', allowed('allow_channels'), 'Channels locked by admin');
+  setControl('channel-settings-save', locks().allow_local_api !== false, 'Local controls locked by admin');
+}
+
+async function saveChannelSettings() {
+  if (!selectedChannelId) return;
+  const d = ensureDraft();
+  const ch = selectedChannelId;
+  $('channel-listen-toggle')?.checked ? addNumberTo(d.listen, ch) : removeNumberFrom(d.listen, ch);
+  $('channel-tx-toggle')?.checked ? addNumberTo(d.tx, ch) : removeNumberFrom(d.tx, ch);
+  d.vol[ch] = Number($('channel-gain-input')?.value ?? d.vol[ch] ?? 1);
+  await saveConfig();
+  closeModal('channel-settings-modal');
+}
+
+async function removeSelectedChannel() {
+  if (!selectedChannelId) return;
+  const d = ensureDraft();
+  const ch = selectedChannelId;
+  removeNumberFrom(d.listen, ch);
+  removeNumberFrom(d.tx, ch);
+  delete d.vol[ch];
+  removeNumberFrom(d.ifb.program, ch);
+  removeNumberFrom(d.ifb.interrupt, ch);
+  await saveConfig();
+  closeModal('channel-settings-modal');
 }
 
 function renderAlerts() {
@@ -869,6 +963,15 @@ function bindEvents() {
   $('stats-close')?.addEventListener('click', () => closeModal('stats-modal'));
   $('settings-open')?.addEventListener('click', () => openModal('settings-modal'));
   $('settings-close')?.addEventListener('click', () => closeModal('settings-modal'));
+  $('channel-settings-close')?.addEventListener('click', () => closeModal('channel-settings-modal'));
+  $('channel-settings-save')?.addEventListener('click', event => {
+    event.preventDefault();
+    saveChannelSettings().catch(err => message(String(err), 'error'));
+  });
+  $('channel-settings-remove')?.addEventListener('click', event => {
+    event.preventDefault();
+    removeSelectedChannel().catch(err => message(String(err), 'error'));
+  });
   $('setup-open')?.addEventListener('click', openSetup);
   document.querySelectorAll('#settings-form input,#settings-form select').forEach(el => {
     el.addEventListener('input', () => {

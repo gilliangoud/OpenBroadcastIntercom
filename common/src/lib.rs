@@ -1223,6 +1223,8 @@ pub struct ProcessingStageStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ChannelPresenceRoster {
     pub channel_id: ChannelId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default)]
     pub members: Vec<ChannelPresenceMember>,
 }
@@ -2688,6 +2690,7 @@ mod tests {
 
         let roster = ChannelPresenceRoster {
             channel_id: 2,
+            name: Some("Program".to_string()),
             members: vec![ChannelPresenceMember {
                 user_id: 7,
                 name: "Ref".to_string(),

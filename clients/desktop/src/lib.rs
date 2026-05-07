@@ -4090,6 +4090,16 @@ mod tests {
         assert!(LOCAL_UI_JS.contains("expandedChannels"));
         assert!(LOCAL_UI_JS.contains("function rosterForChannel"));
         assert!(LOCAL_UI_JS.contains("aria-expanded"));
+        assert!(LOCAL_UI_HTML.contains("channel-settings-modal"));
+        assert!(LOCAL_UI_HTML.contains("channel-listen-toggle"));
+        assert!(LOCAL_UI_HTML.contains("channel-tx-toggle"));
+        assert!(LOCAL_UI_JS.contains("function bindChannelSettingsGesture"));
+        assert!(LOCAL_UI_JS.contains("function saveChannelSettings()"));
+        assert!(LOCAL_UI_JS.contains("function channelIconTag"));
+        assert!(LOCAL_UI_CSS.contains(".tag.icon-tag"));
+        assert!(!LOCAL_UI_JS.contains(">listening<"));
+        assert!(!LOCAL_UI_JS.contains(">regular tx<"));
+        assert!(LOCAL_UI_JS.contains("contextmenu"));
         assert!(LOCAL_UI_HTML.contains("macos-mic-mode-open"));
         assert!(LOCAL_UI_JS.contains("macos_microphone_mode"));
         assert!(LOCAL_UI_JS.contains("/macos/microphone-modes"));

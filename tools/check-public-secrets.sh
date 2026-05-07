@@ -20,7 +20,9 @@ if git ls-files | grep -E '\.(mobileprovision|provisionprofile|p12|pem|key|cer|d
   report "tracked signing, certificate, or private key material found"
 fi
 
-if git ls-files | grep -E '(^|/)clients/esp32/sdkconfig($|[ .])' >/dev/null; then
+if git ls-files \
+  | grep -E '(^|/)clients/esp32/sdkconfig($|[ .])' \
+  | grep -v '^clients/esp32/sdkconfig\.defaults$' >/dev/null; then
   report "tracked ESP32 sdkconfig file found; only sdkconfig.defaults is public-safe"
 fi
 

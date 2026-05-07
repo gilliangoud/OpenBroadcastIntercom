@@ -14,17 +14,30 @@ This repository contains a first-pass intercom prototype:
 
 ## Public Clone Notes
 
-This repository uses Git LFS for curated model assets. Install Git LFS before
-cloning if you want the included Whisper, DeepFilterNet, and Supertonic models:
+This repository keeps large Whisper models outside Git and Git LFS. The
+supported Whisper/whisper.cpp models are declared in
+`intercom-models/manifest.json` and downloaded from Hugging Face when needed:
+
+```sh
+tools/download-whisper-models.py --list
+tools/download-whisper-models.py
+```
+
+The default external model is `ggml-large-v3-turbo-q5_0.bin`. Use
+`tools/download-whisper-models.py whisper-large-v3-turbo`,
+`tools/download-whisper-models.py whisper-large-v3-turbo-q8_0`, or
+`tools/download-whisper-models.py --all` to fetch the other curated options.
+Downloaded models live in `intercom-models/`, are ignored by Git, and are
+selectable from the server admin UI. See `docs/model-assets.md`.
+
+Some non-Whisper model assets are still curated through Git LFS. Install Git
+LFS only if you need to work on those assets directly:
 
 ```sh
 git lfs install
-git clone <repo-url>
 ```
 
-Large optional Whisper models are intentionally not committed. Place additional
-models in `intercom-models/` or point the server at another folder with
-`--whisper-model-dir`. Use `intercom-state.example.json` and
+Use `intercom-state.example.json` and
 `intercom-app-settings.example.json` as sanitized starting points; do not commit
 local runtime state, credentials, signing material, or generated build output.
 See `docs/public-repo-hygiene.md` before publishing changes.
@@ -411,7 +424,7 @@ Options:
 - `--recordings-dir <PATH>`: local folder for recording session directories. Default: `intercom-recordings`.
 - `--debug-audio-dir <PATH>`: opt-in diagnostic WAV taps. Writes `server-decoded-input-user-<id>-1ch.wav` before server DSP and `server-mixed-output-user-<id>-<channels>ch.wav` before server encoding.
 - `--whisper-model <PATH>`: optional local Whisper model path for built-in live transcription and recording transcription. Can also be set with `INTERCOM_WHISPER_MODEL`.
-- `--whisper-model-dir <PATH>`: folder scanned by the admin UI for selectable Whisper models. Default: `intercom-models`.
+- `--whisper-model-dir <PATH>`: folder scanned by the admin UI for selectable Whisper models. Default: `intercom-models`. Use `tools/download-whisper-models.py` to populate the default folder from the external Hugging Face manifest.
 - `--deepfilternet-model-dir <PATH>`: folder scanned by the admin UI for selectable DeepFilterNet models. Default: `deepfilternet-models`.
 - `--transcription-engine <disabled|builtin-whisper|external-whisper>`: transcription engine. If `--whisper-model` is set and this flag is omitted, the server defaults to `builtin-whisper`.
 - `--whisper-command <PATH>`: optional local Whisper/whisper.cpp command used only when `--transcription-engine external-whisper`. Can also be set with `INTERCOM_WHISPER_COMMAND`.
@@ -436,9 +449,10 @@ per client (`user-<id>.wav`), not one interleaved multichannel file; the files
 can be imported as separate tracks in an editor. Built-in live
 transcription uses `whisper-rs` with the configured `--whisper-model` or a model
 selected from `--whisper-model-dir`, chunks each client's audio independently,
-and publishes final transcript segments while people are still talking. Place
-`.bin` or `.gguf` Whisper models in `intercom-models/` to make them selectable
-from the Recording page. Live transcription is opt-in from the Recording page or
+and publishes final transcript segments while people are still talking. Use
+`tools/download-whisper-models.py` or place compatible `.bin`/`.gguf` Whisper
+models in `intercom-models/` to make them selectable from the Recording page.
+Live transcription is opt-in from the Recording page or
 admin API. If transcription falls behind, the server drops transcription backlog
 and reports the drop counters instead of delaying audio. Recordings and
 transcripts are local files under `--recordings-dir`; enable them only where

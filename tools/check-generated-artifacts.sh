@@ -27,11 +27,12 @@ tracked="$(
     '*.apk' \
     '*.aab' \
     '*.ipa' \
-    'intercom-models/ggml-medium-*.bin' \
-    'intercom-models/ggml-large-*.bin' \
+    'intercom-models/*.bin' \
+    'intercom-models/*.gguf' \
     '**/.DS_Store' \
     '**/* [0-9]' \
-    '**/* [0-9].*' || true
+    '**/* [0-9].*' \
+    | grep -v '^clients/esp32/sdkconfig\.defaults$' || true
 )"
 
 if [ -n "$tracked" ]; then

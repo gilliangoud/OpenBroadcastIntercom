@@ -193,6 +193,7 @@ h2 {
 .channel-row {
   width: 100%;
   text-align: left;
+  touch-action: manipulation;
 }
 
 .channel-row.expanded {
@@ -246,6 +247,28 @@ h2 {
 .tag.listen {
   background: var(--listen-bg);
   color: var(--listen);
+}
+
+.tag.icon-tag {
+  justify-content: center;
+  width: 30px;
+  height: 26px;
+  padding: 0;
+}
+
+.tag.icon-tag svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tag.tx {
+  background: #f0fdf4;
+  color: var(--talk);
 }
 
 .tag.talk {
@@ -410,6 +433,10 @@ h2 {
   border-radius: 8px;
   padding: 14px;
   box-shadow: 0 -16px 40px rgba(15, 23, 42, 0.22);
+}
+
+.compact-modal {
+  max-width: 380px;
 }
 
 .stats-grid {
@@ -584,6 +611,12 @@ select {
   border-color: var(--ink);
   color: #fff;
   font-weight: 900;
+}
+
+.dialog-actions {
+  display: grid;
+  grid-template-columns: minmax(88px, 0.72fr) minmax(150px, 1.28fr);
+  gap: 8px;
 }
 
 @media (min-width: 760px) {

@@ -79,6 +79,7 @@ function baseClientState(overrides = {}) {
     channel_rosters: [
       {
         channel_id: 1,
+        name: 'Program',
         members: [
           { user_id: 10, name: 'Director', present: true, transmitting: false },
           { user_id: 30, name: 'Program Bridge', present: true, transmitting: true }
@@ -86,6 +87,7 @@ function baseClientState(overrides = {}) {
       },
       {
         channel_id: 2,
+        name: 'Production PL',
         members: [
           { user_id: 10, name: 'Director', present: true, transmitting: false },
           { user_id: 20, name: 'Referee A', present: true, transmitting: false }
@@ -93,6 +95,7 @@ function baseClientState(overrides = {}) {
       },
       {
         channel_id: 4,
+        name: 'Director IFB',
         members: [
           { user_id: 10, name: 'Director', present: true, transmitting: false },
           { user_id: 11, name: 'Producer', present: true, transmitting: false }
