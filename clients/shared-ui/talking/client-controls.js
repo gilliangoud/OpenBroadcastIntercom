@@ -281,8 +281,20 @@ const channelIcons = {
   tx: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/><path d="M8 22h8"/></svg>'
 };
 
-function channelIconTag(kind, label) {
-  return `<span class="tag icon-tag ${kind}" title="${label}" aria-label="${label}">${channelIcons[kind] || ''}</span>`;
+function channelIconTag(kind, label, extraClass = '') {
+  const classes = ['tag', 'icon-tag', kind, extraClass].filter(Boolean).join(' ');
+  return `<span class="${classes}" title="${label}" aria-label="${label}">${channelIcons[kind] || ''}</span>`;
+}
+
+function channelStatusTags(listening, regularTx, activeTalk) {
+  const tags = [];
+  if (listening) tags.push(channelIconTag('listen', 'Listening'));
+  if (regularTx) {
+    tags.push(channelIconTag('tx', activeTalk ? 'Talking' : 'Regular TX', activeTalk ? 'talking' : ''));
+  } else if (activeTalk) {
+    tags.push(channelIconTag('tx', 'Talking', 'talking'));
+  }
+  return tags.join('');
 }
 
 function allDraftChannels() {
@@ -399,7 +411,7 @@ function renderChannels() {
     row.type = 'button';
     row.className = `channel-row ${expandedChannels.has(id) ? 'expanded' : ''}`;
     row.setAttribute('aria-expanded', expandedChannels.has(id) ? 'true' : 'false');
-    row.innerHTML = `<div><div class="channel-name">${escapeHtml(channelName(id))}</div><div class="muted">${state.vol?.[id] && state.vol[id] !== 1 ? `gain ${state.vol[id]}` : 'normal gain'}${roster?.members?.length ? ` | ${roster.members.length} present` : ''}</div></div><div class="channel-tags">${listening ? channelIconTag('listen', 'Listening') : ''}${regularTx ? channelIconTag('tx', 'Regular TX') : ''}${activeTalk ? '<span class="tag talk">talking</span>' : ''}</div>`;
+    row.innerHTML = `<div><div class="channel-name">${escapeHtml(channelName(id))}</div><div class="muted">${state.vol?.[id] && state.vol[id] !== 1 ? `gain ${state.vol[id]}` : 'normal gain'}${roster?.members?.length ? ` | ${roster.members.length} present` : ''}</div></div><div class="channel-tags">${channelStatusTags(listening, regularTx, activeTalk)}</div>`;
     row.title = 'Click to show roster. Long-press or right-click for channel settings.';
     row.onclick = () => {
       if (suppressNextChannelClick) {

@@ -2253,9 +2253,12 @@ mod tests {
         assert!(controls_js.contains("function bindChannelSettingsGesture"));
         assert!(controls_js.contains("function saveChannelSettings()"));
         assert!(controls_js.contains("function channelIconTag"));
+        assert!(controls_js.contains("function channelStatusTags"));
         assert!(controls_css.contains(".tag.icon-tag"));
+        assert!(controls_css.contains(".tag.tx.talking"));
         assert!(!controls_js.contains(">listening<"));
         assert!(!controls_js.contains(">regular tx<"));
+        assert!(!controls_js.contains(">talking<"));
         assert!(!controls_js.contains("clientApi?.name || 'client'} controls"));
         assert!(controls_js.contains("'Hold Talk to transmit'"));
         assert!(!controls_js.contains("fetch("));

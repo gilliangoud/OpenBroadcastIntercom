@@ -4096,9 +4096,12 @@ mod tests {
         assert!(LOCAL_UI_JS.contains("function bindChannelSettingsGesture"));
         assert!(LOCAL_UI_JS.contains("function saveChannelSettings()"));
         assert!(LOCAL_UI_JS.contains("function channelIconTag"));
+        assert!(LOCAL_UI_JS.contains("function channelStatusTags"));
         assert!(LOCAL_UI_CSS.contains(".tag.icon-tag"));
+        assert!(LOCAL_UI_CSS.contains(".tag.tx.talking"));
         assert!(!LOCAL_UI_JS.contains(">listening<"));
         assert!(!LOCAL_UI_JS.contains(">regular tx<"));
+        assert!(!LOCAL_UI_JS.contains(">talking<"));
         assert!(LOCAL_UI_JS.contains("contextmenu"));
         assert!(LOCAL_UI_HTML.contains("macos-mic-mode-open"));
         assert!(LOCAL_UI_JS.contains("macos_microphone_mode"));
