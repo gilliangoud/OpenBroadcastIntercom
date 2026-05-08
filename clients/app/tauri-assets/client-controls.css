@@ -408,7 +408,7 @@ h2 {
   background: rgba(247, 249, 251, 0.98);
   border-top: 1px solid var(--line);
   margin: 0 calc(var(--shell-x-pad) * -1);
-  padding: var(--dock-pad-y) var(--shell-x-pad) max(var(--dock-pad-y), env(safe-area-inset-bottom));
+  padding: var(--dock-pad-y) var(--shell-x-pad);
   flex: 0 0 auto;
 }
 
