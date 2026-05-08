@@ -68,7 +68,7 @@ function refreshSoon(delay = ACTION_REFRESH_DELAY_MS) {
   if (refreshTimer !== null) window.clearTimeout(refreshTimer);
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null;
-    if (actionInFlight || refreshInFlight || userInteracting) {
+    if (refreshInFlight || userInteracting) {
       refreshSoon(100);
       return;
     }
@@ -516,7 +516,7 @@ async function refresh() {
 }
 
 async function pollRefresh() {
-  if (refreshInFlight || actionInFlight || userInteracting) return;
+  if (refreshInFlight || userInteracting) return;
   refreshInFlight = true;
   try {
     await refresh();

@@ -1268,8 +1268,7 @@ mod mobile {
         mode: TalkMode,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .set_talk_mode(mode)
-            .await
+            .queue_set_talk_mode(mode)
             .map_err(|err| err.to_string())
     }
 
@@ -1278,8 +1277,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .mute()
-            .await
+            .queue_mute()
             .map_err(|err| err.to_string())
     }
 
@@ -1288,8 +1286,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .unmute()
-            .await
+            .queue_unmute()
             .map_err(|err| err.to_string())
     }
 
@@ -1298,8 +1295,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .talk_down()
-            .await
+            .queue_talk(true)
             .map_err(|err| err.to_string())
     }
 
@@ -1308,8 +1304,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .talk_up()
-            .await
+            .queue_talk(false)
             .map_err(|err| err.to_string())
     }
 
@@ -1318,8 +1313,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .talk_toggle()
-            .await
+            .queue_talk_toggle()
             .map_err(|err| err.to_string())
     }
 
@@ -1329,8 +1323,7 @@ mod mobile {
         codec: Codec,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .set_codec(codec)
-            .await
+            .queue_set_codec(codec)
             .map_err(|err| err.to_string())
     }
 
@@ -1350,8 +1343,7 @@ mod mobile {
         id: ButtonId,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .button_down(id)
-            .await
+            .queue_button(id, true)
             .map_err(|err| err.to_string())
     }
 
@@ -1361,8 +1353,7 @@ mod mobile {
         id: ButtonId,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .button_up(id)
-            .await
+            .queue_button(id, false)
             .map_err(|err| err.to_string())
     }
 
@@ -1372,8 +1363,7 @@ mod mobile {
         id: ButtonId,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .button_toggle(id)
-            .await
+            .queue_button(id, true)
             .map_err(|err| err.to_string())
     }
 
@@ -1383,8 +1373,7 @@ mod mobile {
         id: u16,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .call_down(id)
-            .await
+            .queue_direct_call(id, true, false)
             .map_err(|err| err.to_string())
     }
 
@@ -1394,8 +1383,7 @@ mod mobile {
         id: u16,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .call_up(id)
-            .await
+            .queue_direct_call(id, false, false)
             .map_err(|err| err.to_string())
     }
 
@@ -1405,8 +1393,7 @@ mod mobile {
         id: u16,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .call_toggle(id)
-            .await
+            .queue_direct_call_toggle(id)
             .map_err(|err| err.to_string())
     }
 
@@ -1415,8 +1402,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .reply_down()
-            .await
+            .queue_reply_call(true, false)
             .map_err(|err| err.to_string())
     }
 
@@ -1425,8 +1411,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .reply_up()
-            .await
+            .queue_reply_call(false, false)
             .map_err(|err| err.to_string())
     }
 
@@ -1435,8 +1420,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .reply_toggle()
-            .await
+            .queue_reply_toggle()
             .map_err(|err| err.to_string())
     }
 
@@ -1446,8 +1430,7 @@ mod mobile {
         request: client_core::AlertRequest,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .send_alert(request)
-            .await
+            .queue_send_alert(request)
             .map_err(|err| err.to_string())
     }
 
@@ -1457,8 +1440,7 @@ mod mobile {
         id: AlertId,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .ack_alert(id)
-            .await
+            .queue_ack_alert(id)
             .map_err(|err| err.to_string())
     }
 
@@ -1468,8 +1450,7 @@ mod mobile {
         id: AlertId,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .cancel_alert(id)
-            .await
+            .queue_cancel_alert(id)
             .map_err(|err| err.to_string())
     }
 

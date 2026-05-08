@@ -35,7 +35,7 @@ use common::{
     CaptureChannelHealth, CaptureHealthStatus, ClientLockoutPolicy, ClientRole, Codec,
     ControlMessage, ControlResponse, DesktopCaptureHealthStatus, DirectCallStatus,
     Esp32AudioConfig, IfbConfig, OpusProfile, ProcessingConfig, ProcessingMode, ProcessingProfile,
-    StereoConfig, TalkMode, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
+    StereoConfig, TalkButtonMode, TalkMode, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -1086,6 +1086,225 @@ impl LocalClientApi {
         Ok(OkResponse { ok: true })
     }
 
+    pub fn queue_set_talk_mode(&self, mode: TalkMode) -> Result<OkResponse, ApiError> {
+        let user_id = {
+            let mut snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            ensure_policy_allowed(
+                &snapshot.lockout,
+                |lockout| lockout.allow_talk_mode,
+                "talk mode",
+            )?;
+            snapshot.set_talk_mode(mode);
+            if mode == TalkMode::Muted {
+                snapshot.regular_talk_active = false;
+            }
+            snapshot.user_id
+        };
+        self.try_queue_control_message(ControlMessage::TalkMode { user_id, mode })
+    }
+
+    pub fn queue_mute(&self) -> Result<OkResponse, ApiError> {
+        self.queue_set_talk_mode(TalkMode::Muted)
+    }
+
+    pub fn queue_unmute(&self) -> Result<OkResponse, ApiError> {
+        let (user_id, mode) = {
+            let mut snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            ensure_policy_allowed(
+                &snapshot.lockout,
+                |lockout| lockout.allow_talk_mode,
+                "talk mode",
+            )?;
+            let mode = snapshot.restored_unmute_talk_mode();
+            snapshot.set_talk_mode(mode);
+            (snapshot.user_id, mode)
+        };
+        self.try_queue_control_message(ControlMessage::TalkMode { user_id, mode })
+    }
+
+    pub fn queue_talk(&self, active: bool) -> Result<OkResponse, ApiError> {
+        let user_id = {
+            let mut snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            snapshot.regular_talk_active = active;
+            snapshot.user_id
+        };
+        self.try_queue_control_message(ControlMessage::Talk { user_id, active })
+    }
+
+    pub fn queue_talk_toggle(&self) -> Result<OkResponse, ApiError> {
+        let active = {
+            let snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            !snapshot.regular_talk_active
+        };
+        self.queue_talk(active)
+    }
+
+    pub fn queue_set_codec(&self, codec: Codec) -> Result<OkResponse, ApiError> {
+        let user_id = {
+            let mut snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            ensure_policy_allowed(&snapshot.lockout, |lockout| lockout.allow_codec, "codec")?;
+            snapshot.codec = codec;
+            snapshot.user_id
+        };
+        self.try_queue_control_message(ControlMessage::AudioCodec { user_id, codec })
+    }
+
+    pub fn queue_button(&self, id: ButtonId, pressed: bool) -> Result<OkResponse, ApiError> {
+        let (user_id, button_id) = {
+            let mut snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            ensure_policy_allowed(
+                &snapshot.lockout,
+                |lockout| lockout.allow_buttons,
+                "buttons",
+            )?;
+            let Some(button) = snapshot.buttons.iter().find(|button| button.id == id) else {
+                return Err(ApiError::BadRequest(format!("unknown button `{id}`")));
+            };
+            let was_active = snapshot.active_buttons.contains(&id);
+            let now_active = match button.mode {
+                TalkButtonMode::Momentary => pressed,
+                TalkButtonMode::Latching => {
+                    if pressed {
+                        !was_active
+                    } else {
+                        was_active
+                    }
+                }
+            };
+            set_active_button(&mut snapshot.active_buttons, &id, now_active);
+            (snapshot.user_id, id)
+        };
+        self.try_queue_control_message(ControlMessage::Button {
+            user_id,
+            button_id,
+            pressed,
+        })
+    }
+
+    pub fn queue_direct_call(
+        &self,
+        target_user_id: u16,
+        active: bool,
+        duck: bool,
+    ) -> Result<OkResponse, ApiError> {
+        let user_id = {
+            let mut snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            set_active_direct_call(&mut snapshot, target_user_id, active, duck);
+            snapshot.user_id
+        };
+        self.try_queue_control_message(ControlMessage::DirectCall {
+            user_id,
+            target_user_id,
+            active,
+            duck,
+        })
+    }
+
+    pub fn queue_direct_call_toggle(&self, target_user_id: u16) -> Result<OkResponse, ApiError> {
+        let active = {
+            let snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            !snapshot.active_direct_calls.iter().any(|call| {
+                call.caller == snapshot.user_id && call.target == target_user_id && call.active
+            })
+        };
+        self.queue_direct_call(target_user_id, active, false)
+    }
+
+    pub fn queue_reply_call(&self, active: bool, duck: bool) -> Result<OkResponse, ApiError> {
+        let user_id = {
+            let mut snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            let Some(target_user_id) = snapshot.last_direct_caller else {
+                return Err(ApiError::BadRequest(
+                    "no last direct caller to reply to".to_string(),
+                ));
+            };
+            set_active_direct_call(&mut snapshot, target_user_id, active, duck);
+            snapshot.user_id
+        };
+        self.try_queue_control_message(ControlMessage::ReplyCall {
+            user_id,
+            active,
+            duck,
+        })
+    }
+
+    pub fn queue_reply_toggle(&self) -> Result<OkResponse, ApiError> {
+        let active = {
+            let snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            let Some(target) = snapshot.last_direct_caller else {
+                return Err(ApiError::BadRequest(
+                    "no last direct caller to reply to".to_string(),
+                ));
+            };
+            !snapshot
+                .active_direct_calls
+                .iter()
+                .any(|call| call.caller == snapshot.user_id && call.target == target && call.active)
+        };
+        self.queue_reply_call(active, false)
+    }
+
+    pub fn queue_send_alert(&self, request: AlertRequest) -> Result<OkResponse, ApiError> {
+        let user_id = {
+            let snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            snapshot.user_id
+        };
+        self.try_queue_control_message(ControlMessage::SendAlert {
+            user_id,
+            target: request.target,
+            message: request.message,
+        })
+    }
+
+    pub fn queue_ack_alert(&self, alert_id: AlertId) -> Result<OkResponse, ApiError> {
+        let user_id = {
+            let mut snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            snapshot.active_alerts.retain(|alert| alert.id != alert_id);
+            snapshot.user_id
+        };
+        self.try_queue_control_message(ControlMessage::AckAlert { user_id, alert_id })
+    }
+
+    pub fn queue_cancel_alert(&self, alert_id: AlertId) -> Result<OkResponse, ApiError> {
+        let user_id = {
+            let mut snapshot = self.config.lock().unwrap();
+            ensure_local_api_allowed(&snapshot)?;
+            snapshot.active_alerts.retain(|alert| alert.id != alert_id);
+            snapshot.user_id
+        };
+        self.try_queue_control_message(ControlMessage::CancelAlert { user_id, alert_id })
+    }
+
+    fn try_queue_control_message(&self, message: ControlMessage) -> Result<OkResponse, ApiError> {
+        let (response_tx, _response_rx) = oneshot::channel();
+        self.control_tx
+            .try_send(ControlRequest {
+                message,
+                response_tx,
+            })
+            .map_err(|err| match err {
+                mpsc::error::TrySendError::Full(_) => {
+                    ApiError::Unavailable("control command queue is full".to_string())
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    ApiError::Unavailable("control connection is not available".to_string())
+                }
+            })?;
+        Ok(OkResponse { ok: true })
+    }
+
     pub async fn button_down(&self, id: ButtonId) -> Result<OkResponse, ApiError> {
         send_button(self, id, true).await
     }
@@ -1707,6 +1926,47 @@ fn same_channels(left: &[u16], right: &[u16]) -> bool {
     left.sort_unstable();
     right.sort_unstable();
     left == right
+}
+
+fn set_active_button(active_buttons: &mut Vec<ButtonId>, id: &ButtonId, active: bool) {
+    if active {
+        if !active_buttons.contains(id) {
+            active_buttons.push(id.clone());
+        }
+    } else {
+        active_buttons.retain(|button_id| button_id != id);
+    }
+}
+
+fn set_active_direct_call(
+    config: &mut ClientConfig,
+    target_user_id: u16,
+    active: bool,
+    duck: bool,
+) {
+    if active {
+        if let Some(call) = config
+            .active_direct_calls
+            .iter_mut()
+            .find(|call| call.caller == config.user_id && call.target == target_user_id)
+        {
+            call.active = true;
+            call.duck = duck;
+        } else {
+            config.active_direct_calls.push(DirectCallStatus {
+                caller: config.user_id,
+                caller_name: None,
+                target: target_user_id,
+                target_name: None,
+                active: true,
+                duck,
+            });
+        }
+    } else {
+        config
+            .active_direct_calls
+            .retain(|call| !(call.caller == config.user_id && call.target == target_user_id));
+    }
 }
 
 async fn forward_control_message(
@@ -3924,6 +4184,54 @@ mod tests {
         request.response_tx.send(ControlResponse::Ack).unwrap();
 
         assert_eq!(handle.await.unwrap().unwrap().0, OkResponse { ok: true });
+    }
+
+    #[tokio::test]
+    async fn no_wait_talk_queue_updates_local_state_without_control_ack() {
+        let (state, mut control_rx) = api_state();
+
+        assert_eq!(state.queue_talk(true).unwrap(), OkResponse { ok: true });
+        assert!(state.config.lock().unwrap().regular_talk_active);
+
+        let request = control_rx.recv().await.unwrap();
+        assert!(matches!(
+            request.message,
+            ControlMessage::Talk {
+                user_id: 1,
+                active: true
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn no_wait_button_queue_updates_local_state_without_control_ack() {
+        let (state, mut control_rx) = api_state();
+        state.config.lock().unwrap().buttons = vec![TalkButtonConfig {
+            id: "director".to_string(),
+            label: "Director".to_string(),
+            color: None,
+            mode: TalkButtonMode::Latching,
+            actions: Vec::new(),
+        }];
+
+        assert_eq!(
+            state.queue_button("director".to_string(), true).unwrap(),
+            OkResponse { ok: true }
+        );
+        assert_eq!(
+            state.config.lock().unwrap().active_buttons,
+            vec!["director".to_string()]
+        );
+
+        let request = control_rx.recv().await.unwrap();
+        assert!(matches!(
+            request.message,
+            ControlMessage::Button {
+                user_id: 1,
+                ref button_id,
+                pressed: true
+            } if button_id == "director"
+        ));
     }
 
     #[tokio::test]
