@@ -830,10 +830,7 @@ mod mobile {
     use std::time::Instant;
 
     use anyhow::{bail, Context};
-    use client_core::{
-        ClientAudioBackend, ClientEndpointOverrides, ClientRuntimePhase, DEFAULT_AUDIO_PORT,
-        DEFAULT_CONTROL_PORT,
-    };
+    use client_core::{ClientAudioBackend, ClientEndpointOverrides, ClientRuntimePhase};
     use common::{
         AlertId, ButtonId, CaptureHealthStatus, ClientTelemetryRuntimeStatus, Codec, TalkMode,
     };
@@ -1831,6 +1828,8 @@ mod mobile {
         service: MdnsService,
         addresses: &std::collections::HashMap<String, Vec<std::net::IpAddr>>,
     ) -> Option<MobileServerProfile> {
+        use client_core::{DEFAULT_AUDIO_PORT, DEFAULT_CONTROL_PORT};
+
         let target = service.target?;
         let ip = addresses
             .get(&target)?
