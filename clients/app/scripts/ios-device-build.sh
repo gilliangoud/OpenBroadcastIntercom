@@ -67,7 +67,7 @@ EOF
 
 run_tauri_ios_build() {
   local log_file
-  log_file="$(mktemp "${TMPDIR:-/tmp}/intercom-ios-device-build.XXXXXX.log")"
+  log_file="$(mktemp "${TMPDIR:-/tmp}/intercom-ios-device-build.XXXXXX")"
 
   set +e
   cargo tauri ios build --debug --target=aarch64 --features="${TAURI_IOS_FEATURES:-native}" --ci "$@" 2>&1 | tee "$log_file"

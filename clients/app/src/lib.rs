@@ -845,8 +845,8 @@ mod mobile {
     use super::{
         load_settings, mobile_connected_timestamp_ms, mobile_profile_id,
         mobile_profiles_match_discovered_service, normalize_mobile_profile,
-        remember_mobile_profile, save_settings, should_replace_mobile_profile, AppSettings,
-        AppWindowMode, MobileServerProfile,
+        prepare_mobile_identity_path, remember_mobile_profile, save_settings,
+        should_replace_mobile_profile, AppSettings, AppWindowMode, MobileServerProfile,
     };
     use crate::mobile_audio::DefaultMobileAudioPlatform;
 
@@ -2051,20 +2051,6 @@ mod mobile {
         settings.normalize_endpoints();
     }
 
-    fn prepare_mobile_identity_path(settings: &mut AppSettings, settings_path: &Path) {
-        if settings
-            .client_uid
-            .as_deref()
-            .is_some_and(|uid| !uid.trim().is_empty())
-            || settings.identity_file.is_some()
-        {
-            return;
-        }
-        settings.identity_file = settings_path
-            .parent()
-            .map(|dir| dir.join("client-identity.json"));
-    }
-
     fn mobile_controls_url() -> String {
         "client-controls.html".to_string()
     }
@@ -2092,6 +2078,23 @@ fn temp_settings_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| "intercom-app-settings.json".into());
     file_name.push(format!(".{}.tmp", std::process::id()));
     path.with_file_name(file_name)
+}
+
+#[cfg(any(
+    test,
+    all(feature = "native", any(target_os = "ios", target_os = "android"))
+))]
+fn prepare_mobile_identity_path(settings: &mut AppSettings, settings_path: &Path) {
+    if settings
+        .client_uid
+        .as_deref()
+        .is_some_and(|uid| !uid.trim().is_empty())
+    {
+        return;
+    }
+    settings.identity_file = settings_path
+        .parent()
+        .map(|dir| dir.join("client-identity.json"));
 }
 
 fn app_input_backend_to_core(backend: desktop::AudioInputBackend) -> ClientAudioBackendKind {
@@ -2218,6 +2221,46 @@ mod tests {
         assert_eq!(settings.window_mode, AppWindowMode::SystemBrowser);
         assert_eq!(settings.ui_open_delay_ms, 750);
         assert!(settings.server_profiles.is_empty());
+    }
+
+    #[test]
+    fn mobile_identity_path_tracks_current_settings_container() {
+        let settings_path = PathBuf::from(
+            "/private/var/mobile/Containers/Data/Application/current/Library/Application Support/com.intercomsuite.client/intercom-app-settings.json",
+        );
+        let stale_identity = PathBuf::from(
+            "/private/var/mobile/Containers/Data/Application/previous/Library/Application Support/com.intercomsuite.client/client-identity.json",
+        );
+        let mut settings = AppSettings {
+            identity_file: Some(stale_identity),
+            ..AppSettings::default()
+        };
+
+        prepare_mobile_identity_path(&mut settings, &settings_path);
+
+        assert_eq!(
+            settings.identity_file,
+            Some(settings_path.parent().unwrap().join("client-identity.json"))
+        );
+    }
+
+    #[test]
+    fn mobile_identity_path_keeps_explicit_client_uid() {
+        let settings_path = PathBuf::from(
+            "/private/var/mobile/Containers/Data/Application/current/Library/Application Support/com.intercomsuite.client/intercom-app-settings.json",
+        );
+        let stale_identity = PathBuf::from(
+            "/private/var/mobile/Containers/Data/Application/previous/Library/Application Support/com.intercomsuite.client/client-identity.json",
+        );
+        let mut settings = AppSettings {
+            client_uid: Some("explicit-client".to_string()),
+            identity_file: Some(stale_identity.clone()),
+            ..AppSettings::default()
+        };
+
+        prepare_mobile_identity_path(&mut settings, &settings_path);
+
+        assert_eq!(settings.identity_file, Some(stale_identity));
     }
 
     #[test]

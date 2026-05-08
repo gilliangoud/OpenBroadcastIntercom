@@ -74,7 +74,7 @@ EOF
 
 run_tauri_ios_dev() {
   local log_file
-  log_file="$(mktemp "${TMPDIR:-/tmp}/intercom-ios-device-dev.XXXXXX.log")"
+  log_file="$(mktemp "${TMPDIR:-/tmp}/intercom-ios-device-dev.XXXXXX")"
 
   set +e
   cargo tauri ios dev "$DEVICE_NAME" --features="${TAURI_IOS_FEATURES:-native}" "$@" 2>&1 | tee "$log_file"

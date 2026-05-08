@@ -10,7 +10,17 @@ let regularTalkDown = false;
 let selectedChannelId = null;
 let suppressNextChannelClick = false;
 const CHANNEL_VIEW_STORAGE_KEY = 'intercom.operator.showAllChannels';
+const REFRESH_INTERVAL_MS = window.matchMedia?.('(pointer: coarse)')?.matches ? 2500 : 1000;
+const ACTION_REFRESH_DELAY_MS = 350;
+const USER_IDLE_REFRESH_DELAY_MS = 500;
 let showAllChannels = readChannelViewPreference();
+let refreshInFlight = false;
+let actionInFlight = 0;
+let refreshTimer = null;
+let refreshPending = false;
+let userInteracting = false;
+let userIdleTimer = null;
+let renderKeys = {};
 
 function readChannelViewPreference() {
   try {
@@ -33,7 +43,9 @@ function setShowAllChannels(value) {
   writeChannelViewPreference(showAllChannels);
   if ($('show-all-channels')) $('show-all-channels').checked = showAllChannels;
   if (!state) return;
+  invalidateRenderKey('channels');
   renderChannels();
+  updateRenderKey('channels', channelRenderKey());
   renderStatus();
 }
 
@@ -49,6 +61,100 @@ async function api(path, opts = {}) {
     throw new Error('Client controls API adapter is not loaded.');
   }
   return clientApi.request(path, opts);
+}
+
+function refreshSoon(delay = ACTION_REFRESH_DELAY_MS) {
+  refreshPending = true;
+  if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = null;
+    if (actionInFlight || refreshInFlight || userInteracting) {
+      refreshSoon(100);
+      return;
+    }
+    refreshPending = false;
+    pollRefresh();
+  }, delay);
+}
+
+function sendAction(path, opts = {}, refreshAfter = true) {
+  actionInFlight += 1;
+  const run = () => {
+    api(path, opts)
+      .then(() => {
+        if (refreshAfter) refreshSoon();
+      })
+      .catch(err => {
+        message(String(err), 'error');
+        refreshSoon(0);
+      })
+      .finally(() => {
+        actionInFlight = Math.max(0, actionInFlight - 1);
+      });
+  };
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(run);
+  } else {
+    window.setTimeout(run, 0);
+  }
+}
+
+function markUserInteracting() {
+  userInteracting = true;
+  if (userIdleTimer !== null) window.clearTimeout(userIdleTimer);
+  userIdleTimer = null;
+}
+
+function markUserIdleSoon() {
+  if (userIdleTimer !== null) window.clearTimeout(userIdleTimer);
+  userIdleTimer = window.setTimeout(() => {
+    userIdleTimer = null;
+    userInteracting = false;
+    if (refreshPending) refreshSoon(0);
+  }, USER_IDLE_REFRESH_DELAY_MS);
+}
+
+function sectionKey(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function invalidateRenderKey(name) {
+  delete renderKeys[name];
+}
+
+function renderIfChanged(name, value, renderFn) {
+  const key = sectionKey(value);
+  if (renderKeys[name] === key) return;
+  renderKeys[name] = key;
+  renderFn();
+}
+
+function updateRenderKey(name, value) {
+  renderKeys[name] = sectionKey(value);
+}
+
+function channelRenderKey() {
+  return [showAllChannels, state.listen, state.tx, state.vol, state.buttons, state.active_buttons, state.ifb, state.channel_rosters, [...expandedChannels].sort((a, b) => a - b)];
+}
+
+function alertsRenderKey() {
+  return [state.active_alerts, state.emergency];
+}
+
+function codecsRenderKey() {
+  return [state.supported_codecs, state.codec, state.lockout];
+}
+
+function settingsModalVisible() {
+  return capability('runtimeSettings', true) && $('settings-modal')?.hidden === false;
+}
+
+function channelSettingsModalVisible() {
+  return $('channel-settings-modal')?.hidden === false;
 }
 
 function capability(name, fallback = true) {
@@ -409,20 +515,31 @@ async function refresh() {
   }
 }
 
+async function pollRefresh() {
+  if (refreshInFlight || actionInFlight || userInteracting) return;
+  refreshInFlight = true;
+  try {
+    await refresh();
+  } finally {
+    refreshInFlight = false;
+  }
+}
+
 function render() {
   if (!state) return;
   renderStatus();
-  renderAlerts();
-  renderCuePanel();
-  renderChannels();
-  if (!dirty) fillForms();
-  renderCodecs();
-  if (!heldButtons.size) renderButtons();
-  renderIfb();
+  renderIfChanged('alerts', alertsRenderKey(), renderAlerts);
+  renderIfChanged('cue', [state.ifb, state.active_direct_calls, state.last_direct_caller, state.channel_rosters], renderCuePanel);
+  renderIfChanged('channels', channelRenderKey(), renderChannels);
+  if (!dirty && settingsModalVisible()) fillForms();
+  renderIfChanged('codecs', codecsRenderKey(), renderCodecs);
+  if (!heldButtons.size) {
+    renderIfChanged('buttons', [state.buttons, state.active_buttons, state.lockout], renderButtons);
+  }
+  if ($('stats-modal')?.hidden === false) renderIfb();
   renderTalkControls();
   renderCapabilityPanels();
-  renderLockout();
-  syncDockPadding();
+  if (settingsModalVisible() || channelSettingsModalVisible()) renderLockout();
 }
 
 function renderStatus() {
@@ -520,7 +637,9 @@ function renderChannels() {
         return;
       }
       expandedChannels.has(id) ? expandedChannels.delete(id) : expandedChannels.add(id);
+      invalidateRenderKey('channels');
       renderChannels();
+      updateRenderKey('channels', channelRenderKey());
     };
     bindChannelSettingsGesture(row, id);
     item.appendChild(row);
@@ -639,12 +758,10 @@ function renderAlerts() {
 }
 
 async function ackAlert(id) {
-  try {
-    await api(`/alerts/${id}/ack`, { method: 'POST' });
-    await refresh();
-  } catch (err) {
-    message(String(err), 'error');
-  }
+  if (state?.active_alerts) state.active_alerts = state.active_alerts.filter(alert => String(alert.id) !== String(id));
+  renderAlerts();
+  updateRenderKey('alerts', alertsRenderKey());
+  sendAction(`/alerts/${id}/ack`, { method: 'POST' });
 }
 
 function activeIfbSources() {
@@ -699,7 +816,10 @@ function renderCuePanel() {
     box.appendChild(row);
   }
   box.querySelectorAll('[data-reply-direct-call]').forEach(button => {
-    button.onclick = () => api('/reply/toggle', { method: 'POST' }).then(refresh).catch(err => message(String(err), 'error'));
+    button.onclick = () => {
+      button.classList.toggle('active');
+      sendAction('/reply/toggle', { method: 'POST' });
+    };
   });
 }
 
@@ -922,7 +1042,13 @@ function renderCodecs() {
     button.textContent = codecName(codec);
     button.className = codec === state.codec ? 'active' : '';
     button.disabled = !allowed('allow_codec');
-    button.onclick = () => api('/codec', { method: 'POST', body: JSON.stringify({ codec }) }).then(refresh).catch(err => message(String(err), 'error'));
+    button.onclick = () => {
+      state.codec = codec;
+      renderCodecs();
+      updateRenderKey('codecs', codecsRenderKey());
+      renderStatus();
+      sendAction('/codec', { method: 'POST', body: JSON.stringify({ codec }) });
+    };
     box.appendChild(button);
   }
 }
@@ -953,34 +1079,28 @@ function renderButtons() {
     card.appendChild(button);
     card.appendChild(meta);
     if (mode === 'latching') {
-      button.onclick = () => api(`/buttons/${encodeURIComponent(b.id)}/toggle`, { method: 'POST' }).then(refresh).catch(err => message(String(err), 'error'));
+      button.onclick = () => {
+        const activeButtons = new Set(state.active_buttons || []);
+        activeButtons.has(b.id) ? activeButtons.delete(b.id) : activeButtons.add(b.id);
+        state.active_buttons = [...activeButtons];
+        button.classList.toggle('active', activeButtons.has(b.id));
+        sendAction(`/buttons/${encodeURIComponent(b.id)}/toggle`, { method: 'POST' });
+      };
     } else {
       let down = false;
-      const press = async () => {
+      const press = () => {
         if (down || button.disabled) return;
         down = true;
         heldButtons.add(b.id);
         button.classList.add('active');
-        try {
-          await api(`/buttons/${encodeURIComponent(b.id)}/down`, { method: 'POST' });
-        } catch (err) {
-          down = false;
-          heldButtons.delete(b.id);
-          button.classList.remove('active');
-          message(String(err), 'error');
-        }
+        sendAction(`/buttons/${encodeURIComponent(b.id)}/down`, { method: 'POST' }, false);
       };
-      const release = async () => {
+      const release = () => {
         if (!down) return;
         down = false;
         heldButtons.delete(b.id);
         button.classList.remove('active');
-        try {
-          await api(`/buttons/${encodeURIComponent(b.id)}/up`, { method: 'POST' });
-          await refresh();
-        } catch (err) {
-          message(String(err), 'error');
-        }
+        sendAction(`/buttons/${encodeURIComponent(b.id)}/up`, { method: 'POST' });
       };
       bindPressHold(button, press, release);
     }
@@ -1066,7 +1186,11 @@ function openSetup() {
 function bindEvents() {
   $('stats-open')?.addEventListener('click', () => openModal('stats-modal'));
   $('stats-close')?.addEventListener('click', () => closeModal('stats-modal'));
-  $('settings-open')?.addEventListener('click', () => openModal('settings-modal'));
+  $('settings-open')?.addEventListener('click', () => {
+    openModal('settings-modal');
+    if (!dirty && state) fillForms();
+    renderLockout();
+  });
   $('settings-close')?.addEventListener('click', () => closeModal('settings-modal'));
   $('channel-settings-close')?.addEventListener('click', () => closeModal('channel-settings-modal'));
   $('channel-settings-save')?.addEventListener('click', event => {
@@ -1145,46 +1269,42 @@ function bindEvents() {
   });
   $('macos-mic-mode-open')?.addEventListener('click', event => {
     event.preventDefault();
-    api('/macos/microphone-modes', { method: 'POST' }).catch(err => message(String(err), 'error'));
+    sendAction('/macos/microphone-modes', { method: 'POST' }, false);
   });
   $('mute')?.addEventListener('click', () => {
-    api(state?.talk_mode === 'muted' ? '/unmute' : '/mute', { method: 'POST' }).then(refresh).catch(err => message(String(err), 'error'));
+    const muted = state?.talk_mode === 'muted';
+    if (state) state.talk_mode = muted ? 'ptt' : 'muted';
+    renderTalkControls();
+    renderStatus();
+    sendAction(muted ? '/unmute' : '/mute', { method: 'POST' });
   });
   const talk = $('talk');
   if (talk) {
     bindPressHold(talk, regularTalkPress, regularTalkRelease);
   }
+  window.addEventListener('pointerdown', markUserInteracting, { capture: true, passive: true });
+  window.addEventListener('pointerup', markUserIdleSoon, { capture: true, passive: true });
+  window.addEventListener('pointercancel', markUserIdleSoon, { capture: true, passive: true });
   window.addEventListener('resize', syncDockPadding);
   if (window.ResizeObserver) {
     new ResizeObserver(syncDockPadding).observe(document.querySelector('.bottom-dock'));
   }
 }
 
-async function regularTalkPress() {
+function regularTalkPress() {
   if (regularTalkDown || state?.talk_mode !== 'ptt') return;
   regularTalkDown = true;
   $('talk')?.classList.add('active');
-  try {
-    await api('/talk/down', { method: 'POST' });
-  } catch (err) {
-    regularTalkDown = false;
-    $('talk')?.classList.remove('active');
-    message(String(err), 'error');
-  }
+  sendAction('/talk/down', { method: 'POST' }, false);
 }
 
-async function regularTalkRelease() {
+function regularTalkRelease() {
   if (!regularTalkDown) return;
   regularTalkDown = false;
   $('talk')?.classList.remove('active');
-  try {
-    await api('/talk/up', { method: 'POST' });
-    await refresh();
-  } catch (err) {
-    message(String(err), 'error');
-  }
+  sendAction('/talk/up', { method: 'POST' });
 }
 
 bindEvents();
-refresh();
-setInterval(refresh, 1000);
+pollRefresh();
+setInterval(pollRefresh, REFRESH_INTERVAL_MS);
