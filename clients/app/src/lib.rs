@@ -2908,6 +2908,8 @@ mod tests {
         assert!(ios_info.contains("_intercom-suite._tcp"));
         assert!(ios_bridge.contains("AVAudioSessionCategoryPlayAndRecord"));
         assert!(ios_bridge.contains("AVAudioSessionModeVoiceChat"));
+        assert!(ios_bridge.contains("inputGainSettable"));
+        assert!(ios_bridge.contains("setInputGain:1.0"));
         assert!(ios_bridge.contains("intercom_audio_session_configured"));
         assert!(ios_bridge.contains("AVAudioSessionRouteChangeReasonCategoryChange"));
         assert!(ios_bridge.contains("intercom_ios_browse_intercom_services"));

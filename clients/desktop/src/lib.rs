@@ -46,6 +46,8 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tracing_subscriber::EnvFilter;
 
+#[cfg(target_os = "ios")]
+mod ios_voice;
 #[cfg(target_os = "macos")]
 mod macos_mic_mode;
 #[cfg(target_os = "macos")]
@@ -2466,6 +2468,8 @@ enum InputStream {
     Raw(cpal::Stream),
     #[cfg(target_os = "macos")]
     VoiceProcessing(macos_voice::VoiceProcessingInputStream),
+    #[cfg(target_os = "ios")]
+    IosVoiceProcessing(ios_voice::VoiceProcessingInputStream),
 }
 
 impl InputStream {
@@ -2474,6 +2478,8 @@ impl InputStream {
             Self::Raw(stream) => stream.play().context("start input stream"),
             #[cfg(target_os = "macos")]
             Self::VoiceProcessing(stream) => stream.play(),
+            #[cfg(target_os = "ios")]
+            Self::IosVoiceProcessing(stream) => stream.play(),
         }
     }
 }
@@ -2573,7 +2579,82 @@ fn build_preferred_voice_processing_input_stream(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "ios")]
+fn build_auto_input_stream(
+    tx: mpsc::Sender<Vec<i16>>,
+    audio_settings: Arc<AudioSettings>,
+    input_device: Option<&str>,
+    capture_options: CapturePipelineOptions,
+) -> anyhow::Result<(InputStream, InputBackendStatus)> {
+    build_preferred_voice_processing_input_stream(
+        tx,
+        audio_settings,
+        input_device,
+        capture_options,
+        AudioInputBackend::Auto,
+    )
+}
+
+#[cfg(target_os = "ios")]
+fn build_preferred_voice_processing_input_stream(
+    tx: mpsc::Sender<Vec<i16>>,
+    audio_settings: Arc<AudioSettings>,
+    input_device: Option<&str>,
+    capture_options: CapturePipelineOptions,
+    requested: AudioInputBackend,
+) -> anyhow::Result<(InputStream, InputBackendStatus)> {
+    if let Some(input_device) = input_device {
+        return Ok((
+            build_cpal_input_stream(
+                tx,
+                audio_settings,
+                Some(input_device),
+                capture_options,
+            )?,
+            InputBackendStatus::active(
+                requested,
+                AudioInputBackend::Raw,
+                Some(
+                    "selected input devices use the raw backend; iOS VoiceProcessingIO requires the default input route".to_string(),
+                ),
+            ),
+        ));
+    }
+
+    match ios_voice::VoiceProcessingInputStream::new(
+        tx.clone(),
+        Arc::clone(&audio_settings),
+        capture_options.clone(),
+    ) {
+        Ok(stream) => {
+            tracing::info!("using iOS VoiceProcessingIO input backend");
+            Ok((
+                InputStream::IosVoiceProcessing(stream),
+                InputBackendStatus::active(
+                    requested,
+                    AudioInputBackend::VoiceProcessing,
+                    Some(
+                        "using iOS VoiceProcessingIO input with automatic gain control".to_string(),
+                    ),
+                ),
+            ))
+        }
+        Err(err) => {
+            tracing::warn!(%err, "iOS VoiceProcessingIO input unavailable; falling back to raw cpal input");
+            let note = format!("iOS voice processing unavailable; using raw input: {err:#}");
+            let stream = build_cpal_input_stream(tx, audio_settings, input_device, capture_options)
+                .with_context(|| {
+                    format!("iOS VoiceProcessingIO failed ({err:#}) and raw fallback failed")
+                })?;
+            Ok((
+                stream,
+                InputBackendStatus::active(requested, AudioInputBackend::Raw, Some(note)),
+            ))
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 fn build_auto_input_stream(
     tx: mpsc::Sender<Vec<i16>>,
     audio_settings: Arc<AudioSettings>,
@@ -2590,7 +2671,7 @@ fn build_auto_input_stream(
     ))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 fn build_preferred_voice_processing_input_stream(
     tx: mpsc::Sender<Vec<i16>>,
     audio_settings: Arc<AudioSettings>,

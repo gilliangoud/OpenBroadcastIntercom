@@ -124,6 +124,14 @@ static int intercom_configure_audio_session(char *error_buffer, size_t error_buf
     goto finish;
   }
 
+  if (session.inputGainSettable) {
+    error = nil;
+    if (![session setInputGain:1.0 error:&error]) {
+      fprintf(stderr, "Set iOS input gain failed: %s\n",
+              error.localizedDescription.UTF8String ?: "unknown error");
+    }
+  }
+
   intercom_audio_session_configured = YES;
 
 finish:
