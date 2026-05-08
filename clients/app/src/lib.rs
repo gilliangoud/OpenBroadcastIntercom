@@ -823,12 +823,11 @@ mod mobile_audio;
 
 #[cfg(all(feature = "native", any(target_os = "ios", target_os = "android")))]
 mod mobile {
-    use std::io::ErrorKind;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::Mutex;
     use std::thread;
     use std::thread::JoinHandle;
-    use std::time::Duration;
+    use std::time::Instant;
 
     use anyhow::{bail, Context};
     use client_core::{
@@ -999,13 +998,16 @@ mod mobile {
     }
 
     #[tauri::command]
-    fn mobile_discover_servers(
+    async fn mobile_discover_servers(
         app: tauri::AppHandle,
     ) -> std::result::Result<Vec<MobileServerProfile>, String> {
         let path = mobile_settings_path(&app)?;
-        let settings = load_settings(&path).map_err(|err| err.to_string())?;
-        let discovered = discover_mobile_servers().map_err(|err| err.to_string())?;
-        Ok(merge_mobile_profiles(settings.server_profiles, discovered))
+        run_mobile_command_blocking("mobile_discover_servers", move || {
+            let settings = load_settings(&path).map_err(|err| err.to_string())?;
+            let discovered = discover_mobile_servers().map_err(|err| err.to_string())?;
+            Ok(merge_mobile_profiles(settings.server_profiles, discovered))
+        })
+        .await
     }
 
     #[tauri::command]
@@ -1061,7 +1063,7 @@ mod mobile {
     }
 
     #[tauri::command]
-    fn mobile_start_client(
+    async fn mobile_start_client(
         app: tauri::AppHandle,
         state: tauri::State<'_, MobileAppState>,
         mut settings: AppSettings,
@@ -1211,7 +1213,7 @@ mod mobile {
     }
 
     #[tauri::command]
-    fn client_state(
+    async fn client_state(
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::StateResponse, String> {
         let (api, phase, last_error) = {
@@ -1232,23 +1234,27 @@ mod mobile {
                 })?;
             (api, runtime_state.phase, runtime_state.last_error.clone())
         };
-        let mut response = api.state();
-        let runtime = ClientTelemetryRuntimeStatus {
-            client_kind: "mobile".to_string(),
-            phase: mobile_runtime_phase_name(phase).to_string(),
-            last_error,
-        };
-        if let Some(telemetry) = response.telemetry.as_mut() {
-            telemetry.runtime = Some(runtime);
-        } else {
-            response.telemetry = Some(CaptureHealthStatus {
-                runtime: Some(runtime),
-                adc_input: "mobile".to_string(),
-                capture_channel: "mobile".to_string(),
-                ..CaptureHealthStatus::default()
-            });
-        }
-        Ok(response)
+        let phase = mobile_runtime_phase_name(phase).to_string();
+        run_mobile_command_blocking("client_state", move || {
+            let mut response = api.state();
+            let runtime = ClientTelemetryRuntimeStatus {
+                client_kind: "mobile".to_string(),
+                phase,
+                last_error,
+            };
+            if let Some(telemetry) = response.telemetry.as_mut() {
+                telemetry.runtime = Some(runtime);
+            } else {
+                response.telemetry = Some(CaptureHealthStatus {
+                    runtime: Some(runtime),
+                    adc_input: "mobile".to_string(),
+                    capture_channel: "mobile".to_string(),
+                    ..CaptureHealthStatus::default()
+                });
+            }
+            Ok(response)
+        })
+        .await
     }
 
     #[tauri::command]
@@ -1328,13 +1334,15 @@ mod mobile {
     }
 
     #[tauri::command]
-    fn client_gain(
+    async fn client_gain(
         state: tauri::State<'_, MobileAppState>,
         request: client_core::GainRequest,
     ) -> std::result::Result<client_core::OkResponse, String> {
-        mobile_runtime_api(&state)?
-            .set_gain(request)
-            .map_err(|err| err.to_string())
+        let api = mobile_runtime_api(&state)?;
+        run_mobile_command_blocking("client_gain", move || {
+            api.set_gain(request).map_err(|err| err.to_string())
+        })
+        .await
     }
 
     #[tauri::command]
@@ -1478,6 +1486,27 @@ mod mobile {
         }
     }
 
+    async fn run_mobile_command_blocking<T, F>(
+        name: &'static str,
+        work: F,
+    ) -> std::result::Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> std::result::Result<T, String> + Send + 'static,
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            let started = Instant::now();
+            let result = work();
+            let elapsed_ms = started.elapsed().as_millis();
+            if elapsed_ms >= 250 {
+                tracing::warn!(command = name, elapsed_ms, "slow mobile Tauri command");
+            }
+            result
+        })
+        .await
+        .map_err(|err| format!("{name} task failed: {err}"))?
+    }
+
     fn set_mobile_runtime_failure(state: &tauri::State<'_, MobileAppState>, err: &str) {
         if let Ok(mut runtime_state) = state.runtime.lock() {
             runtime_state.runtime = None;
@@ -1597,12 +1626,14 @@ mod mobile {
         serde_json::from_str(&text).context("parse iOS Bonjour discovery results")
     }
 
+    #[cfg(target_os = "android")]
     const INTERCOM_DISCOVERY_SERVICE: &str = "_intercom-suite._tcp.local";
 
     #[cfg(target_os = "android")]
     fn android_discover_intercom_servers() -> anyhow::Result<Vec<MobileServerProfile>> {
+        use std::io::ErrorKind;
         use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
 
         let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
             .context("bind Android mDNS discovery socket")?;
@@ -1638,6 +1669,7 @@ mod mobile {
         dedupe_discovered_profiles(responses)
     }
 
+    #[cfg(target_os = "android")]
     fn build_mdns_ptr_query(service: &str) -> anyhow::Result<Vec<u8>> {
         let mut query = Vec::with_capacity(64);
         query.extend_from_slice(&0_u16.to_be_bytes()); // transaction id
@@ -1652,6 +1684,7 @@ mod mobile {
         Ok(query)
     }
 
+    #[cfg(target_os = "android")]
     fn write_dns_name(out: &mut Vec<u8>, name: &str) -> anyhow::Result<()> {
         for label in name.trim_end_matches('.').split('.') {
             if label.is_empty() || label.len() > 63 {
@@ -1664,6 +1697,7 @@ mod mobile {
         Ok(())
     }
 
+    #[cfg(target_os = "android")]
     #[derive(Debug, Default)]
     struct MdnsService {
         instance: String,
@@ -1676,6 +1710,7 @@ mod mobile {
         version: Option<String>,
     }
 
+    #[cfg(target_os = "android")]
     fn profiles_from_mdns_packet(packet: &[u8]) -> anyhow::Result<Vec<MobileServerProfile>> {
         use std::collections::{HashMap, HashSet};
         use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -1791,6 +1826,7 @@ mod mobile {
             .collect())
     }
 
+    #[cfg(target_os = "android")]
     fn profile_from_mdns_service(
         service: MdnsService,
         addresses: &std::collections::HashMap<String, Vec<std::net::IpAddr>>,
@@ -1837,6 +1873,7 @@ mod mobile {
         })
     }
 
+    #[cfg(target_os = "android")]
     fn dedupe_discovered_profiles(
         profiles: Vec<MobileServerProfile>,
     ) -> anyhow::Result<Vec<MobileServerProfile>> {
@@ -1859,10 +1896,12 @@ mod mobile {
         Ok(merged)
     }
 
+    #[cfg(target_os = "android")]
     fn normalize_dns_name(name: &str) -> String {
         name.trim_end_matches('.').to_ascii_lowercase()
     }
 
+    #[cfg(target_os = "android")]
     fn mdns_instance_label(instance: &str) -> String {
         instance
             .strip_suffix(&format!(".{INTERCOM_DISCOVERY_SERVICE}"))
@@ -1870,6 +1909,7 @@ mod mobile {
             .to_string()
     }
 
+    #[cfg(target_os = "android")]
     fn read_txt_records(data: &[u8]) -> Vec<(String, String)> {
         let mut records = Vec::new();
         let mut offset = 0;
@@ -1888,6 +1928,7 @@ mod mobile {
         records
     }
 
+    #[cfg(target_os = "android")]
     fn read_dns_name(packet: &[u8], offset: usize) -> anyhow::Result<(String, usize)> {
         let mut labels = Vec::new();
         let mut pos = offset;
@@ -1927,6 +1968,7 @@ mod mobile {
         }
     }
 
+    #[cfg(target_os = "android")]
     fn dns_u16(packet: &[u8], offset: usize) -> anyhow::Result<u16> {
         if offset + 2 > packet.len() {
             bail!("DNS u16 out of bounds");
@@ -1934,6 +1976,7 @@ mod mobile {
         Ok(u16::from_be_bytes([packet[offset], packet[offset + 1]]))
     }
 
+    #[cfg(target_os = "android")]
     fn dns_u32(packet: &[u8], offset: usize) -> anyhow::Result<u32> {
         if offset + 4 > packet.len() {
             bail!("DNS u32 out of bounds");
@@ -2787,6 +2830,8 @@ mod tests {
         assert!(controls_html.contains(">Runtime</button>"));
         assert!(controls_js.contains("function bindPressHold"));
         assert!(controls_js.contains("document.addEventListener('pointerup', finish, true)"));
+        assert!(controls_js.contains("SYNTHETIC_TOUCH_POINTER_IGNORE_MS"));
+        assert!(controls_js.contains("window.addEventListener('touchstart', markUserInteracting"));
         assert!(!controls_js.contains("onlostpointercapture = regularTalkRelease"));
         assert!(controls_css.contains("touch-action: none"));
         assert!(controls_html.contains("Runtime Controls"));
@@ -2864,6 +2909,8 @@ mod tests {
         assert!(ios_info.contains("_intercom-suite._tcp"));
         assert!(ios_bridge.contains("AVAudioSessionCategoryPlayAndRecord"));
         assert!(ios_bridge.contains("AVAudioSessionModeVoiceChat"));
+        assert!(ios_bridge.contains("intercom_audio_session_configured"));
+        assert!(ios_bridge.contains("AVAudioSessionRouteChangeReasonCategoryChange"));
         assert!(ios_bridge.contains("intercom_ios_browse_intercom_services"));
         assert!(android_manifest.contains("android.permission.RECORD_AUDIO"));
         assert!(android_manifest.contains("android.permission.INTERNET"));

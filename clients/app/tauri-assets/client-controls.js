@@ -13,6 +13,7 @@ const CHANNEL_VIEW_STORAGE_KEY = 'intercom.operator.showAllChannels';
 const REFRESH_INTERVAL_MS = window.matchMedia?.('(pointer: coarse)')?.matches ? 2500 : 1000;
 const ACTION_REFRESH_DELAY_MS = 350;
 const USER_IDLE_REFRESH_DELAY_MS = 500;
+const SYNTHETIC_TOUCH_POINTER_IGNORE_MS = 900;
 let showAllChannels = readChannelViewPreference();
 let refreshInFlight = false;
 let actionInFlight = 0;
@@ -21,6 +22,16 @@ let refreshPending = false;
 let userInteracting = false;
 let userIdleTimer = null;
 let renderKeys = {};
+let derivedState = emptyDerivedState();
+
+function emptyDerivedState() {
+  return {
+    rosterByChannel: new Map(),
+    memberNameById: new Map(),
+    channelIds: [],
+    rosterKey: ''
+  };
+}
 
 function readChannelViewPreference() {
   try {
@@ -115,11 +126,7 @@ function markUserIdleSoon() {
 }
 
 function sectionKey(value) {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
+  return String(value ?? '');
 }
 
 function invalidateRenderKey(name) {
@@ -133,20 +140,172 @@ function renderIfChanged(name, value, renderFn) {
   renderFn();
 }
 
+function monotonicNow() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
+
 function updateRenderKey(name, value) {
   renderKeys[name] = sectionKey(value);
 }
 
 function channelRenderKey() {
-  return [showAllChannels, state.listen, state.tx, state.vol, state.buttons, state.active_buttons, state.ifb, state.channel_rosters, [...expandedChannels].sort((a, b) => a - b)];
+  return [
+    showAllChannels ? 'all' : 'assigned',
+    listKey(state.listen),
+    listKey(state.tx),
+    volumeKey(state.vol),
+    buttonsKey(state.buttons),
+    listKey(state.active_buttons),
+    ifbKey(state.ifb),
+    derivedState.rosterKey,
+    listKey([...expandedChannels].sort((a, b) => a - b))
+  ].join('|');
 }
 
 function alertsRenderKey() {
-  return [state.active_alerts, state.emergency];
+  return `${alertsKey(state.active_alerts)}|${emergencyKey(state.emergency)}`;
 }
 
 function codecsRenderKey() {
-  return [state.supported_codecs, state.codec, state.lockout];
+  return `${listKey(state.supported_codecs)}|${state.codec || ''}|${lockoutKey(state.lockout)}`;
+}
+
+function cueRenderKey() {
+  return [
+    ifbKey(state.ifb),
+    callsKey(state.active_direct_calls),
+    state.last_direct_caller || '',
+    derivedState.rosterKey
+  ].join('|');
+}
+
+function listKey(values) {
+  return (values || []).join(',');
+}
+
+function volumeKey(values) {
+  return Object.entries(values || {})
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([key, value]) => `${key}:${value}`)
+    .join(',');
+}
+
+function ifbKey(ifb = {}) {
+  return [
+    ifb.enabled ? 1 : 0,
+    listKey(ifb.program),
+    listKey(ifb.interrupt),
+    ifb.duck_gain ?? ''
+  ].join(':');
+}
+
+function lockoutKey(lockout = {}) {
+  return [
+    lockout.allow_local_api,
+    lockout.allow_channels,
+    lockout.allow_volumes,
+    lockout.allow_codec,
+    lockout.allow_talk_mode,
+    lockout.allow_priority,
+    lockout.allow_buttons,
+    lockout.allow_ifb
+  ].join(',');
+}
+
+function buttonsKey(buttons = []) {
+  return buttons.map(button => [
+    button.id,
+    button.label,
+    button.mode,
+    button.color,
+    (button.actions || []).map(action => [
+      action.type,
+      listKey(action.channels),
+      listKey(action.users),
+      listKey(action.targets),
+      action.message || ''
+    ].join(':')).join(';')
+  ].join(':')).join('|');
+}
+
+function alertsKey(alerts = []) {
+  return alerts.map(alert => [
+    alert.id,
+    alert.sender,
+    alert.sender_name,
+    alert.target,
+    alert.message
+  ].join(':')).join('|');
+}
+
+function emergencyKey(emergency = {}) {
+  return emergency?.active
+    ? [emergency.source, emergency.source_name, emergency.mute_others, listKey(emergency.recipients)].join(':')
+    : '';
+}
+
+function callsKey(calls = []) {
+  return calls.map(call => [
+    call.caller,
+    call.caller_name,
+    call.target,
+    call.target_name,
+    call.active,
+    call.duck
+  ].join(':')).join('|');
+}
+
+function rebuildDerivedState() {
+  if (!state) {
+    derivedState = emptyDerivedState();
+    return;
+  }
+  const rosterByChannel = new Map();
+  const memberNameById = new Map();
+  const channelIds = [];
+  const rosterParts = [];
+  const expanded = expandedChannels;
+  for (const roster of state.channel_rosters || []) {
+    const channelId = Number(roster.channel_id);
+    if (!Number.isInteger(channelId)) continue;
+    const members = roster.members || [];
+    rosterByChannel.set(channelId, roster);
+    channelIds.push(channelId);
+
+    let presentCount = 0;
+    const activeMembers = [];
+    const expandedMembers = [];
+    for (const member of members) {
+      const userId = Number(member.user_id);
+      const name = String(member.name || '').trim();
+      if (Number.isInteger(userId) && name && !memberNameById.has(userId)) {
+        memberNameById.set(userId, name);
+      }
+      if (member.present) presentCount += 1;
+      if (member.transmitting) activeMembers.push(`${userId}:${name}`);
+      if (expanded.has(channelId)) {
+        expandedMembers.push(`${userId}:${name}:${member.present ? 1 : 0}:${member.transmitting ? 1 : 0}`);
+      }
+    }
+    rosterParts.push([
+      channelId,
+      roster.name || '',
+      members.length,
+      presentCount,
+      activeMembers.join(','),
+      expandedMembers.join(',')
+    ].join(':'));
+  }
+  channelIds.sort((a, b) => a - b);
+  rosterParts.sort();
+  derivedState = {
+    rosterByChannel,
+    memberNameById,
+    channelIds,
+    rosterKey: rosterParts.join('|')
+  };
 }
 
 function settingsModalVisible() {
@@ -293,8 +452,7 @@ function allRouteChannels() {
 }
 
 function allConfiguredChannels() {
-  const ids = new Set((state?.channel_rosters || []).map(roster => Number(roster.channel_id)));
-  return sortedChannels([...ids]);
+  return derivedState.channelIds;
 }
 
 function displayedChannels() {
@@ -304,20 +462,13 @@ function displayedChannels() {
 }
 
 function rosterForChannel(id) {
-  return (state?.channel_rosters || []).find(roster => roster.channel_id === id);
+  return derivedState.rosterByChannel.get(Number(id));
 }
 
 function rosterNameForUser(id) {
   const userId = Number(id);
   if (userId === Number(state?.user_id) && state?.name) return state.name;
-  for (const roster of state?.channel_rosters || []) {
-    for (const member of roster.members || []) {
-      if (Number(member.user_id) === userId && String(member.name || '').trim()) {
-        return member.name;
-      }
-    }
-  }
-  return '';
+  return derivedState.memberNameById.get(userId) || '';
 }
 
 function displayNameForUser(id, preferredName) {
@@ -381,6 +532,8 @@ function applyButtonColor(button, config) {
 
 function bindPressHold(button, press, release) {
   let activePointerId = null;
+  let activeTouchId = null;
+  let lastTouchAt = 0;
   const finish = event => {
     if (activePointerId === null) return;
     if (event?.pointerId !== undefined && event.pointerId !== activePointerId) return;
@@ -392,9 +545,22 @@ function bindPressHold(button, press, release) {
     window.removeEventListener('pagehide', finish, true);
     release();
   };
+  const finishTouch = event => {
+    if (activeTouchId === null) return;
+    if (event?.changedTouches && ![...event.changedTouches].some(touch => touch.identifier === activeTouchId)) return;
+    event?.preventDefault?.();
+    lastTouchAt = monotonicNow();
+    activeTouchId = null;
+    document.removeEventListener('touchend', finishTouch, true);
+    document.removeEventListener('touchcancel', finishTouch, true);
+    window.removeEventListener('blur', finishTouch, true);
+    window.removeEventListener('pagehide', finishTouch, true);
+    release();
+  };
   button.onpointerdown = event => {
     if (event.button && event.button !== 0) return;
-    if (button.disabled || activePointerId !== null) return;
+    if (event.pointerType === 'touch' && monotonicNow() - lastTouchAt < SYNTHETIC_TOUCH_POINTER_IGNORE_MS) return;
+    if (button.disabled || activePointerId !== null || activeTouchId !== null) return;
     event.preventDefault();
     activePointerId = event.pointerId;
     button.setPointerCapture?.(event.pointerId);
@@ -404,6 +570,19 @@ function bindPressHold(button, press, release) {
     window.addEventListener('pagehide', finish, true);
     press();
   };
+  button.addEventListener('touchstart', event => {
+    if (button.disabled || activePointerId !== null || activeTouchId !== null) return;
+    const touch = event.changedTouches?.[0];
+    if (!touch) return;
+    event.preventDefault();
+    lastTouchAt = monotonicNow();
+    activeTouchId = touch.identifier;
+    document.addEventListener('touchend', finishTouch, true);
+    document.addEventListener('touchcancel', finishTouch, true);
+    window.addEventListener('blur', finishTouch, true);
+    window.addEventListener('pagehide', finishTouch, true);
+    press();
+  }, { passive: false });
   button.onpointerup = finish;
   button.onpointercancel = finish;
 }
@@ -506,6 +685,7 @@ function allDraftChannels() {
 async function refresh() {
   try {
     state = await api('/state');
+    rebuildDerivedState();
     render();
   } catch (err) {
     setText('status-tag', 'Server error');
@@ -529,7 +709,7 @@ function render() {
   if (!state) return;
   renderStatus();
   renderIfChanged('alerts', alertsRenderKey(), renderAlerts);
-  renderIfChanged('cue', [state.ifb, state.active_direct_calls, state.last_direct_caller, state.channel_rosters], renderCuePanel);
+  renderIfChanged('cue', cueRenderKey(), renderCuePanel);
   renderIfChanged('channels', channelRenderKey(), renderChannels);
   if (!dirty && settingsModalVisible()) fillForms();
   renderIfChanged('codecs', codecsRenderKey(), renderCodecs);
@@ -1285,6 +1465,9 @@ function bindEvents() {
   window.addEventListener('pointerdown', markUserInteracting, { capture: true, passive: true });
   window.addEventListener('pointerup', markUserIdleSoon, { capture: true, passive: true });
   window.addEventListener('pointercancel', markUserIdleSoon, { capture: true, passive: true });
+  window.addEventListener('touchstart', markUserInteracting, { capture: true, passive: true });
+  window.addEventListener('touchend', markUserIdleSoon, { capture: true, passive: true });
+  window.addEventListener('touchcancel', markUserIdleSoon, { capture: true, passive: true });
   window.addEventListener('resize', syncDockPadding);
   if (window.ResizeObserver) {
     new ResizeObserver(syncDockPadding).observe(document.querySelector('.bottom-dock'));

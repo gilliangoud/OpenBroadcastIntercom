@@ -11,6 +11,8 @@
 #include <sys/socket.h>
 
 static NSMutableArray *intercom_audio_observers;
+static BOOL intercom_audio_session_configured = NO;
+static BOOL intercom_audio_session_configuring = NO;
 
 static void intercom_write_error(char *buffer, size_t buffer_len, NSString *message) {
   if (buffer == NULL || buffer_len == 0) {
@@ -30,68 +32,103 @@ static NSString *intercom_error_text(NSString *prefix, NSError *error) {
   return [NSString stringWithFormat:@"%@: %@", prefix, error.localizedDescription];
 }
 
-static int intercom_configure_audio_session(char *error_buffer, size_t error_buffer_len, bool request_permission) {
-  AVAudioSession *session = [AVAudioSession sharedInstance];
-
-  if (request_permission) {
-    AVAuthorizationStatus permission = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
-    __block BOOL granted = permission == AVAuthorizationStatusAuthorized;
-    if (permission == AVAuthorizationStatusNotDetermined) {
-      dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-      [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL allowed) {
-        granted = allowed;
-        dispatch_semaphore_signal(semaphore);
-      }];
-      dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
-    }
-    if (!granted) {
-      intercom_write_error(error_buffer, error_buffer_len, @"Microphone permission denied. Enable microphone access in iOS Settings and start the client again.");
-      return 1;
-    }
+static int intercom_request_audio_permission(char *error_buffer, size_t error_buffer_len) {
+  AVAuthorizationStatus permission = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+  __block BOOL granted = permission == AVAuthorizationStatusAuthorized;
+  if (permission == AVAuthorizationStatusNotDetermined) {
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL allowed) {
+      granted = allowed;
+      dispatch_semaphore_signal(semaphore);
+    }];
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
   }
+  if (!granted) {
+    intercom_write_error(error_buffer, error_buffer_len, @"Microphone permission denied. Enable microphone access in iOS Settings and start the client again.");
+    return 1;
+  }
+  return 0;
+}
 
-  NSError *error = nil;
-  AVAudioSessionCategoryOptions bluetooth_hfp =
+static AVAudioSessionCategoryOptions intercom_audio_session_options(void) {
+  AVAudioSessionCategoryOptions options =
+      AVAudioSessionCategoryOptionDefaultToSpeaker |
 #if defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 260000
       AVAudioSessionCategoryOptionAllowBluetoothHFP;
 #else
       AVAudioSessionCategoryOptionAllowBluetooth;
 #endif
-
-  AVAudioSessionCategoryOptions options =
-      AVAudioSessionCategoryOptionDefaultToSpeaker |
-      bluetooth_hfp;
   if (@available(iOS 10.0, *)) {
     options |= AVAudioSessionCategoryOptionAllowBluetoothA2DP;
   }
+  return options;
+}
+
+static BOOL intercom_audio_session_matches(AVAudioSession *session, AVAudioSessionCategoryOptions options) {
+  return [session.category isEqualToString:AVAudioSessionCategoryPlayAndRecord] &&
+         [session.mode isEqualToString:AVAudioSessionModeVoiceChat] &&
+         (session.categoryOptions & options) == options;
+}
+
+static int intercom_configure_audio_session(char *error_buffer, size_t error_buffer_len, bool request_permission, bool force_reconfigure) {
+  if (request_permission) {
+    int permission_result = intercom_request_audio_permission(error_buffer, error_buffer_len);
+    if (permission_result != 0) {
+      return permission_result;
+    }
+  }
+
+  AVAudioSession *session = [AVAudioSession sharedInstance];
+  AVAudioSessionCategoryOptions options = intercom_audio_session_options();
+  if (!force_reconfigure &&
+      intercom_audio_session_configured &&
+      intercom_audio_session_matches(session, options)) {
+    return 0;
+  }
+
+  if (intercom_audio_session_configuring) {
+    return 0;
+  }
+  intercom_audio_session_configuring = YES;
+
+  NSError *error = nil;
+  int result = 0;
 
   if (![session setCategory:AVAudioSessionCategoryPlayAndRecord
                    mode:AVAudioSessionModeVoiceChat
                 options:options
                   error:&error]) {
     intercom_write_error(error_buffer, error_buffer_len, intercom_error_text(@"Set iOS PlayAndRecord audio category", error));
-    return 2;
+    result = 2;
+    goto finish;
   }
 
   error = nil;
   if (![session setPreferredSampleRate:48000.0 error:&error]) {
     intercom_write_error(error_buffer, error_buffer_len, intercom_error_text(@"Set iOS preferred sample rate", error));
-    return 3;
+    result = 3;
+    goto finish;
   }
 
   error = nil;
   if (![session setPreferredIOBufferDuration:0.02 error:&error]) {
     intercom_write_error(error_buffer, error_buffer_len, intercom_error_text(@"Set iOS audio buffer duration", error));
-    return 4;
+    result = 4;
+    goto finish;
   }
 
   error = nil;
   if (![session setActive:YES error:&error]) {
     intercom_write_error(error_buffer, error_buffer_len, intercom_error_text(@"Activate iOS audio session", error));
-    return 5;
+    result = 5;
+    goto finish;
   }
 
-  return 0;
+  intercom_audio_session_configured = YES;
+
+finish:
+  intercom_audio_session_configuring = NO;
+  return result;
 }
 
 static void intercom_install_audio_observers(void) {
@@ -103,8 +140,12 @@ static void intercom_install_audio_observers(void) {
     id route = [center addObserverForName:AVAudioSessionRouteChangeNotification
                                    object:nil
                                     queue:[NSOperationQueue mainQueue]
-                               usingBlock:^(__unused NSNotification *note) {
-      intercom_configure_audio_session(NULL, 0, false);
+                               usingBlock:^(NSNotification *note) {
+      NSNumber *reason = note.userInfo[AVAudioSessionRouteChangeReasonKey];
+      if (reason != nil && reason.unsignedIntegerValue == AVAudioSessionRouteChangeReasonCategoryChange) {
+        return;
+      }
+      intercom_configure_audio_session(NULL, 0, false, false);
     }];
     [intercom_audio_observers addObject:route];
 
@@ -114,7 +155,7 @@ static void intercom_install_audio_observers(void) {
                                       usingBlock:^(NSNotification *note) {
       NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
       if (type != nil && type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
-        intercom_configure_audio_session(NULL, 0, false);
+        intercom_configure_audio_session(NULL, 0, false, true);
       }
     }];
     [intercom_audio_observers addObject:interruption];
@@ -123,7 +164,8 @@ static void intercom_install_audio_observers(void) {
                                    object:nil
                                     queue:[NSOperationQueue mainQueue]
                                usingBlock:^(__unused NSNotification *note) {
-      intercom_configure_audio_session(NULL, 0, false);
+      intercom_audio_session_configured = NO;
+      intercom_configure_audio_session(NULL, 0, false, true);
     }];
     [intercom_audio_observers addObject:reset];
 
@@ -131,22 +173,27 @@ static void intercom_install_audio_observers(void) {
                                     object:nil
                                      queue:[NSOperationQueue mainQueue]
                                 usingBlock:^(__unused NSNotification *note) {
-      intercom_configure_audio_session(NULL, 0, false);
+      intercom_configure_audio_session(NULL, 0, false, false);
     }];
     [intercom_audio_observers addObject:active];
   });
 }
 
 int intercom_ios_prepare_audio_session(char *error_buffer, size_t error_buffer_len) {
+  int permission_result = intercom_request_audio_permission(error_buffer, error_buffer_len);
+  if (permission_result != 0) {
+    return permission_result;
+  }
+
   __block int result = 0;
   if ([NSThread isMainThread]) {
-    result = intercom_configure_audio_session(error_buffer, error_buffer_len, true);
+    result = intercom_configure_audio_session(error_buffer, error_buffer_len, false, true);
     intercom_install_audio_observers();
     return result;
   }
 
   dispatch_sync(dispatch_get_main_queue(), ^{
-    result = intercom_configure_audio_session(error_buffer, error_buffer_len, true);
+    result = intercom_configure_audio_session(error_buffer, error_buffer_len, false, true);
     intercom_install_audio_observers();
   });
   return result;
@@ -286,11 +333,7 @@ char *intercom_ios_browse_intercom_services(double timeout_seconds) {
     result = strdup(jsonString.UTF8String ?: "[]");
   };
 
-  if ([NSThread isMainThread]) {
-    browse();
-  } else {
-    dispatch_sync(dispatch_get_main_queue(), browse);
-  }
+  browse();
   return result;
 }
 
