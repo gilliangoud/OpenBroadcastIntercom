@@ -178,7 +178,7 @@ $('scan-servers').addEventListener('click', async event => {
   try {
     const profiles = await invoke('mobile_discover_servers');
     setServerProfiles(profiles);
-    setMessage(profiles.length ? 'Select a server or keep manual addresses.' : 'No Intercom servers found. Manual entry is still available.', profiles.length ? 'running' : '');
+    setMessage(profiles.length ? 'Select a server or keep manual addresses.' : 'No RedLine servers found. Manual entry is still available.', profiles.length ? 'running' : '');
   } catch (err) {
     setMessage(String(err), 'error');
     $('server-list-status').textContent = 'Server scan failed.';

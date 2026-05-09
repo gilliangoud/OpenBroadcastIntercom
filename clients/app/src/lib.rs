@@ -199,7 +199,7 @@ impl Default for MobileServerProfile {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            app_title: "Intercom Suite".to_string(),
+            app_title: "RedLine".to_string(),
             server_profiles: Vec::new(),
             server: "127.0.0.1:40000".parse().expect("valid default address"),
             control: "ws://127.0.0.1:40001".to_string(),
@@ -1573,7 +1573,7 @@ mod tests {
         assert_eq!(settings.input_channel, desktop::InputChannelMode::Average);
         assert_eq!(settings.local_ui_bind, "127.0.0.1:41002".parse().unwrap());
         assert_eq!(settings.local_ui_token, None);
-        assert_eq!(settings.app_title, "Intercom Suite");
+        assert_eq!(settings.app_title, "RedLine");
         assert_eq!(settings.window_mode, AppWindowMode::SystemBrowser);
         assert_eq!(settings.ui_open_delay_ms, 750);
         assert!(settings.server_profiles.is_empty());
@@ -1760,7 +1760,7 @@ mod tests {
         settings.app_title = "   ".to_string();
         assert!(settings.validate().is_err());
 
-        settings.app_title = "Intercom Suite".to_string();
+        settings.app_title = "RedLine".to_string();
         settings.ui_open_delay_ms = 30_001;
         assert!(settings.validate().is_err());
     }
@@ -1776,7 +1776,7 @@ mod tests {
 
         assert!(plan.opens_window);
         assert_eq!(plan.window_mode, AppWindowMode::SystemBrowser);
-        assert_eq!(plan.app_title, "Intercom Suite");
+        assert_eq!(plan.app_title, "RedLine");
         assert!(plan.local_ui_url.unwrap().starts_with("http://127.0.0.1:"));
         assert_ne!(settings.local_ui_bind.port(), 0);
     }
@@ -1894,7 +1894,7 @@ mod tests {
         let config: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
 
-        assert_eq!(config["productName"], "Intercom Suite");
+        assert_eq!(config["productName"], "RedLine");
         assert_eq!(config["mainBinaryName"], "app-native");
         assert_eq!(config["build"]["frontendDist"], "tauri-assets");
         assert_eq!(config["app"]["windows"].as_array().unwrap().len(), 0);
@@ -1909,6 +1909,10 @@ mod tests {
             "tauri-assets/settings.html",
             "tauri-assets/settings.css",
             "tauri-assets/settings.js",
+            "tauri-assets/branding/redline-logo.png",
+            "branding/redline-appicon.png",
+            "branding/redline-logo.png",
+            "branding/redline-logo-transparent.png",
             "tauri.ios.conf.json",
             "icons/icon.png",
             "icons/icon.ico",
@@ -1956,10 +1960,12 @@ mod tests {
         let android_manifest =
             fs::read_to_string(root.join("gen/android/app/src/main/AndroidManifest.xml")).unwrap();
         assert!(settings_html.contains("input_backend"));
+        assert!(settings_html.contains("branding/redline-logo.png"));
         assert!(settings_js.contains("input_backend"));
         assert!(settings_js.contains("invoke("));
         assert!(!settings_js.contains("fetch("));
         assert!(mobile_html.contains("mobile-form"));
+        assert!(mobile_html.contains("branding/redline-logo.png"));
         assert!(mobile_html.contains("server-picker"));
         assert!(mobile_html.contains("scan-servers"));
         assert!(mobile_js.contains("invoke("));
@@ -2041,7 +2047,7 @@ mod tests {
                 "mobile shell missing {token}"
             );
         }
-        assert!(mobile_html.contains("Intercom Suite"));
+        assert!(mobile_html.contains("RedLine"));
         assert!(!mobile_html.contains(">Mobile Client<"));
     }
 

@@ -164,7 +164,7 @@ clients/app/scripts/package-native.sh --bundles app
 ```
 
 The verified `.app` output is written to
-`target/release/bundle/macos/Intercom Suite.app`.
+`target/release/bundle/macos/RedLine.app`.
 The `.dmg` target reaches Tauri's generated DMG script here but still needs a
 proper local macOS packaging environment pass before we should treat it as
 release-ready. In this workspace, `hdiutil` currently fails with

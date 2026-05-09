@@ -330,14 +330,13 @@ mod native {
                     match run_tray_action(&state.api, action) {
                         Ok(tooltip) => {
                             if let Some(tray) = app.tray_by_id(TRAY_ID) {
-                                let _ =
-                                    tray.set_tooltip(Some(format!("Intercom Suite - {tooltip}")));
+                                let _ = tray.set_tooltip(Some(format!("RedLine - {tooltip}")));
                             }
                         }
                         Err(err) => {
                             eprintln!("native tray command failed: {err:?}");
                             if let Some(tray) = app.tray_by_id(TRAY_ID) {
-                                let _ = tray.set_tooltip(Some(format!("Intercom Suite - {err}")));
+                                let _ = tray.set_tooltip(Some(format!("RedLine - {err}")));
                             }
                         }
                     }
@@ -358,7 +357,7 @@ mod native {
             "settings",
             tauri::WebviewUrl::App("settings.html".into()),
         )
-        .title("Intercom Suite Settings")
+        .title("RedLine Settings")
         .inner_size(560.0, 760.0)
         .min_inner_size(420.0, 560.0)
         .center()

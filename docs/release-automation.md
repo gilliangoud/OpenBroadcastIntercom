@@ -20,11 +20,11 @@ python3 -m unittest tools/test_release_version.py
 
 ## First-Pass Artifacts
 
-- macOS: Intercom Suite, Intercom Bridge App, and Intercom Server `.app` zip
+- macOS: RedLine, RedLine Bridge, and RedLine Server `.app` zip
   archives.
-- Windows: Intercom Suite and Intercom Bridge App NSIS installers.
-- Linux: Intercom Suite and Intercom Bridge App AppImage/deb bundles.
-- Android: Intercom Suite debug/sideload APK.
+- Windows: RedLine and RedLine Bridge NSIS installers.
+- Linux: RedLine and RedLine Bridge AppImage/deb bundles.
+- Android: RedLine debug/sideload APK.
 
 iOS remains a CI compile check only until Apple signing and provisioning secrets
 are intentionally added.

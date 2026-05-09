@@ -1,4 +1,4 @@
-# Rust Intercom Prototype
+# RedLine
 
 This repository contains a first-pass intercom prototype:
 
@@ -188,7 +188,7 @@ server playback loudness.
 For local self-monitoring on the ESP32, use:
 
 ```text
-Intercom ESP32 Client -> Local sidetone / self-monitor
+RedLine ESP32 Client -> Local sidetone / self-monitor
 ```
 
 `Firmware mix into playback` is the supported test mode and uses `Firmware
@@ -843,7 +843,7 @@ Settings file shape:
 
 ```json
 {
-  "app_title": "Intercom Suite",
+  "app_title": "RedLine",
   "server": "127.0.0.1:40000",
   "control": "ws://127.0.0.1:40001",
   "user_id": 1,
@@ -934,7 +934,7 @@ clients/bridge-app/scripts/package-native.sh
 
 Options:
 
-- `--mode <input|output|duplex>`: capture into Intercom, play out of Intercom, or both. Default: `duplex`.
+- `--mode <input|output|duplex>`: capture into RedLine, play out of RedLine, or both. Default: `duplex`.
 - `--user-id <ID>`: requested numeric alias for the bridge.
 - `--client-uid <UUID>`: stable bridge identity override. By default the bridge creates/reuses a UUID in the OS config directory.
 - `--identity-file <PATH>`: path to the JSON file used for the generated stable bridge UUID.
@@ -955,8 +955,8 @@ on the same channel because that can feed PA/program audio back into itself.
 
 Common setups:
 
-- vMix input into Intercom: route vMix or a virtual audio cable to a bridge `input` device and set `--tx-channels` to the program channel.
-- Intercom to PA: run an `output` bridge listening to a PA channel and select the USB/audio-interface output feeding the PA chain.
+- vMix input into RedLine: route vMix or a virtual audio cable to a bridge `input` device and set `--tx-channels` to the program channel.
+- RedLine to PA: run an `output` bridge listening to a PA channel and select the USB/audio-interface output feeding the PA chain.
 - Two-way production bridge: use `duplex` only when the physical interface has separate input/output paths and feedback is controlled externally.
 - Multi-route vMix PC: run `cargo run -p bridge-app --features native --bin bridge-app-native`, add one `input` route for the vMix/program bus, one `output` route for PA or production monitor, and optional extra `output` routes for recorder/stream feeds.
 

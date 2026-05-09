@@ -125,21 +125,21 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build Intercom Suite macOS app
+      - name: Build RedLine macOS app
         working-directory: clients/app
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
-      - name: Build Intercom Bridge macOS app
+      - name: Build RedLine Bridge macOS app
         working-directory: clients/bridge-app
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
-      - name: Build Intercom Server macOS app
+      - name: Build RedLine Server macOS app
         working-directory: server-app
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
       - name: Archive macOS apps
         run: |
           mkdir -p artifacts
-          ditto -c -k --sequesterRsrc --keepParent "target/release/bundle/macos/Intercom Suite.app" "artifacts/Intercom-Suite-macos-${VERSION}.zip"
-          ditto -c -k --sequesterRsrc --keepParent "target/release/bundle/macos/Intercom Bridge App.app" "artifacts/Intercom-Bridge-App-macos-${VERSION}.zip"
-          ditto -c -k --sequesterRsrc --keepParent "target/release/bundle/macos/Intercom Server.app" "artifacts/Intercom-Server-macos-${VERSION}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "target/release/bundle/macos/RedLine.app" "artifacts/RedLine-macos-${VERSION}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "target/release/bundle/macos/RedLine Bridge.app" "artifacts/RedLine-Bridge-macos-${VERSION}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "target/release/bundle/macos/RedLine Server.app" "artifacts/RedLine-Server-macos-${VERSION}.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-apps
@@ -163,10 +163,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-      - name: Build Intercom Suite Linux bundles
+      - name: Build RedLine Linux bundles
         working-directory: clients/app
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles appimage deb --ci
-      - name: Build Intercom Bridge Linux bundles
+      - name: Build RedLine Bridge Linux bundles
         working-directory: clients/bridge-app
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles appimage deb --ci
       - name: Collect Linux artifacts
@@ -194,10 +194,10 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build Intercom Suite Windows installer
+      - name: Build RedLine Windows installer
         working-directory: clients/app
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles nsis --ci
-      - name: Build Intercom Bridge Windows installer
+      - name: Build RedLine Bridge Windows installer
         working-directory: clients/bridge-app
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles nsis --ci
       - name: Collect Windows artifacts
@@ -275,4 +275,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
-        run: gh release create "$TAG" release-artifacts/* --repo "$GITHUB_REPOSITORY" --title "Intercom Suite $TAG" --generate-notes
+        run: gh release create "$TAG" release-artifacts/* --repo "$GITHUB_REPOSITORY" --title "RedLine $TAG" --generate-notes

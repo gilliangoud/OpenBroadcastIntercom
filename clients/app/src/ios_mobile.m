@@ -240,7 +240,7 @@ static NSString *intercom_host_for_url(NSString *host) {
 
   NSMutableDictionary *result = [@{
     @"id": identifier,
-    @"name": displayName ?: @"Intercom Suite",
+    @"name": displayName ?: @"RedLine",
     @"server": server,
     @"control": control,
     @"discovered": @YES

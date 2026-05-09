@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Intercom Suite",
+  "productName": "RedLine",
   "version": "2026.5.4",
   "identifier": "com.intercomsuite.client",
   "mainBinaryName": "app-native",
@@ -17,10 +17,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "publisher": "Intercom Suite",
+    "publisher": "Goud Sport",
     "category": "Productivity",
     "shortDescription": "Low-latency intercom operator client",
-    "longDescription": "Intercom Suite is a low-latency operator client for server-routed production and event intercom workflows.",
+    "longDescription": "RedLine is a low-latency operator client for server-routed production and event intercom workflows.",
     "icon": [
       "icons/icon.png",
       "icons/icon.ico",

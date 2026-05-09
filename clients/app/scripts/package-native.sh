@@ -17,7 +17,7 @@ if [[ $# -eq 0 ]]; then
   esac
 fi
 
-echo "Building Intercom Suite native release binary..."
+echo "Building RedLine native release binary..."
 cargo build --features native --bin app-native --release
 
 if cargo tauri --version >/dev/null 2>&1; then

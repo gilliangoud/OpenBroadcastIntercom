@@ -60,7 +60,7 @@ struct BridgeAppConfig {
 impl Default for BridgeAppConfig {
     fn default() -> Self {
         Self {
-            app_title: "Intercom Bridge App".to_string(),
+            app_title: "RedLine Bridge".to_string(),
             server: "127.0.0.1:40000".parse().expect("valid default address"),
             control: "ws://127.0.0.1:40001".to_string(),
             admin: None,
@@ -72,7 +72,7 @@ impl Default for BridgeAppConfig {
                 mode: BridgeMode::Input,
                 tx_channels: vec![1],
                 listen_channels: Vec::new(),
-                note: "vMix or virtual audio program feed into Intercom".to_string(),
+                note: "vMix or virtual audio program feed into RedLine".to_string(),
                 ..BridgeRouteConfig::default()
             }],
         }
@@ -1015,12 +1015,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Intercom Bridge App</title>
+  <title>RedLine Bridge</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header class="topbar">
-    <div><strong>Bridge App</strong><span id="summary"></span></div>
+    <div><strong>RedLine Bridge</strong><span id="summary"></span></div>
     <div class="actions"><button id="refresh" type="button">Refresh</button><button id="start-all" type="button">Start Enabled</button><button id="stop-all" type="button">Stop All</button></div>
   </header>
   <main>
@@ -1236,6 +1236,9 @@ mod tests {
 
         assert!(manifest.join("tauri.conf.json").exists());
         assert!(manifest.join("tauri-assets/index.html").exists());
+        assert!(manifest
+            .join("tauri-assets/branding/redline-logo.png")
+            .exists());
         assert!(manifest.join("scripts/package-native.sh").exists());
     }
 }

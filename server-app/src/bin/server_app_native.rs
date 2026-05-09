@@ -1,6 +1,6 @@
 #[cfg(not(feature = "native"))]
 fn main() -> anyhow::Result<()> {
-    println!("Build with `--features native` to run the Intercom Server macOS app.");
+    println!("Build with `--features native` to run the RedLine Server macOS app.");
     Ok(())
 }
 
@@ -49,7 +49,7 @@ mod native {
                     "main",
                     tauri::WebviewUrl::External(admin_url),
                 )
-                .title("Intercom Server")
+                .title("RedLine Server")
                 .inner_size(1180.0, 780.0)
                 .min_inner_size(840.0, 560.0)
                 .center()
@@ -57,7 +57,7 @@ mod native {
                 Ok(())
             })
             .run(tauri::generate_context!("tauri.conf.json"))
-            .context("run Intercom Server app");
+            .context("run RedLine Server app");
 
         if let Some(runtime) = runtime_slot
             .lock()

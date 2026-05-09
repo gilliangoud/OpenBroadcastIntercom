@@ -78,6 +78,12 @@ button:active:not(:disabled) {
   line-height: 1.1;
 }
 
+.brand-logo {
+  display: block;
+  width: min(150px, 46vw);
+  height: auto;
+}
+
 .section-title {
   display: flex;
   align-items: center;

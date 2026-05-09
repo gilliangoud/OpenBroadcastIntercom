@@ -9,8 +9,8 @@ manager.
 Use it when a Windows vMix PC, macOS laptop, or Linux audio box needs several
 in/out routes at once:
 
-- vMix or virtual audio program feed into Intercom.
-- PA output from an Intercom channel into a USB/audio interface.
+- vMix or virtual audio program feed into RedLine.
+- PA output from a RedLine channel into a USB/audio interface.
 - Production monitor or recorder feed from selected channels.
 - A carefully isolated duplex bridge where the physical audio interface already
   prevents feedback.
@@ -67,12 +67,12 @@ Each route maps directly to one `bridge` process:
 
 - `id`: stable route identifier inside the bridge app.
 - `name`: client name shown in admin.
-- `user_id`: numeric Intercom alias used by the server.
+- `user_id`: numeric RedLine alias used by the server.
 - `mode`: `input`, `output`, or `duplex`.
-- `tx_channels`: Intercom channels fed by the input device, selected from the channel dropdown.
-- `listen_channels`: Intercom channels rendered to the output device, selected from the channel dropdown.
+- `tx_channels`: RedLine channels fed by the input device, selected from the channel dropdown.
+- `listen_channels`: RedLine channels rendered to the output device, selected from the channel dropdown.
 - `input_device` / `output_device`: selected from local audio device dropdowns.
-- `codec` and `opus_profile`: normal Intercom edge codec settings.
+- `codec` and `opus_profile`: normal RedLine edge codec settings.
 - `stereo`: enables stereo receive for output/duplex routes when supported.
 - `input_gain` / `output_gain`: local linear gain.
 - `note`: operator note shown in bridge status.

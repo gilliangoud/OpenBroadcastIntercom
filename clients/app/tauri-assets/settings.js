@@ -34,7 +34,7 @@ function normalizeOpusProfile(profile) {
 
 function fill(settings) {
   current = settings;
-  $('app_title').value = settings.app_title || 'Intercom Suite';
+  $('app_title').value = settings.app_title || 'RedLine';
   $('server').value = settings.server || '127.0.0.1:40000';
   $('control').value = settings.control || 'ws://127.0.0.1:40001';
   $('user_id').value = settings.user_id ?? '';
@@ -61,7 +61,7 @@ function fill(settings) {
 function collect() {
   return {
     ...current,
-    app_title: $('app_title').value.trim() || 'Intercom Suite',
+    app_title: $('app_title').value.trim() || 'RedLine',
     server: $('server').value.trim(),
     control: $('control').value.trim(),
     user_id: $('user_id').value ? readNumber('user_id', 1) : null,

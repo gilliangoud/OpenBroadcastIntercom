@@ -1,7 +1,7 @@
 # Codec Findings
 
 This document records the practical codec and audio-hardware findings from the
-prototype work so far. It covers Intercom Suite edge codecs, the server mixer
+prototype work so far. It covers RedLine edge codecs, the server mixer
 domain, Opus profiles, and the Ai-Thinker ESP32 Audio Kit V2.2 / ES8388 path.
 
 ## Current Architecture

@@ -1,4 +1,4 @@
-# Intercom Suite Hardware Plan
+# RedLine Hardware Plan
 
 This is a working hardware path for the first low-cost units. Prices and stock
 change often; verify before ordering.
@@ -147,7 +147,7 @@ Current GOU-59 hardware:
   ADC input, PGA gain, capture channel, high-pass, software gains, and sidetone
   mode/gain at runtime through `config_update`.
 - Local monitoring: optional ESP32 sidetone is configured in
-  `Intercom ESP32 Client -> Local sidetone / self-monitor`. Firmware sidetone
+  `RedLine ESP32 Client -> Local sidetone / self-monitor`. Firmware sidetone
   is the safe bring-up mode with one local audio-frame of delay. ES8388
   line-bypass sidetone fields are retained in config JSON for visibility, but
   codec-bypass sidetone is currently forced off until the fixed playback/capture

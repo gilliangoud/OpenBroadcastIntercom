@@ -1,7 +1,7 @@
 # Mobile Tauri Clients
 
 `clients/app` contains the first iOS and Android Tauri 2 mobile shell for the
-Intercom Suite client. The mobile app reuses the same Rust client runtime,
+RedLine client. The mobile app reuses the same Rust client runtime,
 control protocol, UDP audio transport, codecs, local UI, and server-owned
 configuration model as the desktop app.
 
@@ -187,7 +187,7 @@ Android builds require a connected device/emulator and accepted SDK licenses.
 The server advertises Bonjour/mDNS by default on the control port:
 
 ```sh
-cargo run -p server -- --advertise-name "Studio Intercom"
+cargo run -p server -- --advertise-name "Studio RedLine"
 cargo run -p server -- --disable-discovery
 ```
 

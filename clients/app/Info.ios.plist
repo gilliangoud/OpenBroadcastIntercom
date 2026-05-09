@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Intercom Suite needs microphone access so this device can transmit intercom audio.</string>
+	<string>RedLine needs microphone access so this device can transmit intercom audio.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Intercom Suite needs local network access to connect to your intercom server over UDP and WebSocket.</string>
+	<string>RedLine needs local network access to connect to your intercom server over UDP and WebSocket.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_intercom-suite._tcp</string>

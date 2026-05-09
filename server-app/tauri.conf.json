@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Intercom Server",
+  "productName": "RedLine Server",
   "version": "2026.5.4",
   "identifier": "com.intercomsuite.server",
   "mainBinaryName": "server-app-native",
@@ -17,10 +17,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "publisher": "Intercom Suite",
+    "publisher": "Goud Sport",
     "category": "DeveloperTool",
-    "shortDescription": "Intercom Suite server",
-    "longDescription": "Intercom Server runs the LAN audio router and admin dashboard for Intercom Suite.",
+    "shortDescription": "RedLine server",
+    "longDescription": "RedLine Server runs the LAN audio router and admin dashboard for RedLine.",
     "icon": [
       "../clients/app/icons/icon.png",
       "../clients/app/icons/icon.ico",
