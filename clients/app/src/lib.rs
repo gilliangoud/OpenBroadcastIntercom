@@ -2836,6 +2836,8 @@ mod tests {
         assert!(!controls_js.contains("onlostpointercapture = regularTalkRelease"));
         assert!(controls_css.contains("touch-action: none"));
         assert!(controls_css.contains(":root.mobile-shell-controls"));
+        assert!(controls_css.contains("height: 100dvh"));
+        assert!(controls_css.contains("align-content: start"));
         assert!(controls_css.contains(".mobile-shell-controls .dock-status"));
         assert!(controls_html.contains("Runtime Controls"));
         assert!(controls_html.contains("show-all-channels"));

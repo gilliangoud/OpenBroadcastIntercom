@@ -49,7 +49,15 @@ body {
 
 html.mobile-shell-controls,
 html.mobile-shell-controls body {
+  height: 100dvh;
+  min-height: 100dvh;
   background: var(--panel);
+}
+
+html.mobile-shell-controls .phone-shell {
+  height: 100dvh;
+  min-height: 100dvh;
+  max-height: 100dvh;
 }
 
 button,
@@ -263,6 +271,7 @@ h2 {
 .alert-list,
 .cue-list {
   display: grid;
+  align-content: start;
   gap: var(--row-gap);
   min-height: 0;
   overflow: auto;
