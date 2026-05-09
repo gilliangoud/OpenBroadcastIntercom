@@ -9,14 +9,12 @@
   <body>
     <main class="phone-shell">
       <header class="topbar">
-        <div>
-          <h1>Intercom Suite</h1>
+        <div class="title-block">
+          <div class="title-row">
+            <h1>Intercom Suite</h1>
+            <button id="close-config" type="button" disabled>Close</button>
+          </div>
           <span id="status" class="tag offline">stopped</span>
-        </div>
-        <div class="top-actions">
-          <button id="save" type="button">Save</button>
-          <button id="open-controls" type="button" disabled>Controls</button>
-          <button id="close-config" type="button" disabled>Close</button>
         </div>
       </header>
       <p id="message" class="hint top-message" aria-live="polite"></p>
@@ -28,21 +26,20 @@
         </div>
         <div class="server-picker">
           <select id="server-picker" aria-label="Discovered or saved servers"></select>
-          <button id="forget-server" type="button" disabled>Forget</button>
         </div>
-        <p id="server-list-status" class="hint">Saved and discovered LAN servers appear here.</p>
+        <label id="manual-server-row" class="manual-server" hidden>
+          Server Host
+          <input id="server_host" autocomplete="off" inputmode="url" placeholder="192.168.1.10" />
+        </label>
+        <p id="server-list-status" class="hint">Scan local network servers or choose Manual.</p>
       </section>
 
       <section class="channels-panel">
         <div class="section-title">
-          <h2>Connection</h2>
+          <h2>Audio</h2>
         </div>
 
         <form id="mobile-form" class="config-form">
-          <label class="wide">
-            Server Host
-            <input id="server_host" autocomplete="off" inputmode="url" placeholder="192.168.1.10" />
-          </label>
           <label>
             Codec
             <select id="codec">
@@ -73,32 +70,12 @@
             Button Count
             <input id="button_count" type="number" min="0" max="24" step="1" inputmode="numeric" />
           </label>
-          <label class="check wide">
-            <input id="advanced_endpoints" type="checkbox" />
-            Use custom endpoint URLs
-          </label>
-          <details id="advanced-connection" class="wide">
-            <summary>Advanced Connection</summary>
-            <label class="wide">
-              Custom Audio Address
-              <input id="server" autocomplete="off" inputmode="url" placeholder="192.168.1.10:40000" />
-            </label>
-            <label class="wide">
-              Custom Control WebSocket
-              <input id="control" autocomplete="off" inputmode="url" placeholder="ws://192.168.1.10:40001" />
-            </label>
-            <label class="wide">
-              Custom Admin URL
-              <input id="admin" autocomplete="off" inputmode="url" placeholder="http://192.168.1.10:40002" />
-            </label>
-          </details>
         </form>
       </section>
 
       <div class="bottom-dock">
         <div class="bottom-controls">
-          <button id="stop" class="control-button mute-button" type="button">Stop</button>
-          <button id="start" class="control-button talk-button-main" type="submit" form="mobile-form">Start</button>
+          <button id="start" class="control-button talk-button-main" type="submit" form="mobile-form">Connect</button>
         </div>
       </div>
     </main>

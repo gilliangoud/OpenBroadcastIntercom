@@ -5,9 +5,11 @@ const DEFAULT_HOST = '127.0.0.1';
 const AUDIO_PORT = 40000;
 const CONTROL_PORT = 40001;
 const ADMIN_PORT = 40002;
+const MANUAL_SERVER_VALUE = '__manual__';
 
 let current = null;
 let currentLocalUiUrl = null;
+let runtimeRunning = false;
 let serverProfiles = [];
 
 function setMessage(text, kind = '') {
@@ -24,8 +26,16 @@ function setStatus(text, kind = 'offline') {
 
 function setControlsUrl(url) {
   currentLocalUiUrl = url || null;
-  $('open-controls').disabled = !currentLocalUiUrl;
   $('close-config').disabled = !currentLocalUiUrl;
+}
+
+function setRuntimeRunning(running) {
+  runtimeRunning = !!running;
+  const button = $('start');
+  button.textContent = runtimeRunning ? 'Disconnect' : 'Connect';
+  button.classList.toggle('talk-button-main', !runtimeRunning);
+  button.classList.toggle('disconnect-button', runtimeRunning);
+  button.setAttribute('aria-pressed', runtimeRunning ? 'true' : 'false');
 }
 
 function serverProfileLabel(profile) {
@@ -36,7 +46,36 @@ function serverProfileLabel(profile) {
   return `${profile.name || profile.server_host || profile.control} - ${profile.server_host || profile.server}${badges.length ? ` (${badges.join(', ')})` : ''}`;
 }
 
-function setServerProfiles(profiles = []) {
+function selectedServerProfile() {
+  const value = $('server-picker').value;
+  if (!value || value === MANUAL_SERVER_VALUE) return null;
+  return serverProfiles.find(profile => profile.id === value) || null;
+}
+
+function selectedServerHost() {
+  const profile = selectedServerProfile();
+  return normalizeHost(profile?.server_host) || normalizeHost($('server_host').value) || DEFAULT_HOST;
+}
+
+function setManualServerVisible(visible) {
+  $('manual-server-row').hidden = !visible;
+}
+
+function syncServerSelection() {
+  const picker = $('server-picker');
+  const manual = picker.value === MANUAL_SERVER_VALUE || !selectedServerProfile();
+  setManualServerVisible(manual);
+  if (!manual) {
+    const profile = selectedServerProfile();
+    const host = normalizeHost(profile?.server_host);
+    if (host) $('server_host').value = host;
+    $('server-list-status').textContent = `Selected ${profile.name || host || profile.control}.`;
+  } else {
+    $('server-list-status').textContent = 'Manual server host will be used when you connect.';
+  }
+}
+
+function setServerProfiles(profiles = [], opts = {}) {
   const byId = new Map();
   for (const profile of profiles) {
     if (!profile || !profile.id) continue;
@@ -45,53 +84,33 @@ function setServerProfiles(profiles = []) {
   serverProfiles = Array.from(byId.values());
   const picker = $('server-picker');
   picker.innerHTML = '';
-  if (!serverProfiles.length) {
-    const option = document.createElement('option');
-    option.value = '';
-    option.textContent = 'No saved or discovered servers';
-    picker.appendChild(option);
-    picker.disabled = true;
-    $('forget-server').disabled = true;
-    $('server-list-status').textContent = 'Use Scan or enter server addresses manually.';
-    return;
-  }
+
   picker.disabled = false;
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = 'Choose a server...';
-  picker.appendChild(placeholder);
   for (const profile of serverProfiles) {
     const option = document.createElement('option');
     option.value = profile.id;
     option.textContent = serverProfileLabel(profile);
     picker.appendChild(option);
   }
-  const currentProfile = serverProfiles.find(profile => profile.control === $('control').value.trim() || profile.server_host === $('server_host').value.trim());
-  if (currentProfile) picker.value = currentProfile.id;
-  else picker.value = '';
-  $('forget-server').disabled = !picker.value;
-  $('server-list-status').textContent = `${serverProfiles.length} server${serverProfiles.length === 1 ? '' : 's'} available.`;
-}
 
-function profileUsesDefaultEndpoints(profile, host) {
-  if (!host) return false;
-  return (!profile.server || profile.server === audioForHost(host))
-    && (!profile.control || profile.control === controlForHost(host))
-    && (!profile.admin || profile.admin === adminForHost(host));
-}
+  const manual = document.createElement('option');
+  manual.value = MANUAL_SERVER_VALUE;
+  manual.textContent = 'Manual';
+  picker.appendChild(manual);
 
-function applyServerProfileToForm(profile) {
-  const host = normalizeHost(profile.server_host);
-  if (host) {
-    $('server_host').value = host;
+  const currentHost = normalizeHost($('server_host').value || current?.server_host || DEFAULT_HOST);
+  const currentControl = current?.control || controlForHost(currentHost);
+  const currentProfile = serverProfiles.find(profile =>
+    profile.control === currentControl || normalizeHost(profile.server_host) === currentHost
+  );
+  if (currentProfile) {
+    picker.value = currentProfile.id;
+  } else if (opts.preferFirst && serverProfiles.length) {
+    picker.value = serverProfiles[0].id;
+  } else {
+    picker.value = MANUAL_SERVER_VALUE;
   }
-
-  const useDefaultEndpoints = profileUsesDefaultEndpoints(profile, host);
-  $('advanced_endpoints').checked = !useDefaultEndpoints;
-  $('server').value = profile.server || (host ? audioForHost(host) : $('server').value.trim());
-  $('control').value = profile.control || (host ? controlForHost(host) : $('control').value.trim());
-  $('admin').value = profile.admin || (host ? adminForHost(host) : '');
-  syncEndpointFields();
+  syncServerSelection();
 }
 
 async function openControls() {
@@ -141,27 +160,9 @@ function adminForHost(host) {
   return `http://${hostForUrl(normalized)}:${ADMIN_PORT}`;
 }
 
-function syncEndpointFields() {
-  const advanced = $('advanced_endpoints').checked;
-  $('advanced-connection').open = advanced;
-  for (const id of ['server', 'control', 'admin']) {
-    $(id).disabled = !advanced;
-  }
-  if (!advanced) {
-    const host = $('server_host').value.trim() || DEFAULT_HOST;
-    $('server').value = audioForHost(host);
-    $('control').value = controlForHost(host);
-    $('admin').value = adminForHost(host);
-  }
-}
-
 function fill(settings) {
   current = settings;
   $('server_host').value = settings.server_host || DEFAULT_HOST;
-  $('server').value = settings.server || '127.0.0.1:40000';
-  $('control').value = settings.control || 'ws://127.0.0.1:40001';
-  $('admin').value = settings.admin || adminForHost(settings.server_host || DEFAULT_HOST);
-  $('advanced_endpoints').checked = !!settings.advanced_endpoints;
   $('codec').value = settings.codec || 'pcm16';
   $('opus_profile').value = settings.opus_profile || 'speech_24_standard';
   $('mic_gain').value = settings.mic_gain ?? 1;
@@ -170,18 +171,17 @@ function fill(settings) {
   setServerProfiles(settings.server_profiles || serverProfiles);
   showGainValues();
   renderCodecFields();
-  syncEndpointFields();
 }
 
 function collect() {
-  syncEndpointFields();
+  const host = selectedServerHost();
   return {
     ...(current || {}),
-    server_host: normalizeHost($('server_host').value) || DEFAULT_HOST,
-    server: $('server').value.trim(),
-    control: $('control').value.trim(),
-    admin: $('admin').value.trim() || null,
-    advanced_endpoints: $('advanced_endpoints').checked,
+    server_host: host,
+    server: audioForHost(host),
+    control: controlForHost(host),
+    admin: adminForHost(host),
+    advanced_endpoints: false,
     user_id: null,
     codec: $('codec').value,
     opus_profile: $('opus_profile').value,
@@ -214,33 +214,26 @@ async function load() {
 
     setControlsUrl(status.local_ui_url);
     const phase = status.phase || (status.running ? 'running' : 'stopped');
+    setRuntimeRunning(status.running);
     setStatus(phase, phase === 'running' ? 'talk' : phase === 'failed' ? 'error' : phase === 'starting' ? 'starting' : 'offline');
-    setMessage(status.last_error || (status.running ? 'Client is running. Open Controls for the main client UI.' : 'Choose a server, configure audio, and start the client.'), status.last_error ? 'error' : status.running ? 'running' : '');
+    setMessage(status.last_error || (status.running ? 'Client connected. Close to return to controls.' : 'Choose a server, configure audio, and connect.'), status.last_error ? 'error' : status.running ? 'running' : '');
   } catch (err) {
     try {
       fill(await invoke('mobile_default_settings'));
     } catch (_) {}
+    setRuntimeRunning(false);
     setStatus('error', 'error');
     setMessage(String(err), 'error');
   }
 }
 
 $('codec').addEventListener('change', renderCodecFields);
-$('server_host').addEventListener('input', syncEndpointFields);
-$('advanced_endpoints').addEventListener('change', syncEndpointFields);
+$('server_host').addEventListener('input', () => {
+  $('server-picker').value = MANUAL_SERVER_VALUE;
+  syncServerSelection();
+});
 $('mic_gain').addEventListener('input', showGainValues);
 $('speaker_gain').addEventListener('input', showGainValues);
-
-$('save').addEventListener('click', async event => {
-  event.preventDefault();
-  if (!invoke) return;
-  try {
-    await invoke('mobile_save_settings', { settings: collect() });
-    setMessage('Saved. Restart the client to apply connection changes.', 'running');
-  } catch (err) {
-    setMessage(String(err), 'error');
-  }
-});
 
 $('scan-servers').addEventListener('click', async event => {
   event.preventDefault();
@@ -249,8 +242,8 @@ $('scan-servers').addEventListener('click', async event => {
   $('server-list-status').textContent = 'Scanning local network...';
   try {
     const profiles = await invoke('mobile_discover_servers');
-    setServerProfiles(profiles);
-    setMessage(profiles.length ? 'Select a server or keep manual addresses.' : 'No Intercom servers found. Manual entry is still available.', profiles.length ? 'running' : '');
+    setServerProfiles(profiles, { preferFirst: true });
+    setMessage(profiles.length ? 'Scan refreshed servers. Select one or choose Manual.' : 'No Intercom servers found. Manual entry is still available.', profiles.length ? 'running' : '');
   } catch (err) {
     setMessage(String(err), 'error');
     $('server-list-status').textContent = 'Server scan failed.';
@@ -259,51 +252,27 @@ $('scan-servers').addEventListener('click', async event => {
   }
 });
 
-$('server-picker').addEventListener('change', async event => {
+$('server-picker').addEventListener('change', event => {
   event.preventDefault();
-  if (!invoke || !$('server-picker').value) return;
-  const profile = serverProfiles.find(item => item.id === $('server-picker').value);
-  if (!profile) return;
-  try {
-    applyServerProfileToForm(profile);
-    const settings = await invoke('mobile_select_server', { profile });
-    fill(settings);
-    setMessage(`Selected ${profile.name || profile.control}.`, 'running');
-  } catch (err) {
-    setMessage(String(err), 'error');
-  }
+  syncServerSelection();
 });
 
-$('forget-server').addEventListener('click', async event => {
-  event.preventDefault();
-  if (!invoke || !$('server-picker').value) return;
-  try {
-    const settings = await invoke('mobile_forget_server', { id: $('server-picker').value });
-    fill(settings);
-    setMessage('Server removed from saved list.');
-  } catch (err) {
-    setMessage(String(err), 'error');
-  }
-});
-
-$('stop').addEventListener('click', async event => {
-  event.preventDefault();
+async function disconnectClient() {
   if (!invoke) return;
   try {
+    $('start').disabled = true;
     await invoke('mobile_stop_client');
     setControlsUrl(null);
+    setRuntimeRunning(false);
     setStatus('stopped', 'offline');
-    setMessage('Client stopped.');
+    setMessage('Client disconnected.');
   } catch (err) {
     setStatus('error', 'error');
     setMessage(String(err), 'error');
+  } finally {
+    $('start').disabled = false;
   }
-});
-
-$('open-controls').addEventListener('click', event => {
-  event.preventDefault();
-  openControls();
-});
+}
 
 $('close-config').addEventListener('click', event => {
   event.preventDefault();
@@ -313,18 +282,27 @@ $('close-config').addEventListener('click', event => {
 $('mobile-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (!invoke) return;
+  if (runtimeRunning) {
+    await disconnectClient();
+    return;
+  }
   try {
+    $('start').disabled = true;
     setControlsUrl(null);
     setStatus('starting', 'starting');
-    setMessage('Starting audio client...');
+    setMessage('Connecting audio client...');
     const response = await invoke('mobile_start_client', { settings: collect() });
     setControlsUrl(response.local_ui_url);
+    setRuntimeRunning(response.running);
     setStatus(response.phase || 'running', 'talk');
-    setMessage(response.last_error || 'Opening client controls.', response.last_error ? 'error' : 'running');
+    setMessage(response.last_error || 'Connected. Opening controls.', response.last_error ? 'error' : 'running');
     await openControls();
   } catch (err) {
+    setRuntimeRunning(false);
     setStatus('error', 'error');
     setMessage(String(err), 'error');
+  } finally {
+    $('start').disabled = false;
   }
 });
 

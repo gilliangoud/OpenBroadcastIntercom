@@ -1001,9 +1001,11 @@ mod mobile {
     ) -> std::result::Result<Vec<MobileServerProfile>, String> {
         let path = mobile_settings_path(&app)?;
         run_mobile_command_blocking("mobile_discover_servers", move || {
-            let settings = load_settings(&path).map_err(|err| err.to_string())?;
+            let mut settings = load_settings(&path).map_err(|err| err.to_string())?;
             let discovered = discover_mobile_servers().map_err(|err| err.to_string())?;
-            Ok(merge_mobile_profiles(settings.server_profiles, discovered))
+            settings.server_profiles = merge_mobile_profiles(Vec::new(), discovered);
+            save_settings(&path, &settings).map_err(|err| err.to_string())?;
+            Ok(settings.server_profiles)
         })
         .await
     }
@@ -2791,7 +2793,18 @@ mod tests {
         assert!(mobile_html.contains("scan-servers"));
         assert!(mobile_html.contains("button_count"));
         assert!(mobile_html.contains("server_host"));
-        assert!(mobile_html.contains("advanced_endpoints"));
+        assert!(mobile_html.contains(">Audio<"));
+        assert!(mobile_html.contains(">Connect</button>"));
+        assert!(mobile_html.contains("manual-server-row"));
+        assert!(!mobile_html.contains(">Start</button>"));
+        assert!(!mobile_html.contains(">Stop</button>"));
+        assert!(!mobile_html.contains(">Save</button>"));
+        assert!(!mobile_html.contains(">Controls</button>"));
+        assert!(!mobile_html.contains("forget-server"));
+        assert!(!mobile_html.contains("advanced_endpoints"));
+        assert!(!mobile_html.contains("Custom Audio Address"));
+        assert!(!mobile_html.contains("Custom Control WebSocket URL"));
+        assert!(!mobile_html.contains("Custom Admin URL"));
         assert!(
             mobile_html.find("id=\"message\"").unwrap() < mobile_html.find("server-panel").unwrap()
         );
@@ -2809,17 +2822,23 @@ mod tests {
         assert!(mobile_js.contains("buttons: []"));
         assert!(mobile_js.contains("button_keys: []"));
         assert!(mobile_js.contains("mobile_start_client"));
+        assert!(mobile_js.contains("mobile_stop_client"));
         assert!(mobile_js.contains("mobile_open_controls"));
         assert!(mobile_js.contains("mobile_discover_servers"));
-        assert!(mobile_js.contains("mobile_select_server"));
-        assert!(mobile_js.contains("mobile_forget_server"));
+        assert!(mobile_js.contains("MANUAL_SERVER_VALUE"));
+        assert!(mobile_js.contains("server: audioForHost(host)"));
+        assert!(mobile_js.contains("advanced_endpoints: false"));
+        assert!(mobile_js.contains("setRuntimeRunning(response.running)"));
+        assert!(!mobile_js.contains("mobile_select_server"));
+        assert!(!mobile_js.contains("mobile_forget_server"));
         assert!(mobile_js.contains("server_profiles"));
         assert!(mobile_js.contains("Choose a server"));
-        assert!(mobile_js.contains("applyServerProfileToForm"));
+        assert!(!mobile_js.contains("applyServerProfileToForm"));
         assert!(mobile_js.contains("status.phase"));
         assert!(!mobile_js.contains("fetch("));
         assert!(mobile_css.contains(".phone-shell"));
         assert!(mobile_css.contains(".server-panel"));
+        assert!(mobile_css.contains(".disconnect-button"));
         assert_eq!(controls_html, shared_controls_html);
         assert_eq!(controls_js, shared_controls_js);
         assert_eq!(controls_css, shared_controls_css);
@@ -2957,7 +2976,7 @@ mod tests {
         let mobile_js = fs::read_to_string(root.join("tauri-assets/mobile.js")).unwrap();
 
         assert!(mobile_js.contains("mobile_status"));
-        assert!(mobile_js.contains("Client is running. Open Controls"));
+        assert!(mobile_js.contains("Client connected. Close to return to controls."));
         assert!(mobile_js.contains("close-config"));
         assert!(mobile_js.contains("async function openControls"));
         assert!(mobile_js.contains("await invoke('mobile_open_controls')"));
