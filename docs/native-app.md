@@ -46,7 +46,8 @@ cargo run -p bridge-app --features native --bin bridge-app-native
 
 The bridge desktop app opens the multi-route bridge manager in a Tauri window,
 persists `intercom-bridge-app.json`, and launches one `bridge` process per
-route. Closing the native window stops those launched route processes.
+route. The default filename is retained for compatibility with existing bridge
+configs. Closing the native window stops those launched route processes.
 Build its release binary or platform bundle with:
 
 ```sh
@@ -80,7 +81,8 @@ These controls call the existing local HTTP API where possible. If
 ## Settings Window
 
 `App Settings` opens a Tauri asset window backed by `intercom-app-settings.json`
-or the path supplied with `--config-file`.
+or the path supplied with `--config-file`. The default filename is retained for
+compatibility with existing app-host configs.
 
 The settings window can edit:
 
@@ -123,7 +125,7 @@ request future Apple Core ML acceleration while preserving a safe Tract fallback
 today. A macOS server can be built with `--features macos-accelerated` to enable
 whisper.cpp Metal support for built-in transcription.
 Use `voice_isolation` for laptop microphones and keyboard-heavy
-environments, `voice` for normal intercom use, `broadcast` for less aggressive
+environments, `voice` for normal RedLine use, `broadcast` for less aggressive
 gating, and `raw` for external audio interfaces. When `native_voice_processing`
 is enabled, macOS clients use VoiceProcessingIO where possible; selecting a
 specific input device still forces the raw portable backend.

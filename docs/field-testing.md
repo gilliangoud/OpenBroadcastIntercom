@@ -88,7 +88,7 @@ Record:
 
 Target guidance:
 
-- Under 80 ms feels natural for intercom.
+- Under 80 ms feels natural for RedLine.
 - 80-150 ms is usable for production cues.
 - Over 150 ms needs investigation before referee/talent use.
 

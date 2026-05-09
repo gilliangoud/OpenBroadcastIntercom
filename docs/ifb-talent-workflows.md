@@ -37,7 +37,7 @@ across presets and templates.
 | --- | --- | --- |
 | `1` | Program | Clean program audio feed into talent IFB. Usually from a bridge input. |
 | `2` | Production PL | Director, producer, technical crew. |
-| `3` | Referee PL | Referee team regular intercom. |
+| `3` | Referee PL | Referee team regular RedLine talkback. |
 | `4` | Director IFB | Director interrupt to talent/referees. |
 | `5` | Producer Cue | Producer-only cueing to talent or floor. |
 | `6` | PA | Route to PA bridge output. Treat as dangerous and lock down. |
@@ -69,7 +69,7 @@ Recommended config:
   - `producer`: momentary transmit to channel `5`
   - `pa`: guarded/latching transmit to channel `6`
   - `reply`: direct reply to last caller once the client UI exposes this cleanly
-- `vol`: program low enough to avoid masking intercom, for example
+- `vol`: program low enough to avoid masking RedLine talkback, for example
   `{"1":0.55,"2":1.0,"3":0.8,"5":0.8}`
 - `lockout`: allow local volumes, lock routing, IFB, buttons, codec, and PA
   route controls during a show.
@@ -162,7 +162,7 @@ separate `output` routes for PA, production monitor, recorder, or stream feeds.
 
 ### PA Bridge Output
 
-Purpose: route selected intercom audio to a physical PA, vMix input, virtual
+Purpose: route selected RedLine audio to a physical PA, vMix input, virtual
 audio cable, or venue mixer.
 
 Recommended config:

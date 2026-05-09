@@ -30,7 +30,7 @@ cargo run -p bridge-app --features native --bin bridge-app-native
 Defaults:
 
 - UI bind: `127.0.0.1:41012`
-- config file: `intercom-bridge-app.json`
+- config file: `intercom-bridge-app.json` compatibility default
 - server UDP: `127.0.0.1:40000`
 - control WebSocket: `ws://127.0.0.1:40001`
 - admin API: derived from the control host as `http://<host>:40002/admin/api/state`
@@ -80,7 +80,7 @@ Each route maps directly to one `bridge` process:
 
 The bridge app rejects routes that listen and transmit on the same channel. That
 guardrail is intentional because a production bridge can easily create feedback
-between PA/program audio and intercom audio.
+between PA/program audio and RedLine audio.
 
 ## vMix Windows PC Example
 

@@ -67,7 +67,8 @@ The client UI should stay organized around field tasks:
 ## Next Routing Steps
 
 Presets are server-owned snapshots of desired client configs. They are stored
-in `intercom-state.json` alongside channels and clients:
+in the server state file, which still defaults to `intercom-state.json` for
+compatibility, alongside channels and clients:
 
 ```json
 {

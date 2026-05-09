@@ -1,6 +1,8 @@
 # RedLine
 
-This repository contains a first-pass intercom prototype:
+RedLine is a first-pass, low-latency broadcast intercom prototype for production
+teams, sports crews, referees, and live event operators. The repository
+contains:
 
 - `common`: shared packet format and control messages.
 - `clients/core`: shared client runtime pieces for config state, audio codec
@@ -27,7 +29,9 @@ models in `intercom-models/` or point the server at another folder with
 `--whisper-model-dir`. Use `intercom-state.example.json` and
 `intercom-app-settings.example.json` as sanitized starting points; do not commit
 local runtime state, credentials, signing material, or generated build output.
-See `docs/public-repo-hygiene.md` before publishing changes.
+See `docs/public-repo-hygiene.md` before publishing changes. Some internal
+default filenames and service identifiers still use `intercom-*` names for
+compatibility with existing local configs and dev installs.
 
 The default/debug edge audio format is 16 kHz mono PCM16 in 10 ms frames.
 `pcm24` and `pcm48` are also available when bandwidth is less important than
@@ -291,7 +295,7 @@ Desktop capture also applies a low-level de-click silence gate before packets
 are sent. This is meant to suppress chopped background-noise residue from
 platform voice-processing modes without changing normal speech. Client/server
 processing is server-owned through the `processing` config block. Use `raw` for
-external audio interfaces, `voice` for normal intercom speech,
+external audio interfaces, `voice` for normal RedLine speech,
 `voice_isolation` for the strongest speech VAD/transient rejection, and
 `broadcast` when preserving more room tone matters. `native_voice_processing`
 tells capable clients to use OS-level voice features when available. On macOS,
@@ -326,7 +330,7 @@ cargo run -p pi -- --user-id 10 --tx-channel 1 --listen-channel 1 --codec opus
 Opus profiles are selected separately from the `opus` codec:
 
 - `speech-16-low`: 16 kHz, lower CPU/bandwidth speech.
-- `speech-24-standard`: 24 kHz, default intercom speech and the first ESP32 Opus target.
+- `speech-24-standard`: 24 kHz, default RedLine speech and the first ESP32 Opus target.
 - `speech-48-high`: 48 kHz, higher speech quality.
 - `music-48`: 48 kHz higher-detail audio with Opus music signal/application hints.
 

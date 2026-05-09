@@ -73,7 +73,7 @@ Optional breakout route if not using an audio dev board:
 | Item | Qty | Notes |
 | --- | ---: | --- |
 | I2S MEMS microphone breakout | 1 | Adafruit SPH0645 breakout is a convenient digital mic reference. |
-| I2S speaker amp / headphone codec | 1 | Needed for practical monitoring; prefer a codec with headphone driver for intercom. |
+| I2S speaker amp / headphone codec | 1 | Needed for practical monitoring; prefer a codec with headphone driver for RedLine. |
 | ESP32-S3 module/dev board with PSRAM | 1 | Do not choose a no-PSRAM board for Opus work. |
 
 ## Button Layout
