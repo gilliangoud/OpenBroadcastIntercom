@@ -9,8 +9,8 @@ manager.
 Use it when a Windows vMix PC, macOS laptop, or Linux audio box needs several
 in/out routes at once:
 
-- vMix or virtual audio program feed into Intercom.
-- PA output from an Intercom channel into a USB/audio interface.
+- vMix or virtual audio program feed into RedLine.
+- PA output from a RedLine channel into a USB/audio interface.
 - Production monitor or recorder feed from selected channels.
 - A carefully isolated duplex bridge where the physical audio interface already
   prevents feedback.
@@ -30,7 +30,7 @@ cargo run -p bridge-app --features native --bin bridge-app-native
 Defaults:
 
 - UI bind: `127.0.0.1:41012`
-- config file: `intercom-bridge-app.json`
+- config file: `intercom-bridge-app.json` compatibility default
 - server UDP: `127.0.0.1:40000`
 - control WebSocket: `ws://127.0.0.1:40001`
 - admin API: derived from the control host as `http://<host>:40002/admin/api/state`
@@ -54,6 +54,9 @@ The Tauri wrapper opens the same bridge manager inside an OS webview window.
 Closing the native window asks the manager to stop all launched bridge routes so
 production audio child processes are not left running in the background.
 
+A current bridge manager screenshot is included in
+[Client UI Screenshots](client-ui-screenshots.md#bridge-app).
+
 The route editor uses dropdown controls for local audio devices and server
 channels. Device dropdowns are discovered from the local audio host through
 `cpal`. Channel dropdowns are loaded from the server admin state when reachable;
@@ -67,12 +70,12 @@ Each route maps directly to one `bridge` process:
 
 - `id`: stable route identifier inside the bridge app.
 - `name`: client name shown in admin.
-- `user_id`: numeric Intercom alias used by the server.
+- `user_id`: numeric RedLine alias used by the server.
 - `mode`: `input`, `output`, or `duplex`.
-- `tx_channels`: Intercom channels fed by the input device, selected from the channel dropdown.
-- `listen_channels`: Intercom channels rendered to the output device, selected from the channel dropdown.
+- `tx_channels`: RedLine channels fed by the input device, selected from the channel dropdown.
+- `listen_channels`: RedLine channels rendered to the output device, selected from the channel dropdown.
 - `input_device` / `output_device`: selected from local audio device dropdowns.
-- `codec` and `opus_profile`: normal Intercom edge codec settings.
+- `codec` and `opus_profile`: normal RedLine edge codec settings.
 - `stereo`: enables stereo receive for output/duplex routes when supported.
 - `input_gain` / `output_gain`: local linear gain.
 - `note`: operator note shown in bridge status.
@@ -80,7 +83,7 @@ Each route maps directly to one `bridge` process:
 
 The bridge app rejects routes that listen and transmit on the same channel. That
 guardrail is intentional because a production bridge can easily create feedback
-between PA/program audio and intercom audio.
+between PA/program audio and RedLine audio.
 
 ## vMix Windows PC Example
 

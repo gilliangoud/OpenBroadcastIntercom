@@ -2,14 +2,16 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use clap::{Parser, ValueEnum};
 use client_core::{
-    load_or_create_client_uid, run_connection_cue_task, run_control_connection,
-    send_control_request, supported_codecs, AudioDecoder, AudioEncoder, AudioSettings,
-    ClientConfig, ClientConnectionEvent, ControlRequest, PlaybackBuffer,
+    basic_client_telemetry, load_or_create_client_uid, run_connection_cue_task,
+    run_control_connection, send_control_request, supported_codecs, AudioDecoder, AudioEncoder,
+    AudioSettings, ClientConfig, ClientConnectionEvent, ClientServerEndpoint,
+    ClientTelemetryCounters, ControlRequest, PlaybackBuffer, DEFAULT_CONTROL_PORT,
+    DEFAULT_SERVER_HOST,
 };
 use common::{
     codec_samples_per_frame, AudioPacket, BridgeStatus, ClientLockoutPolicy, ClientRole, Codec,
@@ -25,6 +27,8 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(about = "Generic audio-device bridge for PA, vMix, and production audio feeds")]
 struct Args {
+    #[arg(long)]
+    server_host: Option<String>,
     #[arg(long, default_value = "127.0.0.1:40000")]
     server: SocketAddr,
     #[arg(long, default_value = "ws://127.0.0.1:40001")]
@@ -145,12 +149,28 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("bridge=info".parse()?))
         .init();
-    let args = Args::parse();
+    let mut args = Args::parse();
     if args.list_devices {
         list_audio_devices()?;
         return Ok(());
     }
+    resolve_endpoint_args(&mut args)?;
     run(args).await
+}
+
+fn resolve_endpoint_args(args: &mut Args) -> anyhow::Result<()> {
+    let Some(server_host) = args.server_host.as_deref() else {
+        return Ok(());
+    };
+    let endpoint = ClientServerEndpoint::new(server_host)?;
+    let default_control = format!("ws://{DEFAULT_SERVER_HOST}:{DEFAULT_CONTROL_PORT}");
+    if args.server == client_core::default_audio_addr() {
+        args.server = endpoint.resolve_audio_addr()?;
+    }
+    if args.control == default_control {
+        args.control = endpoint.control_url();
+    }
+    Ok(())
 }
 
 async fn run(args: Args) -> anyhow::Result<()> {
@@ -267,14 +287,23 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Arc::clone(&socket),
         Arc::clone(&runtime_config),
     ));
+    let telemetry_counters = ClientTelemetryCounters::default();
+    let mut telemetry_playback = Arc::new(Mutex::new(PlaybackBuffer::new(
+        MIX_SAMPLES_PER_FRAME * 20,
+        0,
+    )));
     let mut bridge_input_device = None;
     let mut bridge_output_device = None;
     let mut _input_stream = None;
     let capture_task = if args.mode.captures() {
         let (mic_tx, mic_rx) = mpsc::channel::<Vec<i16>>(8);
         let settings = Arc::new(AudioSettings::new(args.input_gain, 1.0));
-        let (stream, device_name) =
-            build_input_stream(mic_tx, settings, args.input_device.as_deref())?;
+        let (stream, device_name) = build_input_stream(
+            mic_tx,
+            settings,
+            args.input_device.as_deref(),
+            telemetry_counters.clone(),
+        )?;
         bridge_input_device = Some(device_name);
         stream.play()?;
         _input_stream = Some(stream);
@@ -282,6 +311,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             Arc::clone(&socket),
             Arc::clone(&runtime_config),
             mic_rx,
+            telemetry_counters.clone(),
         )))
     } else {
         None
@@ -292,6 +322,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             MIX_SAMPLES_PER_FRAME * 20,
             MIX_SAMPLES_PER_FRAME * 4,
         )));
+        telemetry_playback = Arc::clone(&playback);
         let settings = Arc::new(AudioSettings::new(1.0, args.output_gain));
         let (stream, device_name) = build_output_stream(
             Arc::clone(&playback),
@@ -308,12 +339,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
             Arc::clone(&socket),
             Arc::clone(&runtime_config),
             playback,
+            telemetry_counters.clone(),
         )))
     } else {
         None
     };
     let bridge_status_task = tokio::spawn(run_bridge_status(
-        control_tx,
+        control_tx.clone(),
         Arc::clone(&runtime_config),
         BridgeStatusConfig {
             mode: args.mode,
@@ -324,11 +356,19 @@ async fn run(args: Args) -> anyhow::Result<()> {
             note: args.note,
         },
     ));
+    let bridge_telemetry_task = tokio::spawn(run_bridge_telemetry(
+        control_tx,
+        Arc::clone(&runtime_config),
+        telemetry_playback,
+        telemetry_counters.clone(),
+        Instant::now(),
+    ));
 
     tokio::select! {
         result = control_task => result.context("control task panicked")??,
         result = registration_task => result.context("registration task panicked")??,
         result = bridge_status_task => result.context("bridge status task panicked")??,
+        result = bridge_telemetry_task => result.context("bridge telemetry task panicked")??,
         result = wait_optional(capture_task) => result.context("capture task panicked")??,
         result = wait_optional(playback_task) => result.context("playback task panicked")??,
         _ = tokio::signal::ctrl_c() => tracing::info!("bridge shutting down"),
@@ -410,6 +450,48 @@ async fn run_bridge_status(
     }
 }
 
+async fn run_bridge_telemetry(
+    control_tx: mpsc::Sender<ControlRequest>,
+    config: Arc<Mutex<ClientConfig>>,
+    playback: Arc<Mutex<PlaybackBuffer>>,
+    telemetry: ClientTelemetryCounters,
+    started_at: Instant,
+) -> anyhow::Result<()> {
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        let user_id = config.lock().unwrap().user_id;
+        let mut health = basic_client_telemetry(
+            "bridge",
+            playback.lock().unwrap().stats(),
+            telemetry.snapshot(),
+        );
+        health.uptime_ms = started_at
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        match send_control_request(
+            &control_tx,
+            ControlMessage::CaptureHealth { user_id, health },
+        )
+        .await?
+        {
+            ControlResponse::Ack => {}
+            ControlResponse::Error { message }
+                if message.contains("control connection unavailable") =>
+            {
+                tracing::debug!(%message, "bridge telemetry deferred until control reconnects");
+            }
+            ControlResponse::Error { message } => {
+                tracing::warn!(%message, "bridge telemetry rejected by server");
+            }
+            other => tracing::warn!(?other, "unexpected bridge telemetry response"),
+        }
+    }
+}
+
 fn bridge_status_snapshot(config: &ClientConfig, bridge: BridgeStatusConfig) -> BridgeStatus {
     BridgeStatus {
         mode: bridge.mode.status_mode(),
@@ -427,6 +509,7 @@ async fn run_capture_sender(
     socket: Arc<UdpSocket>,
     config: Arc<Mutex<ClientConfig>>,
     mut mic_rx: mpsc::Receiver<Vec<i16>>,
+    telemetry: ClientTelemetryCounters,
 ) -> anyhow::Result<()> {
     let seq = AtomicU16::new(0);
     let timestamp = AtomicU32::new(0);
@@ -454,7 +537,13 @@ async fn run_capture_sender(
             current_codec = codec;
             current_profile = profile;
         }
-        let payload = encoder.encode(&frame)?;
+        let payload = match encoder.encode(&frame) {
+            Ok(payload) => payload,
+            Err(err) => {
+                telemetry.record_codec_drop();
+                return Err(err);
+            }
+        };
         let timestamp = timestamp.fetch_add(
             codec_samples_per_frame(current_codec) as u32,
             Ordering::Relaxed,
@@ -468,8 +557,17 @@ async fn run_capture_sender(
                 timestamp,
                 payload: payload.clone(),
             };
-            packet.encode(&mut encoded)?;
-            socket.send(&encoded).await?;
+            if let Err(err) = packet.encode(&mut encoded) {
+                telemetry.record_packet_encode_error();
+                return Err(err.into());
+            }
+            match socket.send(&encoded).await {
+                Ok(_) => telemetry.record_tx_packet(),
+                Err(err) => {
+                    telemetry.record_tx_send_failure();
+                    return Err(err.into());
+                }
+            }
         }
     }
     Ok(())
@@ -479,14 +577,19 @@ async fn run_playback_receiver(
     socket: Arc<UdpSocket>,
     config: Arc<Mutex<ClientConfig>>,
     playback: Arc<Mutex<PlaybackBuffer>>,
+    telemetry: ClientTelemetryCounters,
 ) -> anyhow::Result<()> {
     let mut decoder = AudioDecoder::default();
     let mut buf = vec![0_u8; common::MAX_PACKET_BYTES];
     loop {
         let len = socket.recv(&mut buf).await?;
         let packet = match AudioPacket::decode(&buf[..len]) {
-            Ok(packet) => packet,
+            Ok(packet) => {
+                telemetry.record_udp_rx_packet();
+                packet
+            }
             Err(err) => {
+                telemetry.record_malformed_packet();
                 tracing::warn!(%err, "dropped malformed bridge receive packet");
                 continue;
             }
@@ -510,6 +613,7 @@ async fn run_playback_receiver(
         ) {
             Ok(samples) => samples,
             Err(err) => {
+                telemetry.record_decode_error();
                 tracing::warn!(%err, codec = ?packet.codec, "dropped invalid bridge receive packet");
                 continue;
             }
@@ -566,6 +670,7 @@ fn build_input_stream(
     tx: mpsc::Sender<Vec<i16>>,
     settings: Arc<AudioSettings>,
     input_device: Option<&str>,
+    telemetry: ClientTelemetryCounters,
 ) -> anyhow::Result<(cpal::Stream, String)> {
     let host = cpal::default_host();
     let device = select_device(
@@ -580,8 +685,13 @@ fn build_input_stream(
     let supported = device.default_input_config()?;
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.into();
-    let mut capture =
-        CaptureAdapter::new(tx, config.sample_rate.0, config.channels as usize, settings);
+    let mut capture = CaptureAdapter::new(
+        tx,
+        config.sample_rate.0,
+        config.channels as usize,
+        settings,
+        telemetry,
+    );
     let err_fn = |err| tracing::error!(%err, "bridge input stream error");
     let stream = match sample_format {
         SampleFormat::I16 => device.build_input_stream(
@@ -670,6 +780,7 @@ struct CaptureAdapter {
     input_rate: u32,
     channels: usize,
     settings: Arc<AudioSettings>,
+    telemetry: ClientTelemetryCounters,
     frame: Vec<i16>,
 }
 
@@ -679,12 +790,14 @@ impl CaptureAdapter {
         input_rate: u32,
         channels: usize,
         settings: Arc<AudioSettings>,
+        telemetry: ClientTelemetryCounters,
     ) -> Self {
         Self {
             tx,
             input_rate,
             channels: channels.max(1),
             settings,
+            telemetry,
             frame: Vec::new(),
         }
     }
@@ -702,7 +815,9 @@ impl CaptureAdapter {
                 let input = self.frame.drain(..input_frame_len).collect::<Vec<_>>();
                 let output =
                     common::resample_linear(&input, self.input_rate, common::MIX_SAMPLE_RATE);
-                let _ = self.tx.try_send(output);
+                if self.tx.try_send(output).is_err() {
+                    self.telemetry.record_tx_queue_drop();
+                }
             }
         }
     }

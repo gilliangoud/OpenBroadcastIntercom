@@ -27,10 +27,15 @@ function esc(value) {
   }[ch]));
 }
 function csv(values) { return [...(values || [])].sort((a, b) => Number(a) - Number(b)).join(','); }
-function parseCsv(value) {
-  return String(value || '').split(',').map((v) => Number(v.trim())).filter((v) => Number.isInteger(v) && v > 0);
+function parseCsv(value, { allowZero = false } = {}) {
+  const minimum = allowZero ? 0 : 1;
+  return String(value || '').split(',').map((v) => Number(v.trim())).filter((v) => Number.isInteger(v) && v >= minimum);
 }
-function sorted(values) { return [...new Set((values || []).map(Number).filter((v) => Number.isInteger(v) && v > 0))].sort((a, b) => a - b); }
+function sorted(values, { allowZero = false } = {}) {
+  const minimum = allowZero ? 0 : 1;
+  return [...new Set((values || []).map(Number).filter((v) => Number.isInteger(v) && v >= minimum))].sort((a, b) => a - b);
+}
+function sortedChannels(values) { return sorted(values, { allowZero: true }); }
 const METER_FLOOR_DB = -60;
 function finite(value) {
   const number = Number(value);
@@ -83,6 +88,13 @@ function clientLabel(id) {
 function clientUidForUser(id) {
   return desired(Number(id))?.client_uid || session(Number(id))?.client_uid || deviceByUser(Number(id))?.client_uid || '';
 }
+function clientEditorName(id, cfg, live) {
+  const device = deviceByUser(Number(id)) || {};
+  const uid = cfg.client_uid || live.client_uid || device.client_uid || '';
+  const role = cfg.role || live.role || device.role || '';
+  const name = String(cfg.name || live.name || device.name || '').trim();
+  return name && name !== uid && name !== role ? name : '';
+}
 function channelLabel(id) {
   const ch = (state.channels || []).find((item) => item.id === Number(id));
   return ch ? `${id} ${ch.name}` : `${id}`;
@@ -106,8 +118,8 @@ function allChannelIds(extra = []) {
   for (const item of state.clients || []) collectChannels(item, ids);
   for (const item of state.sessions || []) collectChannels(item, ids);
   for (const item of extra) collectChannels(item, ids);
-  if (!ids.size) ids.add(1);
-  return [...ids].filter((id) => Number.isInteger(id) && id > 0).sort((a, b) => a - b);
+  if (!ids.size) ids.add(0);
+  return sortedChannels([...ids]);
 }
 function defaultLockout() {
   return {
@@ -286,7 +298,6 @@ function userRows() {
     const output = s.output || {};
     return `<tr class="clickable" data-open-client="${id}">
       <td><strong>${esc(clientLabel(id))}</strong></td>
-      <td><code>${esc(clientUidForUser(id) || '-')}</code></td>
       <td>${esc(item.role || 'client')}</td>
       <td>${bridgeText(item)}</td>
       <td>${s.addr ? badge('online') : badge('offline', 'offline')}</td>
@@ -304,9 +315,42 @@ function userRows() {
     </tr>`;
   }).join('');
 }
+function clientField(label, value, cls = '') {
+  return `<div class="client-field ${cls}"><dt>${esc(label)}</dt><dd>${value || '-'}</dd></div>`;
+}
+function clientCards() {
+  const cards = mergedUsers().map((id) => {
+    const d = desired(id) || {};
+    const s = session(id) || {};
+    const item = { ...d, ...s };
+    const input = s.input || {};
+    const output = s.output || {};
+    const online = !!s.addr;
+    const bridge = bridgeText(item);
+    return `<article class="client-card clickable" data-open-client="${id}" role="button" tabindex="0">
+      <div class="client-card-head">
+        <div class="client-title"><strong>${esc(clientLabel(id))}</strong><span>${esc(item.role || 'client')} · ${esc(audioLabel(item))}</span></div>
+        <div class="client-badges">${online ? badge('online') : badge('offline', 'offline')}${item.stereo?.enabled ? badge(item.stereo_status?.active ? 'stereo' : 'stereo configured', item.stereo_status?.active ? '' : 'warn') : ''}</div>
+      </div>
+      ${(item.role || '') === 'bridge' ? `<div class="client-card-bridge">${bridge}</div>` : ''}
+      <dl class="client-card-grid">
+        ${clientField('Talk Mode', esc(item.talk_mode || 'ptt'))}
+        ${clientField('Regular Talk', s.regular_talk_active ? badge('active', 'talk') : '-')}
+        ${clientField('Talk', input.active ? badge('talking', 'talk') : '-')}
+        ${clientField('Input', meter(input.rms, '', input.peak), 'meter-field')}
+        ${clientField('Output', meter(output.rms, 'out', output.peak), 'meter-field')}
+        ${clientField('Listen', esc(csv(item.listen) || '-'))}
+        ${clientField('Regular TX', esc(csv(item.tx) || '-'))}
+        ${clientField('Queue', esc(s.queue_depth ?? '-'))}
+        ${clientField('Health', healthText(s), 'wide-field')}
+      </dl>
+    </article>`;
+  }).join('');
+  return cards ? `<div class="client-card-list">${cards}</div>` : '<p class="muted">No clients.</p>';
+}
 function healthText(s) {
   const parts = [];
-  if (s.transport?.source_frame_drops) parts.push(`${s.transport.source_frame_drops} drops`);
+  if (s.transport?.source_frames_dropped) parts.push(`${s.transport.source_frames_dropped} drops`);
   if (s.transport?.malformed_packets) parts.push(`${s.transport.malformed_packets} malformed`);
   if ((s.role || '') === 'bridge' && !s.bridge) parts.push('bridge status not reported');
   if (s.processing_status?.active) {
@@ -321,8 +365,15 @@ function healthText(s) {
     parts.push(`DSP ${(s.processing_status.engine || 'engine')} unavailable`);
   }
   if (s.output?.limiter_reduction_db > 0.1) parts.push(`limiter ${s.output.limiter_reduction_db.toFixed(1)} dB`);
+  const telemetry = s.capture?.client_transport || {};
+  const playback = s.capture?.playback || {};
+  if (telemetry.malformed_packets || telemetry.decode_errors) parts.push(`rx drops ${telemetry.malformed_packets || 0}/${telemetry.decode_errors || 0}`);
+  if (telemetry.packet_encode_errors || telemetry.tx_queue_drops || telemetry.tx_send_failures) parts.push(`tx drops ${telemetry.packet_encode_errors || 0}/${telemetry.tx_queue_drops || 0}/${telemetry.tx_send_failures || 0}`);
+  if (playback.underflows || playback.overflows) parts.push(`playback U/O ${playback.underflows || 0}/${playback.overflows || 0}`);
   if (s.capture?.desktop?.post_gain_clipped_samples) parts.push(`desktop clip ${s.capture.desktop.post_gain_clipped_samples}`);
   if (s.capture?.desktop?.post_gain) parts.push(`mic ${dbfsText(s.capture.desktop.post_gain.rms)} rms`);
+  if (s.capture?.audio?.post_gain_clipped_samples && !s.capture?.desktop) parts.push(`clip ${s.capture.audio.post_gain_clipped_samples}`);
+  if (s.capture?.audio?.input && !s.capture?.desktop && !s.capture?.selected) parts.push(`mic ${dbfsText(s.capture.audio.input.rms)} rms`);
   if (!s.capture?.desktop && (s.capture?.raw_clipped_samples || s.capture?.software_clipped_samples)) parts.push(`capture clip ${s.capture.raw_clipped_samples || 0}/${s.capture.software_clipped_samples || 0}`);
   if (!s.capture?.desktop && s.capture?.selected?.dc_offset && Math.abs(s.capture.selected.dc_offset) > 0.08) parts.push(`capture DC ${pct(s.capture.selected.dc_offset)}`);
   if (s.capture?.selected && !s.capture?.desktop) parts.push(`mic ${dbfsText(s.capture.selected.rms)} rms`);
@@ -423,26 +474,34 @@ function renderClientsPage() {
   root().innerHTML = `
     <section class="card">
       <div class="card-head"><h2>Device Enrollment</h2><span class="muted">Policy: ${esc(state.enrollment_policy || 'auto')}</span></div>
-      <div class="table-wrap"><table><thead><tr><th>UID</th><th>User</th><th>Status</th><th>Role</th><th>Last Seen</th><th>Warnings</th><th></th></tr></thead><tbody>${deviceRows() || '<tr><td colspan="7" class="muted">No enrolled or pending devices.</td></tr>'}</tbody></table></div>
+      <div class="table-wrap device-table"><table><thead><tr><th>UID</th><th>User</th><th>Status</th><th>Role</th><th>Last Seen</th><th>Warnings</th><th></th></tr></thead><tbody>${deviceRows() || '<tr><td colspan="7" class="muted">No enrolled or pending devices.</td></tr>'}</tbody></table></div>
     </section>
     <section class="card">
       <div class="card-head"><h2>Clients</h2><button id="add-client" class="primary" type="button">Add Client</button></div>
-      <div class="table-wrap"><table><thead><tr><th>User</th><th>UID</th><th>Role</th><th>Bridge</th><th>Status</th><th>Codec</th><th>Stereo</th><th>Talk Mode</th><th>Regular Talk</th><th>Talk</th><th>Input</th><th>Output</th><th>Listen</th><th>Regular TX</th><th>Queue</th><th>Health</th></tr></thead><tbody>${userRows() || '<tr><td colspan="16" class="muted">No clients.</td></tr>'}</tbody></table></div>
+      ${clientCards()}
     </section>`;
   $('add-client').onclick = () => openClientEditor(nextUserId());
   root().querySelectorAll('[data-open-client]').forEach((row) => row.onclick = () => openClientEditor(Number(row.dataset.openClient)));
+  root().querySelectorAll('[data-open-client]').forEach((row) => row.onkeydown = (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openClientEditor(Number(row.dataset.openClient));
+    }
+  });
   root().querySelectorAll('[data-approve-device]').forEach((button) => button.onclick = () => updateDevice(button.dataset.approveDevice, 'approve'));
   root().querySelectorAll('[data-reject-device]').forEach((button) => button.onclick = () => updateDevice(button.dataset.rejectDevice, 'reject'));
+  root().querySelectorAll('[data-delete-device]').forEach((button) => button.onclick = () => deleteDevice(button.dataset.deleteDevice));
 }
 
 function deviceRows() {
   return (state.devices || []).map((device) => {
     const uid = device.client_uid || '';
-    const actions = device.status === 'pending'
+    const statusActions = device.status === 'pending'
       ? `<button type="button" data-approve-device="${esc(uid)}">Approve</button><button type="button" data-reject-device="${esc(uid)}">Reject</button>`
       : device.status === 'rejected'
         ? `<button type="button" data-approve-device="${esc(uid)}">Approve</button>`
         : '';
+    const actions = `${statusActions}<button type="button" class="danger" data-delete-device="${esc(uid)}">Delete</button>`;
     return `<tr><td><code>${esc(uid)}</code></td><td>${esc(clientLabel(device.user_id))}</td><td>${badge(device.status || 'enrolled', device.status === 'rejected' ? 'danger' : device.status === 'pending' ? 'warn' : '')}</td><td>${esc(device.role || 'client')}</td><td>${device.last_seen_ms || '-'}</td><td>${(device.warnings || []).map(esc).join(', ') || '-'}</td><td class="actions">${actions}</td></tr>`;
   }).join('');
 }
@@ -450,6 +509,15 @@ function deviceRows() {
 async function updateDevice(uid, action) {
   try {
     await api(`/devices/${encodeURIComponent(uid)}/${action}`, { method: 'POST', body: JSON.stringify({}) });
+    await refresh();
+  } catch (err) {
+    showError(err);
+  }
+}
+async function deleteDevice(uid) {
+  if (!window.confirm(`Delete device enrollment ${uid}? The client configuration stays, but this device will need to enroll again.`)) return;
+  try {
+    await api(`/devices/${encodeURIComponent(uid)}`, { method: 'DELETE' });
     await refresh();
   } catch (err) {
     showError(err);
@@ -471,7 +539,7 @@ function channelManagerHtml() {
   const rows = (state.channels || []).map((ch) => `<tr><td>${ch.id}</td><td>${esc(ch.name)}</td><td><button data-edit-channel="${ch.id}" type="button">Edit</button> <button data-delete-channel="${ch.id}" type="button" class="danger">Delete Name</button></td></tr>`).join('');
   return `<div class="card-head"><h2>Channels</h2></div>
     <form id="channel-form" class="form-grid">
-      <label>Channel ID<input id="channel-id" type="number" min="1" max="65535" required></label>
+      <label>Channel ID<input id="channel-id" type="number" min="0" max="65535" required></label>
       <label>Name<input id="channel-name" type="text" required></label>
       <button class="primary" type="submit">Save Channel</button>
     </form>
@@ -521,7 +589,7 @@ async function saveMixCell(e) {
   root().querySelectorAll(`[data-tx-user="${id}"]`).forEach((el) => el.checked ? tx.add(Number(el.dataset.ch)) : tx.delete(Number(el.dataset.ch)));
   root().querySelectorAll(`[data-priority-user="${id}"]`).forEach((el) => el.checked ? priority.add(Number(el.dataset.ch)) : priority.delete(Number(el.dataset.ch)));
   root().querySelectorAll(`[data-gain-user="${id}"]`).forEach((el) => { vol[Number(el.dataset.ch)] = Number(el.value); });
-  await api(`/clients/${id}`, { method: 'PATCH', body: JSON.stringify({ listen: sorted([...listen]), tx: sorted([...tx]), priority_channels: sorted([...priority]), vol }) });
+  await api(`/clients/${id}`, { method: 'PATCH', body: JSON.stringify({ listen: sortedChannels([...listen]), tx: sortedChannels([...tx]), priority_channels: sortedChannels([...priority]), vol }) });
   await refresh();
 }
 function talkerMatrixHtml() {
@@ -603,7 +671,7 @@ function activeCallsHtml() {
 function emergencyTarget() {
   const kind = $('emergency-target-type').value;
   if (kind === 'all') return { kind: 'all' };
-  const ids = parseCsv($('emergency-target-ids').value);
+  const ids = parseCsv($('emergency-target-ids').value, { allowZero: kind === 'channels' });
   return kind === 'users' ? { kind: 'users', users: ids } : { kind: 'channels', channels: ids };
 }
 function bindCallControls() {
@@ -625,14 +693,14 @@ function bindCallControls() {
   $('emergency-start').onclick = () => emergency(true).catch(showError);
   $('emergency-stop').onclick = () => emergency(false).catch(showError);
   $('send-announcement').onclick = async () => {
-    const ids = parseCsv($('announcement-target-ids').value);
+    const kind = $('announcement-target-type').value;
+    const ids = parseCsv($('announcement-target-ids').value, { allowZero: kind === 'channel' });
     const message = $('announcement-message').value.trim();
     const textAlert = $('announcement-text-alert').checked;
     const tts = $('announcement-tts').checked;
     if (!ids.length) return window.alert('Set one or more target IDs.');
     if (!message) return window.alert('Set a message.');
     if (!textAlert && !tts) return window.alert('Enable text alert, spoken announcement, or both.');
-    const kind = $('announcement-target-type').value;
     const targets = ids.map((id) => ({ kind, id }));
     await api('/announcements', { method: 'POST', body: JSON.stringify({ sender: Number($('announcement-sender').value) || 0, targets, message, text_alert: textAlert, tts, priority: $('announcement-priority').checked, duck: $('announcement-duck').checked, gain: Number($('announcement-gain').value) || 0.18 }) });
     $('announcement-message').value = '';
@@ -866,15 +934,26 @@ function bindPresetControls() {
 
 function openClientEditor(userId) {
   selectedUser = userId;
-  const cfg = { ...defaultClient(userId), ...(desired(userId) || {}), user_id: userId };
   const live = session(userId) || {};
+  const device = deviceByUser(userId) || {};
+  const desiredCfg = desired(userId) || {};
+  const cfg = {
+    ...defaultClient(userId),
+    client_uid: live.client_uid || device.client_uid || null,
+    role: live.role || device.role || 'client',
+    name: device.name || '',
+    ...desiredCfg,
+    user_id: userId,
+  };
+  cfg.name = clientEditorName(userId, cfg, live);
+  const deviceUid = cfg.client_uid || live.client_uid || device.client_uid || clientUidForUser(userId);
   modalRoot().innerHTML = `<div class="modal" id="client-modal"><div class="modal-panel" role="dialog" aria-modal="true">
     <div class="modal-head"><h2>Client Editor - ${esc(clientLabel(userId))}</h2><button id="close-client-modal" type="button">Close</button></div>
     <form id="client-form" class="config-form">
       <fieldset><legend>Identity</legend>
         <label>User ID<input id="user-id" type="number" min="1" max="65535" value="${cfg.user_id}" required title="Unique numeric client ID."></label>
-        <label>Stable Device UID<input id="client-uid" type="text" value="${esc(cfg.client_uid || live.client_uid || clientUidForUser(userId))}" placeholder="Generated by client" title="Stable generated device identity. Leave blank to configure by numeric user ID only."></label>
-        <label>Name<input id="client-name" type="text" value="${esc(cfg.name)}" placeholder="Optional"></label>
+        <label>Stable Device UID<span class="readonly-value" title="${esc(deviceUid || 'No linked device UID')}">${esc(deviceUid || 'No linked device UID')}</span><input id="client-uid" type="hidden" value="${esc(deviceUid || '')}"></label>
+        <label>Display Name<input id="client-name" type="text" value="${esc(cfg.name)}" placeholder="Optional" autocomplete="off"></label>
         <label>Role<select id="client-role"><option value="client">Client</option><option value="bridge">Bridge</option></select></label>
       </fieldset>
       <fieldset><legend>Audio</legend>
@@ -912,7 +991,7 @@ function openClientEditor(userId) {
         ${normalizationStatusText(live.processing_status?.normalization) ? `<p class="muted wide">Leveler: ${esc(normalizationStatusText(live.processing_status?.normalization))}</p>` : ''}
         ${live.processing_status?.engine_detail ? `<p class="muted wide">${esc(live.processing_status.engine_detail)}</p>` : ''}
       </fieldset>
-      <fieldset class="wide"><legend>Live Capture Health</legend>${captureHealthHtml(live)}</fieldset>
+      <fieldset class="wide"><legend>Client Telemetry</legend>${captureHealthHtml(live)}</fieldset>
       <fieldset class="wide"><legend>ESP32 Audio Hardware</legend>${esp32AudioEditorHtml()}</fieldset>
       <fieldset class="wide"><legend>Routing</legend>${editorRoutingHtml(cfg)}</fieldset>
       <fieldset class="wide"><legend>Stereo Receive</legend><label class="check"><input id="stereo-enabled" type="checkbox"> Stereo receive</label><div id="stereo-pan-wrap">${panEditorHtml(cfg)}</div></fieldset>
@@ -928,24 +1007,94 @@ function openClientEditor(userId) {
 function closeModal() { selectedUser = null; modalRoot().innerHTML = ''; }
 function captureHealthHtml(live) {
   const capture = live.capture;
-  if (!capture) return '<p class="muted">No capture health reported by this client.</p>';
-  if (capture.desktop) return desktopCaptureHealthHtml(capture.desktop);
+  if (!capture) return '<p class="muted">No client telemetry reported by this client.</p>';
+  const runtime = capture.runtime || {};
+  const audio = clientAudioTelemetry(capture);
+  const playback = clientPlaybackTelemetry(capture);
+  const clientTransport = clientTransportTelemetry(capture);
   const codec = capture.codec_config;
   const sidetone = codec?.sidetone;
+  const wifi = capture.wifi || {};
+  const memory = capture.memory || {};
+  const stack = capture.task_stack_high_water_bytes || {};
+  const display = capture.display || {};
+  const battery = capture.battery || {};
   const row = (label, item) => `<tr><td>${esc(label)}</td><td>${meter(item?.rms, '', item?.peak)}</td><td>${esc(dbfsText(item?.rms))}</td><td>${esc(dbfsText(item?.peak))}</td><td>${esc(pct(item?.dc_offset))}</td></tr>`;
+  const platformRows = [];
+  if (capture.wifi || capture.battery) {
+    platformRows.push(`<div class="status-line"><span>RSSI ${esc(wifi.rssi_dbm ?? '-')} dBm</span><span>Wi-Fi ${wifi.connect_count || 0}/${wifi.disconnect_count || 0}</span><span>Control ${wifi.control_connect_count || 0}/${wifi.control_disconnect_count || 0}</span><span>Battery ${esc(battery.status || 'unknown')}</span></div>`);
+  }
+  if (codec) {
+    platformRows.push(`<div class="status-line"><span>Codec ${esc(codec.chip || '-')}</span><span>Active ${codecName(codec.active_codec)}</span><span>Server audio ${codec.server_control_enabled ? 'on' : 'off'}</span><span>Backend ${esc(codec.audio_backend || '-')}</span><span>HW ${esc(codec.hardware_sample_rate_hz || codec.i2s_sample_rate_hz || '-')} Hz ${esc(codec.hardware_channels || '-')}ch/${esc(codec.hardware_bits_per_sample || '-')}bit</span><span>I2S ${esc(codec.i2s_format || '-')} ${esc(codec.i2s_slot_width || '-')}</span><span>Mic SW ${esc(codec.mic_software_gain_percent ?? '-')}%</span><span>Speaker SW ${esc(codec.speaker_software_gain_percent ?? '-')}%</span><span>Notifications ${esc(codec.notification_gain_percent ?? '-')}%</span><span>ALC ${codec.alc_enabled ? 'on' : 'off'}</span><span>Gate ${codec.noise_gate_enabled ? 'on' : 'off'}</span><span>Sidetone ${esc(sidetone?.mode || 'off')}</span><span>FW monitor ${esc(sidetone?.firmware_gain_percent ?? '-')}%</span><span>Line bypass ${esc(sidetone?.codec_bypass_gain_percent ?? '-')}%</span><span>Mic bypass ${esc(sidetone?.mic_bypass_gain_percent ?? '-')}%</span><span>Bypass source ${esc(sidetone?.active_bypass_source || '-')}</span><span>Bypass keeps DAC ${sidetone?.codec_bypass_preserves_dac ? 'yes' : 'no'}</span></div>`);
+  }
+  if (capture.memory || capture.free_heap_bytes || capture.min_free_heap_bytes) {
+    platformRows.push(`<div class="status-line"><span>Heap ${memory.free_heap_bytes || capture.free_heap_bytes || 0}</span><span>Min heap ${memory.min_free_heap_bytes || capture.min_free_heap_bytes || 0}</span><span>Internal ${memory.internal_free_heap_bytes || 0}</span><span>Internal block ${memory.internal_largest_free_block_bytes || 0}</span><span>PSRAM ${memory.spiram_free_heap_bytes || 0}</span><span>PSRAM block ${memory.spiram_largest_free_block_bytes || 0}</span></div>`);
+  }
+  if (capture.task_stack_high_water_bytes) {
+    platformRows.push(`<div class="status-line"><span>Stack UDP ${stack.udp || 0}</span><span>Reg ${stack.registration || 0}</span><span>Playback ${stack.playback || 0}</span><span>Capture ${stack.capture || 0}</span><span>Buttons ${stack.buttons || 0}</span><span>Display ${stack.display || 0}</span></div>`);
+  }
+  if (capture.display) {
+    platformRows.push(`<div class="status-line"><span>Display ${display.enabled ? (display.initialized ? 'ready' : 'enabled') : 'disabled'}</span><span>FB ${display.framebuffer_bytes || 0}</span><span>FB PSRAM ${display.framebuffer_in_psram ? 'yes' : 'no'}</span></div>`);
+  }
   return `
-    <div class="status-line"><span>ADC ${esc(capture.adc_input || '-')}</span><span>PGA ${esc(capture.mic_pga_gain_db ?? '-')} dB</span><span>Channel ${esc(capture.capture_channel || '-')}</span><span>SW gain ${esc(capture.software_gain_percent ?? '-')}%</span><span>HP ${capture.high_pass_enabled ? 'on' : 'off'}</span><span>ALC ${capture.alc_enabled ? 'on' : 'off'}</span><span>Gate ${capture.noise_gate_enabled ? 'on' : 'off'}</span></div>
-    ${codec ? `<div class="status-line"><span>Codec ${esc(codec.chip || '-')}</span><span>Active ${codecName(codec.active_codec)}</span><span>Server audio ${codec.server_control_enabled ? 'on' : 'off'}</span><span>Backend ${esc(codec.audio_backend || '-')}</span><span>HW ${esc(codec.hardware_sample_rate_hz || codec.i2s_sample_rate_hz || '-')} Hz ${esc(codec.hardware_channels || '-')}ch/${esc(codec.hardware_bits_per_sample || '-')}bit</span><span>I2S ${esc(codec.i2s_format || '-')} ${esc(codec.i2s_slot_width || '-')}</span><span>Mic SW ${esc(codec.mic_software_gain_percent ?? '-')}%</span><span>Speaker SW ${esc(codec.speaker_software_gain_percent ?? '-')}%</span><span>Notifications ${esc(codec.notification_gain_percent ?? '-')}%</span><span>ALC ${codec.alc_enabled ? 'on' : 'off'}</span><span>Gate ${codec.noise_gate_enabled ? 'on' : 'off'}</span><span>Sidetone ${esc(sidetone?.mode || 'off')}</span><span>FW monitor ${esc(sidetone?.firmware_gain_percent ?? '-')}%</span><span>Line bypass ${esc(sidetone?.codec_bypass_gain_percent ?? '-')}%</span><span>Mic bypass ${esc(sidetone?.mic_bypass_gain_percent ?? '-')}%</span><span>Bypass source ${esc(sidetone?.active_bypass_source || '-')}</span><span>Bypass keeps DAC ${sidetone?.codec_bypass_preserves_dac ? 'yes' : 'no'}</span></div>` : ''}
-    <div class="status-line"><span>Playback depth ${capture.playback_queue_depth || 0}</span><span>Playback underflows ${capture.playback_underflows || 0}</span><span>Playback overflows ${capture.playback_overflows || 0}</span></div>
-    <div class="status-line"><span>TX targets ${capture.tx_target_count || 0}</span><span>TX packets ${capture.tx_packets_sent || 0}</span><span>TX failures ${capture.tx_send_failures || 0}</span><span>Raw clipped ${capture.raw_clipped_samples || 0}</span><span>Software clipped ${capture.software_clipped_samples || 0}</span></div>
-    <div class="table-wrap"><table><thead><tr><th>Input</th><th>Level</th><th>RMS</th><th>Peak</th><th>DC</th></tr></thead><tbody>${row('Left', capture.left)}${row('Right', capture.right)}${row('Selected', capture.selected)}</tbody></table></div>`;
+    <div class="status-line"><span>Kind ${esc(runtime.client_kind || live.role || 'client')}</span><span>Phase ${esc(runtime.phase || 'running')}</span><span>Uptime ${Math.round((capture.uptime_ms || 0) / 1000)}s</span>${runtime.last_error ? `<span>Error ${esc(runtime.last_error)}</span>` : ''}</div>
+    <div class="status-line"><span>Audio ${esc(audio.backend || capture.adc_input || '-')}</span><span>Input ${esc(audio.input_device || '-')}</span><span>Output ${esc(audio.output_device || '-')}</span><span>Format ${esc(audio.sample_format || '-')}</span><span>Rate ${esc(audio.sample_rate_hz || '-')} Hz</span><span>Channels ${esc(audio.channels ?? '-')}</span><span>Mode ${esc(audio.channel_mode || capture.capture_channel || '-')}</span><span>Mic gain ${audio.mic_gain == null ? '-' : Number(audio.mic_gain).toFixed(2)}</span></div>
+    <div class="status-line"><span>Playback ${playback.available_samples || playback.queue_depth || capture.playback_queue_depth || 0}/${playback.capacity_samples || '-'}</span><span>Prebuffer ${playback.prebuffer_samples ?? '-'}</span><span>Channels ${playback.channels ?? '-'}</span><span>Started ${playback.started ? 'yes' : 'no'}</span><span>Underflows ${playback.underflows || capture.playback_underflows || 0}</span><span>Overflows ${playback.overflows || capture.playback_overflows || 0}</span><span>Dropped samples ${playback.dropped_samples || 0}</span></div>
+    <div class="status-line"><span>RX ${clientTransport.udp_rx_packets || 0}</span><span>Malformed ${clientTransport.malformed_packets || 0}</span><span>Decode ${clientTransport.decode_errors || 0}</span><span>Codec drops ${clientTransport.codec_drops || 0}</span><span>Payload ${clientTransport.payload_decode_errors || 0}</span><span>Packet encode ${clientTransport.packet_encode_errors || 0}</span><span>TX ${clientTransport.tx_packets || capture.tx_packets_sent || 0}</span><span>TX failures ${clientTransport.tx_send_failures || capture.tx_send_failures || 0}</span><span>Queue drops ${clientTransport.tx_queue_drops || 0}</span></div>
+    ${platformRows.join('')}
+    <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Level</th><th>RMS</th><th>Peak</th><th>DC</th></tr></thead><tbody>${row('Input', audio.input)}${row('Pre gain', audio.pre_gain)}${row('Post gain', audio.post_gain)}${row('Left', capture.left)}${row('Right', capture.right)}${row('Selected', capture.selected)}</tbody></table></div>`;
 }
-function desktopCaptureHealthHtml(capture) {
-  const row = (label, item) => `<tr><td>${esc(label)}</td><td>${meter(item?.rms, '', item?.peak)}</td><td>${esc(dbfsText(item?.rms))}</td><td>${esc(dbfsText(item?.peak))}</td><td>${esc(pct(item?.dc_offset))}</td></tr>`;
-  return `
-    <div class="status-line"><span>Backend ${esc(capture.backend || '-')}</span><span>Device ${esc(capture.device || '-')}</span><span>Format ${esc(capture.sample_format || '-')}</span><span>Rate ${esc(capture.sample_rate_hz || '-')} Hz</span><span>Channels ${esc(capture.channels ?? '-')}</span><span>Mode ${esc(capture.channel_mode || '-')}</span><span>Mic gain ${Number(capture.mic_gain || 0).toFixed(2)}</span></div>
-    <div class="status-line"><span>Pre-gain clipped ${capture.pre_gain_clipped_samples || 0}</span><span>Post-gain clipped ${capture.post_gain_clipped_samples || 0}</span><span>Dropped frames ${capture.dropped_frames || 0}</span></div>
-    <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Level</th><th>RMS</th><th>Peak</th><th>DC</th></tr></thead><tbody>${row('Pre gain', capture.pre_gain)}${row('Post gain', capture.post_gain)}</tbody></table></div>`;
+function clientAudioTelemetry(capture) {
+  if (capture.audio) return capture.audio;
+  if (capture.desktop) {
+    return {
+      backend: capture.desktop.backend,
+      input_device: capture.desktop.device,
+      sample_format: capture.desktop.sample_format,
+      sample_rate_hz: capture.desktop.sample_rate_hz,
+      channels: capture.desktop.channels,
+      channel_mode: capture.desktop.channel_mode,
+      mic_gain: capture.desktop.mic_gain,
+      input: capture.desktop.post_gain,
+      pre_gain: capture.desktop.pre_gain,
+      post_gain: capture.desktop.post_gain,
+      pre_gain_clipped_samples: capture.desktop.pre_gain_clipped_samples,
+      post_gain_clipped_samples: capture.desktop.post_gain_clipped_samples,
+      dropped_frames: capture.desktop.dropped_frames,
+    };
+  }
+  return {
+    backend: capture.codec_config?.audio_backend || capture.adc_input || '',
+    sample_rate_hz: capture.codec_config?.hardware_sample_rate_hz || capture.codec_config?.i2s_sample_rate_hz || 0,
+    channels: capture.codec_config?.hardware_channels || 0,
+    channel_mode: capture.capture_channel || '',
+    mic_gain: capture.software_gain_percent == null ? null : Number(capture.software_gain_percent) / 100,
+    input: capture.selected || {},
+    pre_gain: capture.selected || {},
+    post_gain: capture.selected || {},
+  };
+}
+function clientPlaybackTelemetry(capture) {
+  return capture.playback || {
+    available_samples: capture.playback_queue_depth || 0,
+    queue_depth: capture.playback_queue_depth || 0,
+    underflows: capture.playback_underflows || 0,
+    overflows: capture.playback_overflows || 0,
+  };
+}
+function clientTransportTelemetry(capture) {
+  const esp32 = capture.transport || {};
+  return capture.client_transport || {
+    udp_rx_packets: esp32.udp_rx_packets || 0,
+    malformed_packets: esp32.udp_decode_errors || 0,
+    decode_errors: esp32.opus_decode_failures || 0,
+    codec_drops: esp32.udp_codec_drops || 0,
+    payload_decode_errors: esp32.udp_payload_decode_errors || 0,
+    packet_encode_errors: 0,
+    tx_packets: capture.tx_packets_sent || 0,
+    tx_send_failures: capture.tx_send_failures || esp32.udp_tx_send_failures || 0,
+    tx_queue_drops: esp32.audio_tx_queue_drops || 0,
+  };
 }
 function esp32AudioEditorHtml() {
   return `<div class="status-line"><span>When enabled, the server overrides runtime-changeable ESP32 menuconfig audio defaults on config update.</span></div>
@@ -995,7 +1144,11 @@ function advertisedButtonHtml(live, cfg) {
   if (!buttons.length) return '<span class="muted">No advertised buttons from this connected client.</span>';
   return buttons.map((button) => `<button class="pill" data-add-advertised="${esc(button.id)}" data-label="${esc(button.label || button.id)}" type="button">${esc(button.id)}: ${esc(button.label || button.id)}${configured.has(button.id) ? ' configured' : ' available'}</button>`).join('');
 }
-function buttonRowHtml(button = { id: '', label: '', mode: 'momentary', actions: [] }) {
+function buttonColor(value) {
+  const color = String(value || '').trim();
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color) ? color : '#2f7dd3';
+}
+function buttonRowHtml(button = { id: '', label: '', color: '#2f7dd3', mode: 'momentary', actions: [] }) {
   const tx = (button.actions || []).find((action) => action.type === 'transmit') || {};
   const alert = (button.actions || []).find((action) => action.type === 'alert') || {};
   const alertTarget = (alert.targets || [])[0] || {};
@@ -1005,13 +1158,14 @@ function buttonRowHtml(button = { id: '', label: '', mode: 'momentary', actions:
   return `<div class="button-row">
     <label>ID<input data-button-id value="${esc(button.id)}" placeholder="director"></label>
     <label>Label<input data-button-label value="${esc(button.label || button.id)}" placeholder="Director"></label>
+    <label>Color<input data-button-color type="color" value="${buttonColor(button.color)}"></label>
     <label>Mode<select data-button-mode><option value="momentary">Momentary</option><option value="latching">Latching</option></select></label>
     <button data-remove-button type="button" class="danger">Remove</button>
     <label>TX Channels<input data-button-tx-channels value="${csv(tx.channels)}" placeholder="1,4"></label>
     <label>TX Users<input data-button-tx-users value="${csv(tx.users)}" placeholder="2,3"></label>
     <label class="check"><input data-button-tx-duck type="checkbox" ${tx.duck ? 'checked' : ''}> Duck direct targets</label>
     <label>Alert Type<select data-button-alert-kind><option value="">None</option><option value="user">User</option><option value="channel">Channel</option></select></label>
-    <label>Alert ID<input data-button-alert-id type="number" min="1" value="${alertTarget.id || ''}"></label>
+    <label>Alert ID<input data-button-alert-id type="number" min="0" value="${alertTarget.id ?? ''}"></label>
     <label>Alert Message<input data-button-alert-message value="${esc(alert.message || '')}"></label>
     <label>Apply Preset<input data-button-preset value="${esc(preset.preset_id || '')}" placeholder="preset-id"></label>
     <label>Set Talk Users<input data-button-talk-users value="${csv(talk.users)}" placeholder="2,3"></label>
@@ -1167,7 +1321,7 @@ function bindPanControls() {
   });
 }
 function checkedNumbers(selector, attr) {
-  return sorted([...modalRoot().querySelectorAll(selector)].filter((el) => el.checked).map((el) => Number(el.dataset[attr])));
+  return sortedChannels([...modalRoot().querySelectorAll(selector)].filter((el) => el.checked).map((el) => Number(el.dataset[attr])));
 }
 function numberMap(selector, attr, skipDefault = true) {
   const out = {};
@@ -1191,12 +1345,13 @@ function readButtons() {
   return [...modalRoot().querySelectorAll('.button-row')].map((row) => {
     const id = row.querySelector('[data-button-id]').value.trim();
     const actions = [];
-    const channels = parseCsv(row.querySelector('[data-button-tx-channels]').value);
+    const channels = parseCsv(row.querySelector('[data-button-tx-channels]').value, { allowZero: true });
     const users = parseCsv(row.querySelector('[data-button-tx-users]').value);
     if (channels.length || users.length) actions.push({ type: 'transmit', channels, users, duck: row.querySelector('[data-button-tx-duck]').checked });
     const alertKind = row.querySelector('[data-button-alert-kind]').value;
     const alertId = Number(row.querySelector('[data-button-alert-id]').value);
-    if (alertKind && alertId) actions.push({ type: 'alert', targets: [{ kind: alertKind, id: alertId }], message: row.querySelector('[data-button-alert-message]').value.trim() || null });
+    const alertIdValid = Number.isInteger(alertId) && (alertKind === 'channel' ? alertId >= 0 : alertId > 0);
+    if (alertKind && alertIdValid) actions.push({ type: 'alert', targets: [{ kind: alertKind, id: alertId }], message: row.querySelector('[data-button-alert-message]').value.trim() || null });
     const presetId = row.querySelector('[data-button-preset]').value.trim();
     if (presetId) actions.push({ type: 'apply_preset', preset_id: presetId });
     const talkMode = row.querySelector('[data-button-talk-mode]').value;
@@ -1204,15 +1359,16 @@ function readButtons() {
     if (talkMode && talkUsers.length) actions.push({ type: 'set_talk_mode', users: talkUsers, mode: talkMode });
     const route = {
       users: [],
-      listen_add: parseCsv(row.querySelector('[data-route-listen-add]').value),
-      listen_remove: parseCsv(row.querySelector('[data-route-listen-remove]').value),
-      listen_toggle: parseCsv(row.querySelector('[data-route-listen-toggle]').value),
-      tx_add: parseCsv(row.querySelector('[data-route-tx-add]').value),
-      tx_remove: parseCsv(row.querySelector('[data-route-tx-remove]').value),
-      tx_toggle: parseCsv(row.querySelector('[data-route-tx-toggle]').value),
+      listen_add: parseCsv(row.querySelector('[data-route-listen-add]').value, { allowZero: true }),
+      listen_remove: parseCsv(row.querySelector('[data-route-listen-remove]').value, { allowZero: true }),
+      listen_toggle: parseCsv(row.querySelector('[data-route-listen-toggle]').value, { allowZero: true }),
+      tx_add: parseCsv(row.querySelector('[data-route-tx-add]').value, { allowZero: true }),
+      tx_remove: parseCsv(row.querySelector('[data-route-tx-remove]').value, { allowZero: true }),
+      tx_toggle: parseCsv(row.querySelector('[data-route-tx-toggle]').value, { allowZero: true }),
     };
     if (Object.entries(route).some(([key, value]) => key !== 'users' && value.length)) actions.push({ type: 'route_edit', ...route });
-    return { id, label: row.querySelector('[data-button-label]').value.trim() || id, mode: row.querySelector('[data-button-mode]').value, actions };
+    const color = buttonColor(row.querySelector('[data-button-color]').value);
+    return { id, label: row.querySelector('[data-button-label]').value.trim() || id, color, mode: row.querySelector('[data-button-mode]').value, actions };
   }).filter((button) => button.id);
 }
 function lockoutBody() {

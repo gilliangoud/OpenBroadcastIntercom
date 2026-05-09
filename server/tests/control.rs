@@ -423,6 +423,7 @@ async fn admin_api_preconfigures_client_before_connect() {
             buttons: vec![common::TalkButtonConfig {
                 id: "director".to_string(),
                 label: "Director".to_string(),
+                color: None,
                 mode: common::TalkButtonMode::Momentary,
                 actions: vec![common::TalkButtonAction::Transmit {
                     channels: vec![8],
@@ -473,6 +474,7 @@ async fn admin_api_preconfigures_client_before_connect() {
             buttons: vec![common::TalkButtonConfig {
                 id: "director".to_string(),
                 label: "Director".to_string(),
+                color: None,
                 mode: common::TalkButtonMode::Momentary,
                 actions: vec![common::TalkButtonAction::Transmit {
                     channels: vec![8],
@@ -604,7 +606,7 @@ async fn admin_api_serves_state_assets_and_channel_crud() {
 
     let (status, html) = http_request(admin_addr, "GET", "/admin/", None).await;
     assert_eq!(status, 200);
-    assert!(html.contains("Intercom Admin"));
+    assert!(html.contains("RedLine Admin"));
 
     let (status, js) = http_request(admin_addr, "GET", "/admin/app.js", None).await;
     assert_eq!(status, 200);
@@ -691,6 +693,46 @@ async fn admin_api_serves_state_assets_and_channel_crud() {
 
     let (status, body) = http_request(admin_addr, "DELETE", "/admin/api/channels/2", None).await;
     assert_eq!(status, 200, "{body}");
+
+    let device_client_body = r#"{"client_uid":"unit-device","name":"Unit","listen":[0],"tx":[0],"vol":{},"codec":"pcm16","talk_mode":"ptt","priority":false}"#;
+    let (status, body) = http_request(
+        admin_addr,
+        "PUT",
+        "/admin/api/clients/55",
+        Some(device_client_body),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = http_request(admin_addr, "GET", "/admin/api/state", None).await;
+    assert_eq!(status, 200, "{body}");
+    let state: Value = serde_json::from_str(&body).unwrap();
+    assert!(state["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|device| device["client_uid"] == "unit-device"));
+
+    let (status, body) =
+        http_request(admin_addr, "DELETE", "/admin/api/devices/unit-device", None).await;
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = http_request(admin_addr, "GET", "/admin/api/state", None).await;
+    assert_eq!(status, 200, "{body}");
+    let state: Value = serde_json::from_str(&body).unwrap();
+    assert!(!state["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|device| device["client_uid"] == "unit-device"));
+    let client = state["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|client| client["user_id"] == 55)
+        .unwrap();
+    assert_eq!(client["name"], "Unit");
+    assert!(client["client_uid"].is_null());
 
     let preset_body = r#"{"name":"Refs","clients":[{"user_id":40,"name":"Ref","listen":[1],"tx":[1],"vol":{},"talker_vol":{"41":0.8},"codec":"pcm16","talk_mode":"open","priority":false}]}"#;
     let (status, body) = http_request(

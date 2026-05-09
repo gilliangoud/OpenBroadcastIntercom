@@ -1,4 +1,5 @@
 import java.io.File
+import java.nio.file.Files
 import org.apache.tools.ant.taskdefs.condition.Os
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
@@ -48,5 +49,23 @@ open class BuildTask : DefaultTask() {
             }
             args(listOf("--target", target))
         }.assertNormalExitValue()
+        materializeJniLibSymlinks()
+    }
+
+    private fun materializeJniLibSymlinks() {
+        val jniLibsDir = File(project.projectDir, "src/main/jniLibs")
+        if (!jniLibsDir.exists()) {
+            return
+        }
+
+        jniLibsDir.walkTopDown()
+            .filter { it.isFile && Files.isSymbolicLink(it.toPath()) }
+            .forEach { link ->
+                val linkPath = link.toPath()
+                val targetPath = linkPath.toRealPath()
+                val bytes = Files.readAllBytes(targetPath)
+                Files.delete(linkPath)
+                Files.write(linkPath, bytes)
+            }
     }
 }

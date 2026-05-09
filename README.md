@@ -1,6 +1,8 @@
-# Rust Intercom Prototype
+# RedLine
 
-This repository contains a first-pass intercom prototype:
+RedLine is a first-pass, low-latency broadcast intercom prototype for production
+teams, sports crews, referees, and live event operators. The repository
+contains:
 
 - `common`: shared packet format and control messages.
 - `clients/core`: shared client runtime pieces for config state, audio codec
@@ -14,20 +16,35 @@ This repository contains a first-pass intercom prototype:
 
 ## Public Clone Notes
 
-This repository uses Git LFS for curated model assets. Install Git LFS before
-cloning if you want the included Whisper, DeepFilterNet, and Supertonic models:
+This repository keeps large Whisper models outside Git and Git LFS. The
+supported Whisper/whisper.cpp models are declared in
+`intercom-models/manifest.json` and downloaded from Hugging Face when needed:
+
+```sh
+tools/download-whisper-models.py --list
+tools/download-whisper-models.py
+```
+
+The default external model is `ggml-large-v3-turbo-q5_0.bin`. Use
+`tools/download-whisper-models.py whisper-large-v3-turbo`,
+`tools/download-whisper-models.py whisper-large-v3-turbo-q8_0`, or
+`tools/download-whisper-models.py --all` to fetch the other curated options.
+Downloaded models live in `intercom-models/`, are ignored by Git, and are
+selectable from the server admin UI. See `docs/model-assets.md`.
+
+Some non-Whisper model assets are still curated through Git LFS. Install Git
+LFS only if you need to work on those assets directly:
 
 ```sh
 git lfs install
-git clone <repo-url>
 ```
 
-Large optional Whisper models are intentionally not committed. Place additional
-models in `intercom-models/` or point the server at another folder with
-`--whisper-model-dir`. Use `intercom-state.example.json` and
+Use `intercom-state.example.json` and
 `intercom-app-settings.example.json` as sanitized starting points; do not commit
 local runtime state, credentials, signing material, or generated build output.
-See `docs/public-repo-hygiene.md` before publishing changes.
+See `docs/public-repo-hygiene.md` before publishing changes. Some internal
+default filenames and service identifiers still use `intercom-*` names for
+compatibility with existing local configs and dev installs.
 
 The default/debug edge audio format is 16 kHz mono PCM16 in 10 ms frames.
 `pcm24` and `pcm48` are also available when bandwidth is less important than
@@ -148,7 +165,9 @@ If ESP-IDF refuses to clean a stale partial `clients/esp32/build` folder, run
 
 The first ESP32 firmware target is the Ai-Thinker ESP32 Audio Kit V2.2 /
 ESP32-A1S with ES8388, PCM16/PCM24/PCM48, WebSocket control, UDP mixed receive,
-microphone transmit, active-low PTT, and two advertised dedicated button slots.
+microphone transmit, active-low PTT, four advertised A-D dedicated button slots,
+an optional reply/alert button, optional mono Opus, and an optional 240x240
+ST7789 status display.
 Configure Wi-Fi, server IP, requested user ID, optional stable client UID,
 ES8388 ADC input, mic PGA gain, capture channel, GPIOs, and optional local
 sidetone in `tools/esp32 menuconfig`.
@@ -160,13 +179,14 @@ ES8388 line-bypass config fields are retained for visibility, but codec-bypass
 sidetone is forced off until the fixed playback/capture baseline is stable.
 The ESP32 ES8388/I2S hardware path stays fixed at `48 kHz`, `16-bit`, stereo.
 Network codec changes are software conversion only: `pcm16` sends 16 kHz
-packets, `pcm24` sends 24 kHz packets, and `pcm48` stays native at 48 kHz.
+packets, `pcm24` sends 24 kHz packets, `pcm48` stays native at 48 kHz, and
+Opus currently targets the default 24 kHz speech profile on ESP32.
 Start new hardware on `pcm16`, confirm clean capture health and packet TX, then
 switch to `pcm24` or `pcm48` in the admin UI for better playback and mic
 quality. `pcm48` is the current known-good ESP32 quality mode. `pcm16` now uses
 lightweight interpolation/FIR resampling on the ESP32, but it remains the
-bandwidth-saving speech tier rather than the quality baseline. ESP32 Opus
-remains deferred until CPU headroom is measured.
+bandwidth-saving speech tier rather than the quality baseline. Validate ESP32
+Opus CPU headroom on hardware before making it the field default.
 
 For ESP32 board-mic bring-up, start with:
 
@@ -188,7 +208,7 @@ server playback loudness.
 For local self-monitoring on the ESP32, use:
 
 ```text
-Intercom ESP32 Client -> Local sidetone / self-monitor
+RedLine ESP32 Client -> Local sidetone / self-monitor
 ```
 
 `Firmware mix into playback` is the supported test mode and uses `Firmware
@@ -291,7 +311,7 @@ Desktop capture also applies a low-level de-click silence gate before packets
 are sent. This is meant to suppress chopped background-noise residue from
 platform voice-processing modes without changing normal speech. Client/server
 processing is server-owned through the `processing` config block. Use `raw` for
-external audio interfaces, `voice` for normal intercom speech,
+external audio interfaces, `voice` for normal RedLine speech,
 `voice_isolation` for the strongest speech VAD/transient rejection, and
 `broadcast` when preserving more room tone matters. `native_voice_processing`
 tells capable clients to use OS-level voice features when available. On macOS,
@@ -326,7 +346,7 @@ cargo run -p pi -- --user-id 10 --tx-channel 1 --listen-channel 1 --codec opus
 Opus profiles are selected separately from the `opus` codec:
 
 - `speech-16-low`: 16 kHz, lower CPU/bandwidth speech.
-- `speech-24-standard`: 24 kHz, default intercom speech and the first ESP32 Opus target.
+- `speech-24-standard`: 24 kHz, default RedLine speech and the first ESP32 Opus target.
 - `speech-48-high`: 48 kHz, higher speech quality.
 - `music-48`: 48 kHz higher-detail audio with Opus music signal/application hints.
 
@@ -357,7 +377,7 @@ By default the server listens on UDP `0.0.0.0:40000` for audio and TCP
 `http://0.0.0.0:40002/admin/` and stores desired client/channel config in
 `intercom-state.json`.
 New admin state is seeded with the default show channel plan from GOU-69:
-Program, Production PL, Referee PL, Director IFB, Producer Cue, PA, and Utility.
+open, Program, Production PL, Referee PL, Director IFB, Producer Cue, PA, and Utility.
 Emergency is not a default channel because the server has a separate emergency
 override path.
 
@@ -408,7 +428,7 @@ Options:
 - `--recordings-dir <PATH>`: local folder for recording session directories. Default: `intercom-recordings`.
 - `--debug-audio-dir <PATH>`: opt-in diagnostic WAV taps. Writes `server-decoded-input-user-<id>-1ch.wav` before server DSP and `server-mixed-output-user-<id>-<channels>ch.wav` before server encoding.
 - `--whisper-model <PATH>`: optional local Whisper model path for built-in live transcription and recording transcription. Can also be set with `INTERCOM_WHISPER_MODEL`.
-- `--whisper-model-dir <PATH>`: folder scanned by the admin UI for selectable Whisper models. Default: `intercom-models`.
+- `--whisper-model-dir <PATH>`: folder scanned by the admin UI for selectable Whisper models. Default: `intercom-models`. Use `tools/download-whisper-models.py` to populate the default folder from the external Hugging Face manifest.
 - `--deepfilternet-model-dir <PATH>`: folder scanned by the admin UI for selectable DeepFilterNet models. Default: `deepfilternet-models`.
 - `--transcription-engine <disabled|builtin-whisper|external-whisper>`: transcription engine. If `--whisper-model` is set and this flag is omitted, the server defaults to `builtin-whisper`.
 - `--whisper-command <PATH>`: optional local Whisper/whisper.cpp command used only when `--transcription-engine external-whisper`. Can also be set with `INTERCOM_WHISPER_COMMAND`.
@@ -433,9 +453,10 @@ per client (`user-<id>.wav`), not one interleaved multichannel file; the files
 can be imported as separate tracks in an editor. Built-in live
 transcription uses `whisper-rs` with the configured `--whisper-model` or a model
 selected from `--whisper-model-dir`, chunks each client's audio independently,
-and publishes final transcript segments while people are still talking. Place
-`.bin` or `.gguf` Whisper models in `intercom-models/` to make them selectable
-from the Recording page. Live transcription is opt-in from the Recording page or
+and publishes final transcript segments while people are still talking. Use
+`tools/download-whisper-models.py` or place compatible `.bin`/`.gguf` Whisper
+models in `intercom-models/` to make them selectable from the Recording page.
+Live transcription is opt-in from the Recording page or
 admin API. If transcription falls behind, the server drops transcription backlog
 and reports the drop counters instead of delaying audio. Recordings and
 transcripts are local files under `--recordings-dir`; enable them only where
@@ -647,8 +668,8 @@ Options:
 - `--user-id <ID>`: required numeric user ID.
 - `--client-uid <UUID>`: stable client identity override. By default the client creates/reuses a UUID in the OS config directory.
 - `--identity-file <PATH>`: path to the JSON file used for the generated stable client UUID.
-- `--tx-channel <CHANNEL>`: initial transmit channel. Default: `1`.
-- `--listen-channel <CHANNEL>`: initial listen channel. Default: `1`.
+- `--tx-channel <CHANNEL>`: initial transmit channel. Default: `0` (`open`).
+- `--listen-channel <CHANNEL>`: initial listen channel. Default: `0` (`open`).
 - `--codec <pcm16|pcm24|pcm48|opus>`: edge codec. Default: `pcm16`. JSON/API also accepts `pcm-24` and `pcm-48`.
 - `--opus-profile <speech-16-low|speech-24-standard|speech-48-high|music-48>`: Opus encoder profile. Default: `speech-24-standard`.
 - `--mic-gain <GAIN>`: local mic gain before encoding. Default: `1`.
@@ -742,6 +763,9 @@ in use, the client automatically tries the next ports and logs the actual URL.
 Channel rows are collapsed by default; tap a channel to fold out the live roster
 for that channel. Roster rows show each present client by configured name plus
 ID and mark whether that client is currently transmitting into that channel.
+Current screenshots for the mobile setup, Tauri/native client, desktop local
+UI, Pi browser UI, and bridge app are in
+[Client UI Screenshots](docs/client-ui-screenshots.md).
 
 The local desktop UI/API has no authentication unless `--local-ui-token` or
 `INTERCOM_LOCAL_UI_TOKEN` is set. The default bind is localhost; if you bind it
@@ -843,12 +867,12 @@ Settings file shape:
 
 ```json
 {
-  "app_title": "Intercom Suite",
+  "app_title": "RedLine",
   "server": "127.0.0.1:40000",
   "control": "ws://127.0.0.1:40001",
   "user_id": 1,
-  "tx_channel": 1,
-  "listen_channel": 1,
+  "tx_channel": 0,
+  "listen_channel": 0,
   "codec": "pcm48",
   "opus_profile": "speech_24_standard",
   "mic_gain": 1.25,
@@ -934,7 +958,7 @@ clients/bridge-app/scripts/package-native.sh
 
 Options:
 
-- `--mode <input|output|duplex>`: capture into Intercom, play out of Intercom, or both. Default: `duplex`.
+- `--mode <input|output|duplex>`: capture into RedLine, play out of RedLine, or both. Default: `duplex`.
 - `--user-id <ID>`: requested numeric alias for the bridge.
 - `--client-uid <UUID>`: stable bridge identity override. By default the bridge creates/reuses a UUID in the OS config directory.
 - `--identity-file <PATH>`: path to the JSON file used for the generated stable bridge UUID.
@@ -955,8 +979,8 @@ on the same channel because that can feed PA/program audio back into itself.
 
 Common setups:
 
-- vMix input into Intercom: route vMix or a virtual audio cable to a bridge `input` device and set `--tx-channels` to the program channel.
-- Intercom to PA: run an `output` bridge listening to a PA channel and select the USB/audio-interface output feeding the PA chain.
+- vMix input into RedLine: route vMix or a virtual audio cable to a bridge `input` device and set `--tx-channels` to the program channel.
+- RedLine to PA: run an `output` bridge listening to a PA channel and select the USB/audio-interface output feeding the PA chain.
 - Two-way production bridge: use `duplex` only when the physical interface has separate input/output paths and feedback is controlled externally.
 - Multi-route vMix PC: run `cargo run -p bridge-app --features native --bin bridge-app-native`, add one `input` route for the vMix/program bus, one `output` route for PA or production monitor, and optional extra `output` routes for recorder/stream feeds.
 
@@ -973,8 +997,8 @@ Options:
 - `--user-id <ID>`: required numeric user ID.
 - `--client-uid <UUID>`: stable Pi identity override. By default the Pi client creates/reuses a UUID in the OS config directory.
 - `--identity-file <PATH>`: path to the JSON file used for the generated stable Pi UUID.
-- `--tx-channel <CHANNEL>`: initial transmit channel. Default: `1`.
-- `--listen-channel <CHANNEL>`: initial listen channel. Default: `1`.
+- `--tx-channel <CHANNEL>`: initial transmit channel. Default: `0` (`open`).
+- `--listen-channel <CHANNEL>`: initial listen channel. Default: `0` (`open`).
 - `--codec <pcm16|pcm24|pcm48|opus>`: edge codec. Default: `pcm16`. JSON/API also accepts `pcm-24` and `pcm-48`.
 - `--opus-profile <speech-16-low|speech-24-standard|speech-48-high|music-48>`: Opus encoder profile. Default: `speech-24-standard`.
 - `--mic-gain <GAIN>`: local mic gain before encoding. Default: `1`.

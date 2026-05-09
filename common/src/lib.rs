@@ -858,9 +858,31 @@ pub struct Esp32CodecConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CaptureHealthStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<ClientTelemetryRuntimeStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<ClientTelemetryAudioStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback: Option<ClientTelemetryPlaybackStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_transport: Option<ClientTelemetryTransportStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codec_config: Option<Esp32CodecConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop: Option<DesktopCaptureHealthStatus>,
+    #[serde(default)]
+    pub uptime_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wifi: Option<Esp32WifiHealthStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<Esp32TransportHealthStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<Esp32MemoryHealthStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_stack_high_water_bytes: Option<Esp32TaskStackHealthStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<Esp32DisplayHealthStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery: Option<Esp32BatteryHealthStatus>,
     #[serde(default)]
     pub playback_queue_depth: u16,
     #[serde(default)]
@@ -897,6 +919,190 @@ pub struct CaptureHealthStatus {
     pub selected: CaptureChannelHealth,
     pub raw_clipped_samples: u32,
     pub software_clipped_samples: u32,
+}
+
+pub type ClientTelemetryStatus = CaptureHealthStatus;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientTelemetryRuntimeStatus {
+    #[serde(default)]
+    pub client_kind: String,
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ClientTelemetryAudioStatus {
+    #[serde(default)]
+    pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_device: Option<String>,
+    #[serde(default)]
+    pub sample_format: String,
+    #[serde(default)]
+    pub sample_rate_hz: u32,
+    #[serde(default)]
+    pub channels: u16,
+    #[serde(default)]
+    pub channel_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_gain: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker_gain: Option<f32>,
+    #[serde(default)]
+    pub input: CaptureChannelHealth,
+    #[serde(default)]
+    pub pre_gain: CaptureChannelHealth,
+    #[serde(default)]
+    pub post_gain: CaptureChannelHealth,
+    #[serde(default)]
+    pub pre_gain_clipped_samples: u32,
+    #[serde(default)]
+    pub post_gain_clipped_samples: u32,
+    #[serde(default)]
+    pub dropped_frames: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientTelemetryPlaybackStatus {
+    #[serde(default)]
+    pub available_samples: u64,
+    #[serde(default)]
+    pub capacity_samples: u64,
+    #[serde(default)]
+    pub prebuffer_samples: u64,
+    #[serde(default)]
+    pub queue_depth: u64,
+    #[serde(default)]
+    pub channels: u16,
+    #[serde(default)]
+    pub started: bool,
+    #[serde(default)]
+    pub underflows: u64,
+    #[serde(default)]
+    pub overflows: u64,
+    #[serde(default)]
+    pub dropped_samples: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientTelemetryTransportStatus {
+    #[serde(default)]
+    pub udp_rx_packets: u64,
+    #[serde(default)]
+    pub malformed_packets: u64,
+    #[serde(default)]
+    pub decode_errors: u64,
+    #[serde(default)]
+    pub codec_drops: u64,
+    #[serde(default)]
+    pub payload_decode_errors: u64,
+    #[serde(default)]
+    pub packet_encode_errors: u64,
+    #[serde(default)]
+    pub tx_packets: u64,
+    #[serde(default)]
+    pub tx_send_failures: u64,
+    #[serde(default)]
+    pub tx_queue_drops: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32WifiHealthStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rssi_dbm: Option<i16>,
+    #[serde(default)]
+    pub connect_count: u32,
+    #[serde(default)]
+    pub disconnect_count: u32,
+    #[serde(default)]
+    pub control_connect_count: u32,
+    #[serde(default)]
+    pub control_disconnect_count: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32TransportHealthStatus {
+    #[serde(default)]
+    pub udp_rx_packets: u32,
+    #[serde(default)]
+    pub udp_decode_errors: u32,
+    #[serde(default)]
+    pub udp_codec_drops: u32,
+    #[serde(default)]
+    pub udp_sequence_gaps: u32,
+    #[serde(default)]
+    pub udp_payload_decode_errors: u32,
+    #[serde(default)]
+    pub udp_tx_send_failures: u32,
+    #[serde(default)]
+    pub audio_tx_queue_drops: u32,
+    #[serde(default)]
+    pub opus_encode_failures: u32,
+    #[serde(default)]
+    pub opus_decode_failures: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32MemoryHealthStatus {
+    #[serde(default)]
+    pub free_heap_bytes: u32,
+    #[serde(default)]
+    pub min_free_heap_bytes: u32,
+    #[serde(default)]
+    pub internal_free_heap_bytes: u32,
+    #[serde(default)]
+    pub internal_largest_free_block_bytes: u32,
+    #[serde(default)]
+    pub spiram_free_heap_bytes: u32,
+    #[serde(default)]
+    pub spiram_largest_free_block_bytes: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32TaskStackHealthStatus {
+    #[serde(default)]
+    pub udp: u32,
+    #[serde(default)]
+    pub registration: u32,
+    #[serde(default)]
+    pub playback: u32,
+    #[serde(default)]
+    pub capture: u32,
+    #[serde(default)]
+    pub buttons: u32,
+    #[serde(default)]
+    pub display: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32DisplayHealthStatus {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub initialized: bool,
+    #[serde(default)]
+    pub framebuffer_in_psram: bool,
+    #[serde(default)]
+    pub framebuffer_bytes: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Esp32BatteryHealthStatus {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub millivolts: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub charging: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -1019,6 +1225,8 @@ pub struct ProcessingStageStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ChannelPresenceRoster {
     pub channel_id: ChannelId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default)]
     pub members: Vec<ChannelPresenceMember>,
 }
@@ -1045,6 +1253,8 @@ pub struct AlertRecipientStatus {
 pub struct AlertStatus {
     pub id: AlertId,
     pub sender: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
     pub target: AlertTarget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -1115,6 +1325,8 @@ pub struct TalkButtonConfig {
     pub id: ButtonId,
     #[serde(default)]
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     #[serde(default)]
     pub mode: TalkButtonMode,
     pub actions: Vec<TalkButtonAction>,
@@ -1164,7 +1376,11 @@ impl StereoConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DirectCallStatus {
     pub caller: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_name: Option<String>,
     pub target: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_name: Option<String>,
     pub active: bool,
     #[serde(default)]
     pub duck: bool,
@@ -2018,6 +2234,10 @@ mod tests {
         );
 
         let health = CaptureHealthStatus {
+            runtime: None,
+            audio: None,
+            playback: None,
+            client_transport: None,
             codec_config: Some(Esp32CodecConfig {
                 chip: "es8388".to_string(),
                 active_codec: Some(Codec::Pcm16),
@@ -2048,6 +2268,54 @@ mod tests {
                 },
             }),
             desktop: None,
+            uptime_ms: 1234,
+            wifi: Some(Esp32WifiHealthStatus {
+                rssi_dbm: Some(-55),
+                connect_count: 1,
+                disconnect_count: 0,
+                control_connect_count: 1,
+                control_disconnect_count: 0,
+            }),
+            transport: Some(Esp32TransportHealthStatus {
+                udp_rx_packets: 10,
+                udp_decode_errors: 0,
+                udp_codec_drops: 1,
+                udp_sequence_gaps: 0,
+                udp_payload_decode_errors: 0,
+                udp_tx_send_failures: 0,
+                audio_tx_queue_drops: 0,
+                opus_encode_failures: 0,
+                opus_decode_failures: 0,
+            }),
+            memory: Some(Esp32MemoryHealthStatus {
+                free_heap_bytes: 100_000,
+                min_free_heap_bytes: 90_000,
+                internal_free_heap_bytes: 40_000,
+                internal_largest_free_block_bytes: 20_000,
+                spiram_free_heap_bytes: 500_000,
+                spiram_largest_free_block_bytes: 250_000,
+            }),
+            task_stack_high_water_bytes: Some(Esp32TaskStackHealthStatus {
+                udp: 1000,
+                registration: 1000,
+                playback: 1000,
+                capture: 1000,
+                buttons: 1000,
+                display: 0,
+            }),
+            display: Some(Esp32DisplayHealthStatus {
+                enabled: false,
+                initialized: false,
+                framebuffer_in_psram: false,
+                framebuffer_bytes: 0,
+            }),
+            battery: Some(Esp32BatteryHealthStatus {
+                status: "unknown".to_string(),
+                present: false,
+                percent: None,
+                millivolts: None,
+                charging: None,
+            }),
             playback_queue_depth: 2,
             playback_underflows: 3,
             playback_overflows: 4,
@@ -2097,6 +2365,45 @@ mod tests {
             serde_json::from_str::<CaptureHealthStatus>(&serde_json::to_string(&health).unwrap())
                 .unwrap(),
             health
+        );
+        let generic = CaptureHealthStatus {
+            runtime: Some(ClientTelemetryRuntimeStatus {
+                client_kind: "pi".to_string(),
+                phase: "running".to_string(),
+                last_error: None,
+            }),
+            playback: Some(ClientTelemetryPlaybackStatus {
+                available_samples: 120,
+                capacity_samples: 960,
+                prebuffer_samples: 240,
+                queue_depth: 120,
+                channels: 2,
+                started: true,
+                underflows: 1,
+                overflows: 2,
+                dropped_samples: 3,
+            }),
+            client_transport: Some(ClientTelemetryTransportStatus {
+                udp_rx_packets: 4,
+                malformed_packets: 5,
+                decode_errors: 6,
+                codec_drops: 7,
+                payload_decode_errors: 8,
+                packet_encode_errors: 9,
+                tx_packets: 10,
+                tx_send_failures: 11,
+                tx_queue_drops: 12,
+            }),
+            adc_input: "pi".to_string(),
+            capture_channel: "mono".to_string(),
+            ..CaptureHealthStatus::default()
+        };
+        assert_eq!(
+            serde_json::from_str::<ClientTelemetryStatus>(
+                &serde_json::to_string(&generic).unwrap()
+            )
+            .unwrap(),
+            generic
         );
         let legacy_codec_config = serde_json::from_str::<Esp32CodecConfig>(
             r#"{
@@ -2181,6 +2488,7 @@ mod tests {
         let button = TalkButtonConfig {
             id: "pa".to_string(),
             label: "PA".to_string(),
+            color: Some("#123abc".to_string()),
             mode: TalkButtonMode::Latching,
             actions: vec![
                 TalkButtonAction::Transmit {
@@ -2237,6 +2545,7 @@ mod tests {
         let status = AlertStatus {
             id: 11,
             sender: 4,
+            sender_name: Some("Director".to_string()),
             target: AlertTarget::Channel(2),
             message: None,
             created_at_ms: 1234,
@@ -2249,6 +2558,11 @@ mod tests {
         };
         let json = serde_json::to_string(&status).unwrap();
         assert_eq!(serde_json::from_str::<AlertStatus>(&json).unwrap(), status);
+        let legacy = serde_json::from_str::<AlertStatus>(
+            r#"{"id":12,"sender":4,"target":{"kind":"channel","id":2},"created_at_ms":1234,"recipients":[],"cancelled":false}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.sender_name, None);
         assert!(status.active_for(9));
         assert!(!status.active_for(10));
     }
@@ -2379,6 +2693,7 @@ mod tests {
 
         let roster = ChannelPresenceRoster {
             channel_id: 2,
+            name: Some("Program".to_string()),
             members: vec![ChannelPresenceMember {
                 user_id: 7,
                 name: "Ref".to_string(),

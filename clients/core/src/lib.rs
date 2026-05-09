@@ -1,8 +1,8 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::net::{Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ use common::{
 use futures_util::{SinkExt, StreamExt};
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{Async, FixedAsync, PolynomialDegree, Resampler};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
@@ -33,10 +33,386 @@ pub use ui::{
 
 pub const CONTROL_RECONNECT_INITIAL: Duration = Duration::from_millis(500);
 pub const CONTROL_RECONNECT_MAX: Duration = Duration::from_secs(5);
+pub const DEFAULT_ADMIN_PORT: u16 = 40002;
+pub const DEFAULT_AUDIO_PORT: u16 = 40000;
+pub const DEFAULT_CLIENT_BUTTON_COUNT: u16 = 6;
+pub const DEFAULT_CONTROL_PORT: u16 = 40001;
+pub const DEFAULT_SERVER_HOST: &str = "127.0.0.1";
 pub const LOCAL_BIND_PORT_FALLBACK_ATTEMPTS: u16 = 100;
+pub const MAX_CLIENT_BUTTON_COUNT: u16 = 24;
 const RECONNECTING_CUE_REPEAT: Duration = Duration::from_secs(4);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientServerEndpoint {
+    pub host: String,
+}
+
+impl Default for ClientServerEndpoint {
+    fn default() -> Self {
+        Self {
+            host: DEFAULT_SERVER_HOST.to_string(),
+        }
+    }
+}
+
+impl ClientServerEndpoint {
+    pub fn new(host: impl AsRef<str>) -> anyhow::Result<Self> {
+        Ok(Self {
+            host: validate_server_host(host.as_ref()).map_err(anyhow::Error::msg)?,
+        })
+    }
+
+    pub fn audio_addr_string(&self) -> String {
+        format!("{}:{DEFAULT_AUDIO_PORT}", host_for_socket(&self.host))
+    }
+
+    pub fn resolve_audio_addr(&self) -> anyhow::Result<SocketAddr> {
+        resolve_server_audio_addr(&self.host)
+    }
+
+    pub fn control_url(&self) -> String {
+        format!("ws://{}:{DEFAULT_CONTROL_PORT}", host_for_url(&self.host))
+    }
+
+    pub fn admin_url(&self) -> String {
+        format!("http://{}:{DEFAULT_ADMIN_PORT}", host_for_url(&self.host))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientEndpointOverrides {
+    pub server_host: String,
+    pub server: SocketAddr,
+    pub control: String,
+    pub admin: Option<String>,
+    pub advanced_endpoints: bool,
+}
+
+impl Default for ClientEndpointOverrides {
+    fn default() -> Self {
+        let endpoint = ClientServerEndpoint::default();
+        Self {
+            server_host: endpoint.host.clone(),
+            server: default_audio_addr(),
+            control: endpoint.control_url(),
+            admin: None,
+            advanced_endpoints: false,
+        }
+    }
+}
+
+impl ClientEndpointOverrides {
+    pub fn normalized(
+        server_host: impl AsRef<str>,
+        server: SocketAddr,
+        control: impl AsRef<str>,
+        admin: Option<String>,
+        advanced_endpoints: bool,
+    ) -> Self {
+        let mut config = Self {
+            server_host: server_host.as_ref().trim().to_string(),
+            server,
+            control: control.as_ref().trim().to_string(),
+            admin: admin
+                .map(|admin| admin.trim().to_string())
+                .filter(|admin| !admin.is_empty()),
+            advanced_endpoints,
+        };
+        normalize_endpoint_overrides(&mut config);
+        config
+    }
+
+    pub fn endpoint(&self) -> anyhow::Result<ClientServerEndpoint> {
+        ClientServerEndpoint::new(&self.server_host)
+    }
+
+    pub fn effective_server(&self) -> anyhow::Result<SocketAddr> {
+        if self.advanced_endpoints {
+            Ok(self.server)
+        } else {
+            self.endpoint()?.resolve_audio_addr()
+        }
+    }
+
+    pub fn effective_control(&self) -> anyhow::Result<String> {
+        if self.advanced_endpoints {
+            validate_control_url(&self.control)?;
+            Ok(self.control.clone())
+        } else {
+            Ok(self.endpoint()?.control_url())
+        }
+    }
+
+    pub fn effective_admin(&self) -> anyhow::Result<String> {
+        if self.advanced_endpoints {
+            if let Some(admin) = self
+                .admin
+                .as_deref()
+                .filter(|admin| !admin.trim().is_empty())
+            {
+                return Ok(admin.trim().to_string());
+            }
+            derive_admin_url_from_control(&self.control)
+                .ok_or_else(|| anyhow!("admin URL is empty and control URL is not derivable"))
+        } else {
+            Ok(self.endpoint()?.admin_url())
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let _ = self.endpoint()?;
+        if self.advanced_endpoints {
+            validate_control_url(&self.control)?;
+            if let Some(admin) = self
+                .admin
+                .as_deref()
+                .filter(|admin| !admin.trim().is_empty())
+            {
+                validate_http_url(admin)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn sync_default_endpoints(&mut self) -> anyhow::Result<()> {
+        let endpoint = self.endpoint()?;
+        self.server = endpoint.resolve_audio_addr()?;
+        self.control = endpoint.control_url();
+        if !self.advanced_endpoints {
+            self.admin = None;
+        }
+        Ok(())
+    }
+}
+
+pub fn default_audio_addr() -> SocketAddr {
+    ([127, 0, 0, 1], DEFAULT_AUDIO_PORT).into()
+}
+
+pub fn validate_server_host(host: &str) -> Result<String, String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("server host cannot be empty".to_string());
+    }
+    if host.contains("://") {
+        return Err("server host must not include a scheme".to_string());
+    }
+    if host.contains('/') || host.contains('?') || host.contains('#') || host.contains('@') {
+        return Err(
+            "server host must not include a path, query, fragment, or userinfo".to_string(),
+        );
+    }
+    if host.chars().any(char::is_whitespace) {
+        return Err("server host must not contain whitespace".to_string());
+    }
+    if host.starts_with('[') || host.ends_with(']') {
+        if !(host.starts_with('[') && host.ends_with(']')) {
+            return Err("IPv6 server host brackets are not balanced".to_string());
+        }
+        let inner = &host[1..host.len() - 1];
+        inner
+            .parse::<Ipv6Addr>()
+            .map_err(|_| "bracketed server host must be an IPv6 address".to_string())?;
+        return Ok(inner.to_string());
+    }
+    if let Some((name, port)) = host.rsplit_once(':') {
+        if !name.contains(':') && !name.is_empty() && port.parse::<u16>().is_ok() {
+            return Err("server host must not include a port; use Advanced endpoints".to_string());
+        }
+    }
+    if host.contains(':') {
+        host.parse::<Ipv6Addr>()
+            .map_err(|_| "server host contains ':' but is not a valid IPv6 address".to_string())?;
+    }
+    Ok(host.to_string())
+}
+
+pub fn resolve_server_audio_addr(host: &str) -> anyhow::Result<SocketAddr> {
+    let host = validate_server_host(host).map_err(anyhow::Error::msg)?;
+    (host.as_str(), DEFAULT_AUDIO_PORT)
+        .to_socket_addrs()
+        .with_context(|| format!("resolve server host `{host}`"))?
+        .next()
+        .ok_or_else(|| anyhow!("server host `{host}` did not resolve"))
+}
+
+pub fn host_for_url(host: &str) -> String {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+pub fn host_for_socket(host: &str) -> String {
+    host_for_url(host)
+}
+
+pub fn derive_server_host(
+    server: SocketAddr,
+    control: Option<&str>,
+    admin: Option<&str>,
+) -> Option<String> {
+    let server_host = server.ip().to_string();
+    let server_default = server.port() == DEFAULT_AUDIO_PORT;
+    let control_host = control.and_then(|control| parse_url_host_port(control, "ws"));
+    let admin_host = admin.and_then(|admin| parse_url_host_port(admin, "http"));
+    if server_default
+        && control_host
+            .as_ref()
+            .is_none_or(|(host, port)| *port == DEFAULT_CONTROL_PORT && host == &server_host)
+        && admin_host
+            .as_ref()
+            .is_none_or(|(host, port)| *port == DEFAULT_ADMIN_PORT && host == &server_host)
+    {
+        return Some(server_host);
+    }
+    None
+}
+
+pub fn endpoint_fields_are_default(server_host: &str, server: SocketAddr, control: &str) -> bool {
+    let Ok(endpoint) = ClientServerEndpoint::new(server_host) else {
+        return false;
+    };
+    server.port() == DEFAULT_AUDIO_PORT
+        && server.ip().to_string() == endpoint.host
+        && control.trim() == endpoint.control_url()
+}
+
+pub fn normalize_endpoint_overrides(config: &mut ClientEndpointOverrides) {
+    let server_host_was_empty = config.server_host.trim().is_empty();
+    config.control = config.control.trim().to_string();
+    config.admin = config
+        .admin
+        .take()
+        .map(|admin| admin.trim().to_string())
+        .filter(|admin| !admin.is_empty());
+
+    if server_host_was_empty {
+        config.server_host = derive_server_host(
+            config.server,
+            Some(config.control.as_str()),
+            config.admin.as_deref(),
+        )
+        .unwrap_or_else(|| DEFAULT_SERVER_HOST.to_string());
+    }
+    if let Ok(host) = validate_server_host(&config.server_host) {
+        config.server_host = host;
+    }
+    let matches_default_ports =
+        endpoint_fields_are_default(&config.server_host, config.server, config.control.as_str());
+    let global_default_endpoints = config.server == default_audio_addr()
+        && config.control == format!("ws://{DEFAULT_SERVER_HOST}:{DEFAULT_CONTROL_PORT}");
+    if !config.advanced_endpoints {
+        if server_host_was_empty
+            || (config.server_host == DEFAULT_SERVER_HOST && !global_default_endpoints)
+        {
+            if let Some(host) = derive_server_host(
+                config.server,
+                Some(config.control.as_str()),
+                config.admin.as_deref(),
+            ) {
+                config.server_host = host;
+            } else if !matches_default_ports && !global_default_endpoints {
+                config.advanced_endpoints = true;
+            }
+        } else if !matches_default_ports && !global_default_endpoints {
+            config.advanced_endpoints = true;
+        }
+    }
+    if !config.advanced_endpoints {
+        if let Ok(endpoint) = ClientServerEndpoint::new(&config.server_host) {
+            if let Ok(server) = endpoint.resolve_audio_addr() {
+                config.server = server;
+            }
+            config.control = endpoint.control_url();
+            config.admin = None;
+        }
+    }
+}
+
+pub fn validate_control_url(control: &str) -> anyhow::Result<()> {
+    let control = control.trim();
+    if control.is_empty() {
+        bail!("control URL cannot be empty");
+    }
+    if !(control.starts_with("ws://") || control.starts_with("wss://")) {
+        bail!("control URL must start with ws:// or wss://");
+    }
+    Ok(())
+}
+
+pub fn validate_http_url(url: &str) -> anyhow::Result<()> {
+    let url = url.trim();
+    if url.is_empty() {
+        bail!("URL cannot be empty");
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        bail!("URL must start with http:// or https://");
+    }
+    Ok(())
+}
+
+pub fn derive_admin_url_from_control(control: &str) -> Option<String> {
+    let (host, _) = parse_url_host_port(control, "ws")?;
+    Some(format!(
+        "http://{}:{DEFAULT_ADMIN_PORT}",
+        host_for_url(&host)
+    ))
+}
+
+fn parse_url_host_port(url: &str, scheme_prefix: &str) -> Option<(String, u16)> {
+    let url = url.trim();
+    let scheme = format!("{scheme_prefix}://");
+    let rest = if let Some(rest) = url.strip_prefix(&scheme) {
+        rest
+    } else {
+        let secure_scheme = format!("{scheme_prefix}s://");
+        url.strip_prefix(&secure_scheme)?
+    };
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|authority| !authority.is_empty())?;
+    if authority.starts_with('[') {
+        let end = authority.find(']')?;
+        let host = &authority[1..end];
+        let port = authority
+            .get(end + 1..)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .and_then(|port| port.parse::<u16>().ok())
+            .unwrap_or_else(|| {
+                if scheme_prefix == "ws" {
+                    DEFAULT_CONTROL_PORT
+                } else {
+                    DEFAULT_ADMIN_PORT
+                }
+            });
+        return Some((host.to_string(), port));
+    }
+    let (host, port) = authority.rsplit_once(':').map_or_else(
+        || {
+            (
+                authority,
+                if scheme_prefix == "ws" {
+                    DEFAULT_CONTROL_PORT
+                } else {
+                    DEFAULT_ADMIN_PORT
+                },
+            )
+        },
+        |(host, port)| (host, port.parse::<u16>().ok().unwrap_or(0)),
+    );
+    if host.is_empty() || port == 0 {
+        None
+    } else {
+        Some((host.to_string(), port))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ClientConnectionEvent {
     Connected,
     Disconnected,
@@ -75,6 +451,14 @@ pub struct ClientConfig {
     pub lockout: ClientLockoutPolicy,
     pub stereo: StereoConfig,
     pub esp32_audio: Esp32AudioConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClientTransmitSnapshot {
+    pub user_id: u16,
+    pub targets: Vec<AudioTarget>,
+    pub codec: Codec,
+    pub opus_profile: OpusProfile,
 }
 
 impl ClientConfig {
@@ -150,6 +534,22 @@ impl ClientConfig {
             AudioTarget::Mixed => (2, 0),
         });
         targets
+    }
+
+    pub fn active_transmit_snapshot(&self) -> Option<ClientTransmitSnapshot> {
+        if self.user_id == 0 {
+            return None;
+        }
+        let targets = self.active_tx_targets();
+        if targets.is_empty() {
+            return None;
+        }
+        Some(ClientTransmitSnapshot {
+            user_id: self.user_id,
+            targets,
+            codec: self.codec,
+            opus_profile: self.opus_profile,
+        })
     }
 
     pub fn button_known(&self, button_id: &str) -> bool {
@@ -303,7 +703,7 @@ impl AudioSettings {
 
 pub fn clamp_runtime_gain(gain: f32) -> f32 {
     if gain.is_finite() {
-        gain.clamp(0.0, 8.0)
+        gain.clamp(0.0, 2.0)
     } else {
         1.0
     }
@@ -770,7 +1170,7 @@ pub async fn run_control_connection(
             let snapshot = config.lock().unwrap().clone();
             let hello = ControlMessage::Hello {
                 user_id: snapshot.user_id,
-                requested_user_id: Some(snapshot.user_id),
+                requested_user_id: (snapshot.user_id > 0).then_some(snapshot.user_id),
                 client_uid: snapshot.client_uid.clone(),
                 codecs: supported_codecs(),
                 buttons: snapshot.advertised_buttons,
@@ -1155,6 +1555,41 @@ pub fn format_button_ids(buttons: &[ButtonId]) -> String {
     }
 }
 
+pub fn default_button_capabilities(count: u16) -> Vec<ButtonCapability> {
+    (1..=count.min(MAX_CLIENT_BUTTON_COUNT))
+        .map(|id| ButtonCapability {
+            id: id.to_string(),
+            label: format!("Button {id}"),
+        })
+        .collect()
+}
+
+pub fn merge_button_capabilities(
+    mut defaults: Vec<ButtonCapability>,
+    overrides: Vec<ButtonCapability>,
+) -> Vec<ButtonCapability> {
+    for override_button in overrides {
+        if let Some(existing) = defaults
+            .iter_mut()
+            .find(|button| button.id.trim() == override_button.id.trim())
+        {
+            *existing = override_button;
+        } else {
+            defaults.push(override_button);
+        }
+    }
+    normalize_button_capabilities(defaults)
+}
+
+fn compare_button_ids(left: &str, right: &str) -> std::cmp::Ordering {
+    match (left.parse::<u16>(), right.parse::<u16>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Err(_)) => left.cmp(right),
+    }
+}
+
 pub fn format_codec(codec: Codec) -> &'static str {
     match codec {
         Codec::Pcm16 => "pcm16",
@@ -1175,7 +1610,7 @@ pub fn normalize_button_capabilities(mut buttons: Vec<ButtonCapability>) -> Vec<
             button.label = button.label.trim().to_string();
         }
     }
-    buttons.sort_by(|left, right| left.id.cmp(&right.id));
+    buttons.sort_by(|left, right| compare_button_ids(&left.id, &right.id));
     buttons.dedup_by(|left, right| left.id == right.id);
     buttons
 }
@@ -1436,9 +1871,336 @@ pub struct PlaybackStats {
     pub dropped_samples: u64,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct ClientTelemetryCounters {
+    inner: Arc<ClientTelemetryCountersInner>,
+}
+
+#[derive(Debug, Default)]
+struct ClientTelemetryCountersInner {
+    udp_rx_packets: AtomicU64,
+    malformed_packets: AtomicU64,
+    decode_errors: AtomicU64,
+    codec_drops: AtomicU64,
+    payload_decode_errors: AtomicU64,
+    packet_encode_errors: AtomicU64,
+    tx_packets: AtomicU64,
+    tx_send_failures: AtomicU64,
+    tx_queue_drops: AtomicU64,
+}
+
+impl ClientTelemetryCounters {
+    pub fn record_udp_rx_packet(&self) {
+        self.inner.udp_rx_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_malformed_packet(&self) {
+        self.inner.malformed_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_decode_error(&self) {
+        self.inner.decode_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_codec_drop(&self) {
+        self.inner.codec_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_payload_decode_error(&self) {
+        self.inner
+            .payload_decode_errors
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_packet_encode_error(&self) {
+        self.inner
+            .packet_encode_errors
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tx_packet(&self) {
+        self.inner.tx_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tx_send_failure(&self) {
+        self.inner.tx_send_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_tx_queue_drop(&self) {
+        self.inner.tx_queue_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> common::ClientTelemetryTransportStatus {
+        common::ClientTelemetryTransportStatus {
+            udp_rx_packets: self.inner.udp_rx_packets.load(Ordering::Relaxed),
+            malformed_packets: self.inner.malformed_packets.load(Ordering::Relaxed),
+            decode_errors: self.inner.decode_errors.load(Ordering::Relaxed),
+            codec_drops: self.inner.codec_drops.load(Ordering::Relaxed),
+            payload_decode_errors: self.inner.payload_decode_errors.load(Ordering::Relaxed),
+            packet_encode_errors: self.inner.packet_encode_errors.load(Ordering::Relaxed),
+            tx_packets: self.inner.tx_packets.load(Ordering::Relaxed),
+            tx_send_failures: self.inner.tx_send_failures.load(Ordering::Relaxed),
+            tx_queue_drops: self.inner.tx_queue_drops.load(Ordering::Relaxed),
+        }
+    }
+}
+
+pub fn playback_telemetry_from_stats(
+    stats: PlaybackStats,
+) -> common::ClientTelemetryPlaybackStatus {
+    common::ClientTelemetryPlaybackStatus {
+        available_samples: stats.available_samples as u64,
+        capacity_samples: stats.capacity_samples as u64,
+        prebuffer_samples: stats.prebuffer_samples as u64,
+        queue_depth: stats.available_samples as u64,
+        channels: stats.channels.try_into().unwrap_or(u16::MAX),
+        started: stats.started,
+        underflows: stats.underflows,
+        overflows: stats.overflows,
+        dropped_samples: stats.dropped_samples,
+    }
+}
+
+pub fn capture_health_with_client_telemetry(
+    mut health: common::CaptureHealthStatus,
+    client_kind: impl Into<String>,
+    playback: PlaybackStats,
+    transport: common::ClientTelemetryTransportStatus,
+    phase: impl Into<String>,
+    last_error: Option<String>,
+) -> common::CaptureHealthStatus {
+    let client_kind = client_kind.into();
+    let phase = phase.into();
+    let playback_telemetry = playback_telemetry_from_stats(playback);
+    health.runtime = Some(common::ClientTelemetryRuntimeStatus {
+        client_kind,
+        phase,
+        last_error,
+    });
+    health.playback_queue_depth = playback_telemetry
+        .queue_depth
+        .try_into()
+        .unwrap_or(u16::MAX);
+    health.playback_underflows = playback_telemetry.underflows.try_into().unwrap_or(u32::MAX);
+    health.playback_overflows = playback_telemetry.overflows.try_into().unwrap_or(u32::MAX);
+    health.playback = Some(playback_telemetry);
+    health.client_transport = Some(transport);
+
+    if health.audio.is_none() {
+        health.audio = health
+            .desktop
+            .as_ref()
+            .map(desktop_capture_audio_telemetry)
+            .or_else(|| {
+                Some(common::ClientTelemetryAudioStatus {
+                    backend: health
+                        .codec_config
+                        .as_ref()
+                        .map(|config| config.audio_backend.clone())
+                        .filter(|backend| !backend.is_empty())
+                        .unwrap_or_else(|| health.adc_input.clone()),
+                    input_device: None,
+                    output_device: None,
+                    sample_format: String::new(),
+                    sample_rate_hz: health
+                        .codec_config
+                        .as_ref()
+                        .map_or(0, |config| config.hardware_sample_rate_hz),
+                    channels: health
+                        .codec_config
+                        .as_ref()
+                        .map_or(0, |config| u16::from(config.hardware_channels)),
+                    channel_mode: health.capture_channel.clone(),
+                    mic_gain: Some(f32::from(health.software_gain_percent) / 100.0),
+                    speaker_gain: None,
+                    input: health.selected.clone(),
+                    pre_gain: health.selected.clone(),
+                    post_gain: health.selected.clone(),
+                    pre_gain_clipped_samples: health.raw_clipped_samples,
+                    post_gain_clipped_samples: health.software_clipped_samples,
+                    dropped_frames: 0,
+                })
+            });
+    }
+
+    health
+}
+
+pub fn basic_client_telemetry(
+    client_kind: impl Into<String>,
+    playback: PlaybackStats,
+    transport: common::ClientTelemetryTransportStatus,
+) -> common::CaptureHealthStatus {
+    let client_kind = client_kind.into();
+    capture_health_with_client_telemetry(
+        common::CaptureHealthStatus {
+            adc_input: client_kind.clone(),
+            capture_channel: "mono".to_string(),
+            ..common::CaptureHealthStatus::default()
+        },
+        client_kind,
+        playback,
+        transport,
+        "running",
+        None,
+    )
+}
+
+fn desktop_capture_audio_telemetry(
+    desktop: &common::DesktopCaptureHealthStatus,
+) -> common::ClientTelemetryAudioStatus {
+    common::ClientTelemetryAudioStatus {
+        backend: desktop.backend.clone(),
+        input_device: Some(desktop.device.clone()).filter(|device| !device.is_empty()),
+        output_device: None,
+        sample_format: desktop.sample_format.clone(),
+        sample_rate_hz: desktop.sample_rate_hz,
+        channels: desktop.channels,
+        channel_mode: desktop.channel_mode.clone(),
+        mic_gain: Some(desktop.mic_gain),
+        speaker_gain: None,
+        input: desktop.post_gain.clone(),
+        pre_gain: desktop.pre_gain.clone(),
+        post_gain: desktop.post_gain.clone(),
+        pre_gain_clipped_samples: desktop.pre_gain_clipped_samples,
+        post_gain_clipped_samples: desktop.post_gain_clipped_samples,
+        dropped_frames: desktop.dropped_frames,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_button_capabilities_are_numeric_and_bounded() {
+        let buttons = default_button_capabilities(DEFAULT_CLIENT_BUTTON_COUNT);
+        assert_eq!(buttons.len(), 6);
+        assert_eq!(buttons[0].id, "1");
+        assert_eq!(buttons[5].label, "Button 6");
+
+        let capped = default_button_capabilities(MAX_CLIENT_BUTTON_COUNT + 5);
+        assert_eq!(capped.len(), usize::from(MAX_CLIENT_BUTTON_COUNT));
+        assert_eq!(
+            capped.last().unwrap().id,
+            MAX_CLIENT_BUTTON_COUNT.to_string()
+        );
+    }
+
+    #[test]
+    fn server_endpoint_derives_default_addresses() {
+        let endpoint = ClientServerEndpoint::new("192.168.12.84").unwrap();
+        assert_eq!(endpoint.audio_addr_string(), "192.168.12.84:40000");
+        assert_eq!(endpoint.control_url(), "ws://192.168.12.84:40001");
+        assert_eq!(endpoint.admin_url(), "http://192.168.12.84:40002");
+    }
+
+    #[test]
+    fn server_endpoint_formats_ipv6_for_urls_and_sockets() {
+        let endpoint = ClientServerEndpoint::new("::1").unwrap();
+        assert_eq!(endpoint.host, "::1");
+        assert_eq!(endpoint.audio_addr_string(), "[::1]:40000");
+        assert_eq!(endpoint.control_url(), "ws://[::1]:40001");
+
+        let bracketed = ClientServerEndpoint::new("[::1]").unwrap();
+        assert_eq!(bracketed.host, "::1");
+    }
+
+    #[test]
+    fn server_host_validation_rejects_non_host_inputs() {
+        for host in [
+            "",
+            "http://127.0.0.1",
+            "127.0.0.1:40000",
+            "server.local/path",
+            "server local",
+            "[::1]:40000",
+        ] {
+            assert!(validate_server_host(host).is_err(), "{host} should fail");
+        }
+        assert_eq!(
+            validate_server_host("server.local").unwrap(),
+            "server.local"
+        );
+        assert_eq!(validate_server_host("localhost").unwrap(), "localhost");
+    }
+
+    #[test]
+    fn endpoint_overrides_migrate_legacy_default_ports_to_host() {
+        let mut endpoints = ClientEndpointOverrides::normalized(
+            "",
+            "192.168.1.20:40000".parse().unwrap(),
+            "ws://192.168.1.20:40001",
+            Some("http://192.168.1.20:40002".to_string()),
+            false,
+        );
+        assert_eq!(endpoints.server_host, "192.168.1.20");
+        assert!(!endpoints.advanced_endpoints);
+        assert_eq!(endpoints.control, "ws://192.168.1.20:40001");
+        assert_eq!(endpoints.admin, None);
+
+        endpoints.server = "192.168.1.20:41000".parse().unwrap();
+        endpoints.control = "ws://192.168.1.20:41001".to_string();
+        endpoints.advanced_endpoints = false;
+        normalize_endpoint_overrides(&mut endpoints);
+        assert!(endpoints.advanced_endpoints);
+    }
+
+    #[test]
+    fn telemetry_builder_maps_playback_and_transport_counters() {
+        let counters = ClientTelemetryCounters::default();
+        counters.record_udp_rx_packet();
+        counters.record_malformed_packet();
+        counters.record_decode_error();
+        counters.record_payload_decode_error();
+        counters.record_packet_encode_error();
+        counters.record_tx_packet();
+        counters.record_tx_send_failure();
+        counters.record_tx_queue_drop();
+
+        let playback = PlaybackStats {
+            available_samples: 120,
+            capacity_samples: 960,
+            prebuffer_samples: 240,
+            channels: 2,
+            started: true,
+            underflows: 3,
+            overflows: 4,
+            dropped_samples: 5,
+        };
+        let health = basic_client_telemetry("pi", playback, counters.snapshot());
+
+        assert_eq!(health.runtime.unwrap().client_kind, "pi");
+        let playback = health.playback.unwrap();
+        assert_eq!(playback.available_samples, 120);
+        assert_eq!(playback.capacity_samples, 960);
+        assert_eq!(playback.underflows, 3);
+        assert_eq!(health.playback_queue_depth, 120);
+        assert_eq!(health.playback_underflows, 3);
+        let transport = health.client_transport.unwrap();
+        assert_eq!(transport.udp_rx_packets, 1);
+        assert_eq!(transport.malformed_packets, 1);
+        assert_eq!(transport.decode_errors, 1);
+        assert_eq!(transport.payload_decode_errors, 1);
+        assert_eq!(transport.packet_encode_errors, 1);
+        assert_eq!(transport.tx_packets, 1);
+        assert_eq!(transport.tx_send_failures, 1);
+        assert_eq!(transport.tx_queue_drops, 1);
+    }
+
+    #[test]
+    fn merge_button_capabilities_overrides_default_labels() {
+        let buttons = merge_button_capabilities(
+            default_button_capabilities(12),
+            vec![ButtonCapability {
+                id: "2".to_string(),
+                label: "Director".to_string(),
+            }],
+        );
+        assert_eq!(buttons[1].id, "2");
+        assert_eq!(buttons[1].label, "Director");
+        assert_eq!(buttons[9].id, "10");
+    }
 
     #[test]
     fn active_buttons_union_with_default_ptt_route() {
@@ -1462,6 +2224,7 @@ mod tests {
             buttons: vec![TalkButtonConfig {
                 id: "director".to_string(),
                 label: "Director".to_string(),
+                color: None,
                 mode: common::TalkButtonMode::Momentary,
                 actions: vec![TalkButtonAction::Transmit {
                     channels: vec![2, 3],
@@ -1499,6 +2262,49 @@ mod tests {
         assert_eq!(config.active_tx_channels(), vec![2, 3]);
         config.talk_mode = TalkMode::Open;
         assert_eq!(config.active_tx_channels(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn transmit_snapshot_uses_enrolled_user_id_and_rejects_zero() {
+        let mut config = ClientConfig {
+            user_id: 0,
+            client_uid: "test-client".to_string(),
+            role: ClientRole::Client,
+            name: String::new(),
+            listen: vec![1],
+            tx: vec![1],
+            codec: Codec::Pcm16,
+            opus_profile: OpusProfile::default(),
+            talk_mode: TalkMode::Ptt,
+            last_non_muted_talk_mode: TalkMode::Ptt,
+            regular_talk_active: true,
+            priority: false,
+            priority_channels: Vec::new(),
+            emergency: None,
+            vol: HashMap::new(),
+            talker_vol: HashMap::new(),
+            buttons: Vec::new(),
+            active_buttons: Vec::new(),
+            active_direct_calls: Vec::new(),
+            last_direct_caller: None,
+            direct_call_history: Vec::new(),
+            active_alerts: Vec::new(),
+            recent_alerts: Vec::new(),
+            advertised_buttons: Vec::new(),
+            ifb: IfbConfig::default(),
+            lockout: ClientLockoutPolicy::default(),
+            stereo: StereoConfig::default(),
+            esp32_audio: Esp32AudioConfig::default(),
+            processing: ProcessingConfig::default(),
+            channel_rosters: Vec::new(),
+        };
+
+        assert!(config.active_transmit_snapshot().is_none());
+
+        config.user_id = 7;
+        let snapshot = config.active_transmit_snapshot().unwrap();
+        assert_eq!(snapshot.user_id, 7);
+        assert_eq!(snapshot.targets, vec![AudioTarget::Channel(1)]);
     }
 
     #[test]
@@ -1543,6 +2349,7 @@ mod tests {
                 client_uid: "test-client".to_string(),
                 channels: vec![ChannelPresenceRoster {
                     channel_id: 7,
+                    name: Some("Production PL".to_string()),
                     members: vec![common::ChannelPresenceMember {
                         user_id: 2,
                         name: "Director".to_string(),
@@ -1555,6 +2362,10 @@ mod tests {
 
         let config = config.lock().unwrap();
         assert_eq!(config.channel_rosters[0].channel_id, 7);
+        assert_eq!(
+            config.channel_rosters[0].name.as_deref(),
+            Some("Production PL")
+        );
         assert!(config.channel_rosters[0].members[0].transmitting);
     }
 
@@ -1691,7 +2502,7 @@ mod tests {
         let settings = AudioSettings::new(f32::NAN, 99.0);
 
         assert_eq!(settings.mic_gain(), 1.0);
-        assert_eq!(settings.speaker_gain(), 8.0);
+        assert_eq!(settings.speaker_gain(), 2.0);
     }
 
     #[test]

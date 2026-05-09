@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve Intercom Suite.
+Thanks for helping improve RedLine.
 
 Before opening a pull request:
 

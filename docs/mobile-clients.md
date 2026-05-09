@@ -1,7 +1,7 @@
 # Mobile Tauri Clients
 
 `clients/app` contains the first iOS and Android Tauri 2 mobile shell for the
-Intercom Suite client. The mobile app reuses the same Rust client runtime,
+RedLine client. The mobile app reuses the same Rust client runtime,
 control protocol, UDP audio transport, codecs, local UI, and server-owned
 configuration model as the desktop app.
 
@@ -11,20 +11,25 @@ On iOS and Android, Tauri calls the Rust mobile entry point exported from the
 `app` crate. The mobile shell opens `tauri-assets/mobile.html` as the setup
 page, lets the operator enter the server/control addresses and startup defaults,
 then starts the existing client runtime on a background Rust thread. Once the
-runtime is running, the shell navigates to the same local phone-shaped client UI
-served by the desktop runtime. That local UI is the main client surface on
-mobile too; the setup page remains reachable through the mobile-only `Setup`
-button in the local UI or the `Controls` button on the setup page.
+runtime is running, the shell navigates to the same phone-shaped client UI used
+by desktop, but as bundled Tauri assets backed by Tauri IPC commands instead of
+the desktop HTTP local UI server. That UI is the main client surface on mobile;
+the setup page remains reachable through the mobile-only `Setup` button in the
+local UI or the `Controls` button on the setup page.
 
 The mobile settings file is stored in the platform app config directory as
-`intercom-app-settings.json`. The settings page forces local UI on because the
-local UI is the actual mobile control surface.
+`intercom-app-settings.json`. The settings page disables the desktop HTTP local
+UI because the mobile control surface is bundled in the Tauri app and talks to
+Rust through IPC.
 
 On iOS, the setup page also keeps a saved/recent server picker. `Scan` browses
 the LAN for Bonjour `_intercom-suite._tcp.local` services and fills the audio,
 control, and admin addresses from the server TXT metadata. Manual audio/control
 entry remains the fallback when local-network permission is denied or Bonjour is
 not available on the LAN.
+
+Visual references for the mobile setup page and packaged Tauri operator console
+are in [Client UI Screenshots](client-ui-screenshots.md).
 
 ## Permissions
 
@@ -158,9 +163,12 @@ APPLE_DEVELOPMENT_TEAM=TEAMID ./app/scripts/ios-device-dev.sh
 
 `ios-device-build.sh` requires the `aarch64-apple-ios` Rust target, clears stale
 Tauri Apple build output, and builds a development-signed generic device
-bundle. It requires the iPhone to already be known to your Apple development
-team or provisioning will fail before an app can be produced.
-`ios-device-dev.sh` is the first-run physical-device path: it detects only
+bundle. It defaults to an optimized release build for physical-device
+performance testing; set `IOS_BUILD_PROFILE=debug` only when you specifically
+need a debug build. It requires the iPhone to already be known to your Apple
+development team or provisioning will fail before an app can be produced.
+`ios-device-dev.sh` is the first-run physical-device path and stays on Tauri's
+debug/dev loop: it detects only
 physical iPhone/iPad/iPod entries from `xcrun xctrace list devices`, rejects
 Mac and simulator entries, then runs `cargo tauri ios dev <device>
 --features=native` so Xcode targets that device directly. It also injects
@@ -187,7 +195,7 @@ Android builds require a connected device/emulator and accepted SDK licenses.
 The server advertises Bonjour/mDNS by default on the control port:
 
 ```sh
-cargo run -p server -- --advertise-name "Studio Intercom"
+cargo run -p server -- --advertise-name "Studio RedLine"
 cargo run -p server -- --disable-discovery
 ```
 

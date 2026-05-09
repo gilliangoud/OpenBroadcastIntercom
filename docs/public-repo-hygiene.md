@@ -8,7 +8,8 @@ caches, so the old `.git` object database must not be pushed.
 
 - Rust/C source, Cargo manifests, docs, scripts, schemas, app icons, and Tauri
   metadata needed to regenerate mobile projects.
-- Curated Git LFS model assets listed in `THIRD_PARTY_NOTICES.md`.
+- External Whisper model metadata in `intercom-models/manifest.json`.
+- Curated non-Whisper Git LFS model assets listed in `THIRD_PARTY_NOTICES.md`.
 - Sanitized example config files.
 
 ## Exclude
@@ -18,7 +19,7 @@ caches, so the old `.git` object database must not be pushed.
   Finder duplicates, and local runtime state JSON.
 - Apple signing assets, provisioning profiles, certificates, private keys, and
   hard-coded team identifiers.
-- Uncurated large model files.
+- Downloaded Whisper `.bin` files and uncurated large model files.
 
 ## Pre-Publish Checklist
 
@@ -30,10 +31,9 @@ cargo test -p app
 cargo test -p server --no-default-features
 tools/check-version-sync.sh
 python3 -m unittest tools/test_release_version.py
+python3 tools/check-model-manifest.py
 tools/check-generated-artifacts.sh
 tools/check-public-secrets.sh
-git lfs fsck
 git status --short
 git ls-files
-git lfs ls-files
 ```

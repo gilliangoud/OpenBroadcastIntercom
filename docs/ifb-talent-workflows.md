@@ -1,7 +1,7 @@
 # IFB And Talent Workflow Design
 
 This document is the workflow design output for GOU-69. It turns the current
-Intercom Suite routing primitives into practical event templates for talent,
+RedLine routing primitives into practical event templates for talent,
 referees, director, producer, PA, and program audio.
 
 ## Current Primitives
@@ -35,21 +35,22 @@ across presets and templates.
 
 | Channel | Name | Purpose |
 | --- | --- | --- |
+| `0` | open | Default open intercom channel for newly enrolled operators. |
 | `1` | Program | Clean program audio feed into talent IFB. Usually from a bridge input. |
 | `2` | Production PL | Director, producer, technical crew. |
-| `3` | Referee PL | Referee team regular intercom. |
+| `3` | Referee PL | Referee team regular RedLine talkback. |
 | `4` | Director IFB | Director interrupt to talent/referees. |
 | `5` | Producer Cue | Producer-only cueing to talent or floor. |
 | `6` | PA | Route to PA bridge output. Treat as dangerous and lock down. |
 | `7` | Utility | Spare channel for venue, medic, replay, or floor manager. |
 
-Emergency is intentionally not part of the default channel plan. Intercom Suite
+Emergency is intentionally not part of the default channel plan. RedLine
 has a native emergency override path that bypasses normal listen membership, so
 emergency should not be modeled as just another operator channel by default.
 
 Channel `1` should be a clean program feed. If the director microphone is mixed
-into program before it enters Intercom Suite, program-minus-director cannot be
-guaranteed inside Intercom Suite. Feed a clean program source whenever possible.
+into program before it enters RedLine, program-minus-director cannot be
+guaranteed inside RedLine. Feed a clean program source whenever possible.
 
 ## Role Templates
 
@@ -69,7 +70,7 @@ Recommended config:
   - `producer`: momentary transmit to channel `5`
   - `pa`: guarded/latching transmit to channel `6`
   - `reply`: direct reply to last caller once the client UI exposes this cleanly
-- `vol`: program low enough to avoid masking intercom, for example
+- `vol`: program low enough to avoid masking RedLine talkback, for example
   `{"1":0.55,"2":1.0,"3":0.8,"5":0.8}`
 - `lockout`: allow local volumes, lock routing, IFB, buttons, codec, and PA
   route controls during a show.
@@ -139,7 +140,7 @@ regular PTT should remain referee-team only so muscle memory is predictable.
 
 ### Program Bridge Input
 
-Purpose: inject clean program audio into Intercom Suite.
+Purpose: inject clean program audio into RedLine.
 
 Recommended config:
 
@@ -162,7 +163,7 @@ separate `output` routes for PA, production monitor, recorder, or stream feeds.
 
 ### PA Bridge Output
 
-Purpose: route selected intercom audio to a physical PA, vMix input, virtual
+Purpose: route selected RedLine audio to a physical PA, vMix input, virtual
 audio cable, or venue mixer.
 
 Recommended config:
@@ -216,7 +217,7 @@ The reliable implementation is source hygiene:
 - Talent listens to channel `1` as program and channel `4` as interrupt.
 
 If program audio already contains director talk before it reaches the server,
-Intercom Suite cannot remove it without a later source-separation feature.
+RedLine cannot remove it without a later source-separation feature.
 
 ### Reply-To-Director
 

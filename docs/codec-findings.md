@@ -1,7 +1,7 @@
 # Codec Findings
 
 This document records the practical codec and audio-hardware findings from the
-prototype work so far. It covers Intercom Suite edge codecs, the server mixer
+prototype work so far. It covers RedLine edge codecs, the server mixer
 domain, Opus profiles, and the Ai-Thinker ESP32 Audio Kit V2.2 / ES8388 path.
 
 ## Current Architecture
@@ -92,7 +92,7 @@ boosted. Good starting points are:
 
 On macOS, build the server with `--features macos-accelerated` to enable
 whisper.cpp Metal support through `whisper-rs` for built-in recording and live
-transcription. This does not change the real-time intercom mixer path; it only
+transcription. This does not change the real-time RedLine mixer path; it only
 accelerates Whisper jobs. DeepFilterNet exposes Apple backend preferences in the
 config/status model, but the current safe runtime is Tract.
 
@@ -105,7 +105,7 @@ use 2x the mono bitrate.
 | Profile | Rate | Mono bitrate | Complexity | Bandwidth | Intended use |
 | --- | ---: | ---: | ---: | --- | --- |
 | `speech-16-low` / `speech_16_low` | 16 kHz | 20 kbps | 3 | wideband | low bandwidth speech |
-| `speech-24-standard` / `speech_24_standard` | 24 kHz | 32 kbps | 5 | superwideband | default intercom speech |
+| `speech-24-standard` / `speech_24_standard` | 24 kHz | 32 kbps | 5 | superwideband | default RedLine speech |
 | `speech-48-high` / `speech_48_high` | 48 kHz | 56 kbps | 8 | fullband | high quality speech |
 | `music-48` / `music_48` | 48 kHz | 80 kbps | 8 | fullband | program/music-like feeds |
 

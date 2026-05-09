@@ -3,65 +3,72 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Intercom Suite Settings</title>
-    <link rel="stylesheet" href="settings.css" />
+    <title>RedLine Setup</title>
+    <link rel="stylesheet" href="mobile.css" />
   </head>
   <body>
-    <main>
-      <header>
-        <div>
-          <p class="eyebrow">Intercom Suite</p>
-          <h1>App Settings</h1>
+    <main class="phone-shell">
+      <header class="topbar">
+        <div class="title-block">
+          <div class="title-row">
+            <img class="brand-logo" src="branding/redline-logo.png" alt="RedLine" />
+            <button id="close-config" type="button" disabled>Close</button>
+          </div>
+          <span id="status" class="tag offline">stopped</span>
         </div>
-        <button id="reload" type="button">Reload</button>
       </header>
+      <p id="message" class="hint top-message" aria-live="polite"></p>
 
-      <p id="message" class="muted">Changes are saved to the app settings file and apply the next time the client starts.</p>
-
-      <form id="settings-form">
-        <section>
-          <h2>Connection</h2>
-          <label>Server UDP Address<input id="server" autocomplete="off" /></label>
-          <label>Control WebSocket URL<input id="control" autocomplete="off" /></label>
-          <label>User ID<input id="user_id" type="number" min="1" max="65535" /></label>
-        </section>
-
-        <section>
-          <h2>Routing</h2>
-          <label>Default TX Channel<input id="tx_channel" type="number" min="1" max="65535" /></label>
-          <label>Default Listen Channel<input id="listen_channel" type="number" min="1" max="65535" /></label>
-          <label>Advertised Buttons<input id="buttons" placeholder="director=Director,pa=PA" /></label>
-          <label>Button Hotkeys<input id="button_keys" placeholder="director=d" /></label>
-        </section>
-
-        <section>
-          <h2>Audio</h2>
-          <label>Codec<select id="codec"><option value="pcm16">PCM Low CPU (16 kHz)</option><option value="pcm24">PCM Balanced (24 kHz)</option><option value="pcm48">PCM High Quality (48 kHz)</option><option value="opus">Opus</option></select></label>
-          <label>Opus Profile<select id="opus_profile"><option value="speech_16_low">Opus Speech 16 Low</option><option value="speech_24_standard">Opus Speech 24 Standard</option><option value="speech_48_high">Opus Speech 48 High</option><option value="music_48">Opus Music 48</option></select></label>
-          <label>Mic Gain<input id="mic_gain" type="number" min="0" max="8" step="0.05" /></label>
-          <label class="check"><input id="input_transient_suppression" type="checkbox" /> Keyboard transient suppression</label>
-          <label>Speaker Gain<input id="speaker_gain" type="number" min="0" max="8" step="0.05" /></label>
-          <label>Jitter Buffer MS<input id="jitter_ms" type="number" min="0" max="250" step="1" /></label>
-          <label>Input Backend<select id="input_backend"><option value="auto">Auto</option><option value="raw">Raw</option><option value="voice_processing">macOS Voice Processing</option></select><span class="hint">Startup-only setting. Use Auto or macOS Voice Processing without an Input Device Match to get Apple voice processing on the default mic.</span></label>
-          <label>Input Device Match<input id="input_device" placeholder="microphone" /></label>
-          <label>Output Device Match<input id="output_device" placeholder="headphones" /></label>
-        </section>
-
-        <section>
-          <h2>Local UI</h2>
-          <label>Bind Address<input id="local_ui_bind" autocomplete="off" /></label>
-          <label>Auth Token<input id="local_ui_token" type="password" autocomplete="new-password" /></label>
-          <label class="check"><input id="disable_local_ui" type="checkbox" /> Disable local UI/API</label>
-          <label>Window Mode<select id="window_mode"><option value="system_browser">system_browser</option><option value="native">native</option><option value="disabled">disabled</option></select></label>
-          <label>App Title<input id="app_title" /></label>
-          <label>UI Open Delay MS<input id="ui_open_delay_ms" type="number" min="0" max="30000" step="50" /></label>
-        </section>
-
-        <div class="actions">
-          <button id="defaults" type="button">Load Defaults</button>
-          <button id="save" type="submit">Save Settings</button>
+      <section class="channels-panel server-panel">
+        <div class="section-title">
+          <h2>Servers</h2>
+          <button id="scan-servers" type="button">Scan</button>
         </div>
-      </form>
+        <div class="server-picker">
+          <select id="server-picker" aria-label="Discovered or saved servers"></select>
+        </div>
+        <label id="manual-server-row" class="manual-server" hidden>
+          Server Host
+          <input id="server_host" autocomplete="off" inputmode="url" placeholder="192.168.1.10" />
+        </label>
+        <p id="server-list-status" class="hint">Scan local network servers or choose Manual.</p>
+      </section>
+
+      <section class="channels-panel">
+        <div class="section-title">
+          <h2>Audio</h2>
+        </div>
+
+        <form id="mobile-form" class="config-form">
+          <label id="opus-profile-row">
+            Quality
+            <select id="opus_profile">
+              <option value="speech_16_low">Low</option>
+              <option value="speech_24_standard">Standard</option>
+              <option value="speech_48_high">High</option>
+              <option value="music_48">Music</option>
+            </select>
+          </label>
+          <label>
+            Mic Gain <output id="mic_gain_value"></output>
+            <input id="mic_gain" type="range" min="0" max="2" step="0.05" />
+          </label>
+          <label>
+            Speaker Gain <output id="speaker_gain_value"></output>
+            <input id="speaker_gain" type="range" min="0" max="2" step="0.05" />
+          </label>
+          <label>
+            Button Count
+            <input id="button_count" type="number" min="0" max="24" step="1" inputmode="numeric" />
+          </label>
+        </form>
+      </section>
+
+      <div class="bottom-dock">
+        <div class="bottom-controls">
+          <button id="start" class="control-button talk-button-main" type="submit" form="mobile-form">Connect</button>
+        </div>
+      </div>
     </main>
     <script src="settings.js"></script>
   </body>

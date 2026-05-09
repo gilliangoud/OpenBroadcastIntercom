@@ -48,7 +48,7 @@ impl Drop for DiscoveryAdvertisementHandle {
 }
 
 pub fn default_discovery_name() -> String {
-    "Intercom Suite".to_string()
+    "RedLine".to_string()
 }
 
 pub fn start_discovery_advertisement(

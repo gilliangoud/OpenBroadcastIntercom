@@ -22,7 +22,7 @@ impl ServerAppConfig {
             admin_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40002),
             admin_state_file: app_data_dir.join("intercom-state.json"),
             recordings_dir: app_data_dir.join("recordings"),
-            advertise_name: Some("Intercom Server".to_string()),
+            advertise_name: Some("RedLine Server".to_string()),
         }
     }
 

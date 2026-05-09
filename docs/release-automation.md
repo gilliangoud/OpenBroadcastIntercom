@@ -20,11 +20,27 @@ python3 -m unittest tools/test_release_version.py
 
 ## First-Pass Artifacts
 
-- macOS: Intercom Suite, Intercom Bridge App, and Intercom Server `.app` zip
+- macOS: RedLine, RedLine Bridge, and RedLine Server `.app` zip
   archives.
-- Windows: Intercom Suite and Intercom Bridge App NSIS installers.
-- Linux: Intercom Suite and Intercom Bridge App AppImage/deb bundles.
-- Android: Intercom Suite debug/sideload APK.
+- Windows: RedLine and RedLine Bridge NSIS installers.
+- Linux: RedLine and RedLine Bridge AppImage/deb bundles.
+- Android: RedLine debug/sideload APK.
+- iOS: RedLine simulator `.app` zip. When Apple signing secrets are
+  configured, the workflow also publishes a signed device `.ipa` for
+  provisioned iPhone/iPad installs.
 
-iOS remains a CI compile check only until Apple signing and provisioning secrets
-are intentionally added.
+## iOS GitHub Release Signing
+
+GitHub-hosted macOS runners cannot create a physical-device iOS install without
+Apple signing material. Add these repository secrets before expecting a
+device-installable IPA on GitHub releases:
+
+- `APPLE_DEVELOPMENT_TEAM`
+- `IOS_CERTIFICATE_P12_BASE64`
+- `IOS_CERTIFICATE_PASSWORD`
+- `IOS_PROVISIONING_PROFILE_BASE64`
+
+`IOS_CERTIFICATE_P12_BASE64` is a base64-encoded `.p12` signing certificate.
+`IOS_PROVISIONING_PROFILE_BASE64` is a base64-encoded provisioning profile for
+`com.intercomsuite.client`. Until those secrets exist, the release still
+publishes an iOS simulator bundle and an explanatory signing note.

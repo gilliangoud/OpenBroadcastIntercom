@@ -28,7 +28,7 @@ mod native {
         bridge_app::init_tracing()?;
         let mut args = bridge_app::Args::parse();
         args.no_open = true;
-        let title = "Intercom Bridge App".to_string();
+        let title = "RedLine Bridge".to_string();
         let url = format!("http://{}", args.bind);
         let shutdown_bind = args.bind;
 

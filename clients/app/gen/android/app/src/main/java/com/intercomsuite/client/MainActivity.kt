@@ -10,10 +10,10 @@ import androidx.core.content.ContextCompat
 class MainActivity : TauriActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestIntercomPermissions()
+        requestRedLinePermissions()
     }
 
-    private fun requestIntercomPermissions() {
+    private fun requestRedLinePermissions() {
         val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)

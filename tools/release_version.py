@@ -125,7 +125,7 @@ def parse_date(value: str | None) -> dt.date:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compute, apply, and verify Intercom Suite release versions.")
+    parser = argparse.ArgumentParser(description="Compute, apply, and verify RedLine release versions.")
     parser.add_argument("--date", help="ISO date override for deterministic CalVer computation.")
     parser.add_argument("--version", help="Explicit version to apply instead of computing the next CalVer.")
     parser.add_argument("--print-next", action="store_true", help="Print the next release version.")

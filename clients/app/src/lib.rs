@@ -7,7 +7,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use clap::{Parser, ValueEnum};
-use client_core::{ClientAudioBackendKind, ClientInputChannelMode, ClientRuntimeConfig};
+use client_core::{
+    default_audio_addr, derive_admin_url_from_control, ClientAudioBackendKind,
+    ClientEndpointOverrides, ClientInputChannelMode, ClientRuntimeConfig, ClientServerEndpoint,
+    DEFAULT_CLIENT_BUTTON_COUNT, DEFAULT_SERVER_HOST, MAX_CLIENT_BUTTON_COUNT,
+};
 use common::{Codec, OpusProfile};
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +27,8 @@ pub struct AppArgs {
     pub print_config: bool,
     #[arg(long)]
     pub print_launch_plan: bool,
+    #[arg(long)]
+    pub server_host: Option<String>,
     #[arg(long)]
     pub server: Option<SocketAddr>,
     #[arg(long)]
@@ -61,6 +67,8 @@ pub struct AppArgs {
     pub output_device: Option<String>,
     #[arg(long)]
     pub debug_audio_dir: Option<PathBuf>,
+    #[arg(long, value_parser = clap::value_parser!(u16).range(0..=MAX_CLIENT_BUTTON_COUNT as i64))]
+    pub button_count: Option<u16>,
     #[arg(long = "button", value_name = "ID[=LABEL]")]
     pub buttons: Vec<String>,
     #[arg(long = "button-key", value_name = "ID=KEY")]
@@ -138,8 +146,11 @@ pub enum AppWindowMode {
 pub struct AppSettings {
     pub app_title: String,
     pub server_profiles: Vec<MobileServerProfile>,
+    pub server_host: String,
     pub server: SocketAddr,
     pub control: String,
+    pub admin: Option<String>,
+    pub advanced_endpoints: bool,
     pub user_id: Option<u16>,
     pub client_uid: Option<String>,
     pub identity_file: Option<PathBuf>,
@@ -157,6 +168,7 @@ pub struct AppSettings {
     pub input_channel: desktop::InputChannelMode,
     pub output_device: Option<String>,
     pub debug_audio_dir: Option<PathBuf>,
+    pub button_count: u16,
     pub buttons: Vec<String>,
     pub button_keys: Vec<String>,
     pub local_ui_bind: SocketAddr,
@@ -171,6 +183,7 @@ pub struct AppSettings {
 pub struct MobileServerProfile {
     pub id: String,
     pub name: String,
+    pub server_host: String,
     pub server: String,
     pub control: String,
     pub admin: Option<String>,
@@ -185,6 +198,7 @@ impl Default for MobileServerProfile {
         Self {
             id: String::new(),
             name: String::new(),
+            server_host: String::new(),
             server: String::new(),
             control: String::new(),
             admin: None,
@@ -199,15 +213,18 @@ impl Default for MobileServerProfile {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            app_title: "Intercom Suite".to_string(),
+            app_title: "RedLine".to_string(),
             server_profiles: Vec::new(),
-            server: "127.0.0.1:40000".parse().expect("valid default address"),
-            control: "ws://127.0.0.1:40001".to_string(),
-            user_id: Some(1),
+            server_host: DEFAULT_SERVER_HOST.to_string(),
+            server: default_audio_addr(),
+            control: ClientServerEndpoint::default().control_url(),
+            admin: None,
+            advanced_endpoints: false,
+            user_id: None,
             client_uid: None,
             identity_file: None,
-            tx_channel: 1,
-            listen_channel: 1,
+            tx_channel: 0,
+            listen_channel: 0,
             codec: Codec::Pcm16,
             opus_profile: OpusProfile::default(),
             mic_gain: 1.0,
@@ -220,6 +237,7 @@ impl Default for AppSettings {
             input_channel: desktop::InputChannelMode::Average,
             output_device: None,
             debug_audio_dir: None,
+            button_count: DEFAULT_CLIENT_BUTTON_COUNT,
             buttons: Vec::new(),
             button_keys: Vec::new(),
             local_ui_bind: "127.0.0.1:41002".parse().expect("valid default address"),
@@ -232,12 +250,54 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub fn endpoint_overrides(&self) -> ClientEndpointOverrides {
+        ClientEndpointOverrides::normalized(
+            &self.server_host,
+            self.server,
+            &self.control,
+            self.admin.clone(),
+            self.advanced_endpoints,
+        )
+    }
+
+    pub fn normalize_endpoints(&mut self) {
+        let endpoints = self.endpoint_overrides();
+        self.server_host = endpoints.server_host;
+        self.server = endpoints.server;
+        self.control = endpoints.control;
+        self.admin = endpoints.admin;
+        self.advanced_endpoints = endpoints.advanced_endpoints;
+        self.server_profiles = self
+            .server_profiles
+            .drain(..)
+            .map(normalize_mobile_profile)
+            .collect();
+    }
+
+    pub fn effective_server(&self) -> anyhow::Result<SocketAddr> {
+        self.endpoint_overrides().effective_server()
+    }
+
+    pub fn effective_control(&self) -> anyhow::Result<String> {
+        self.endpoint_overrides().effective_control()
+    }
+
+    pub fn effective_admin(&self) -> anyhow::Result<String> {
+        self.endpoint_overrides().effective_admin()
+    }
+
     pub fn merge_cli(&mut self, args: &AppArgs) {
+        if let Some(server_host) = &args.server_host {
+            self.server_host = server_host.clone();
+            self.advanced_endpoints = false;
+        }
         if let Some(server) = args.server {
             self.server = server;
+            self.advanced_endpoints = true;
         }
         if let Some(control) = &args.control {
             self.control = control.clone();
+            self.advanced_endpoints = true;
         }
         if let Some(user_id) = args.user_id {
             self.user_id = Some(user_id);
@@ -290,6 +350,9 @@ impl AppSettings {
         if let Some(debug_audio_dir) = &args.debug_audio_dir {
             self.debug_audio_dir = Some(debug_audio_dir.clone());
         }
+        if let Some(button_count) = args.button_count {
+            self.button_count = button_count;
+        }
         if !args.buttons.is_empty() {
             self.buttons = args.buttons.clone();
         }
@@ -317,13 +380,16 @@ impl AppSettings {
         if let Some(ui_open_delay_ms) = args.ui_open_delay_ms {
             self.ui_open_delay_ms = ui_open_delay_ms;
         }
+        self.normalize_endpoints();
     }
 
     pub fn client_runtime_config(&self, list_devices: bool) -> anyhow::Result<ClientRuntimeConfig> {
         self.validate()?;
+        let endpoints = self.endpoint_overrides();
         Ok(ClientRuntimeConfig {
-            server: self.server,
-            control: self.control.clone(),
+            server_host: endpoints.server_host.clone(),
+            server: endpoints.effective_server()?,
+            control: endpoints.effective_control()?,
             user_id: self.user_id,
             client_uid: self.client_uid.clone(),
             identity_file: self.identity_file.clone(),
@@ -341,6 +407,7 @@ impl AppSettings {
             input_channel: app_input_channel_to_core(self.input_channel),
             output_device: self.output_device.clone(),
             debug_audio_dir: self.debug_audio_dir.clone(),
+            button_count: self.button_count,
             buttons: self.buttons.clone(),
             button_keys: self.button_keys.clone(),
             local_ui_bind: self.local_ui_bind,
@@ -353,6 +420,7 @@ impl AppSettings {
     pub fn desktop_args(&self, list_devices: bool) -> anyhow::Result<desktop::Args> {
         let runtime = self.client_runtime_config(list_devices)?;
         Ok(desktop::Args {
+            server_host: Some(runtime.server_host),
             server: runtime.server,
             control: runtime.control,
             user_id: runtime.user_id,
@@ -372,6 +440,7 @@ impl AppSettings {
             input_channel: core_input_channel_to_desktop(runtime.input_channel),
             output_device: runtime.output_device,
             debug_audio_dir: runtime.debug_audio_dir,
+            button_count: runtime.button_count,
             buttons: runtime
                 .buttons
                 .iter()
@@ -387,14 +456,13 @@ impl AppSettings {
             local_ui_bind: runtime.local_ui_bind,
             local_ui_token: runtime.local_ui_token,
             disable_local_ui: runtime.disable_local_ui,
+            disable_command_loop: self.window_mode == AppWindowMode::Native,
             list_devices,
         })
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.control.trim().is_empty() {
-            bail!("control URL cannot be empty");
-        }
+        self.endpoint_overrides().validate()?;
         if self.app_title.trim().is_empty() {
             bail!("app_title cannot be empty");
         }
@@ -403,6 +471,9 @@ impl AppSettings {
         }
         if self.ui_open_delay_ms > 30_000 {
             bail!("ui_open_delay_ms must be between 0 and 30000");
+        }
+        if self.button_count > MAX_CLIENT_BUTTON_COUNT {
+            bail!("button_count must be between 0 and {MAX_CLIENT_BUTTON_COUNT}");
         }
         validate_gain("mic_gain", self.mic_gain)?;
         validate_gain("speaker_gain", self.speaker_gain)?;
@@ -427,14 +498,24 @@ impl AppSettings {
 
 pub fn load_settings(path: &Path) -> anyhow::Result<AppSettings> {
     match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text)
-            .with_context(|| format!("parse app settings from {}", path.display())),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(AppSettings::default()),
+        Ok(text) => {
+            let mut settings: AppSettings = serde_json::from_str(&text)
+                .with_context(|| format!("parse app settings from {}", path.display()))?;
+            settings.normalize_endpoints();
+            Ok(settings)
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let mut settings = AppSettings::default();
+            settings.normalize_endpoints();
+            Ok(settings)
+        }
         Err(err) => Err(err).with_context(|| format!("read app settings from {}", path.display())),
     }
 }
 
 pub fn save_settings(path: &Path, settings: &AppSettings) -> anyhow::Result<()> {
+    let mut settings = settings.clone();
+    settings.normalize_endpoints();
     settings.validate()?;
     if let Some(parent) = path
         .parent()
@@ -443,7 +524,7 @@ pub fn save_settings(path: &Path, settings: &AppSettings) -> anyhow::Result<()> 
         fs::create_dir_all(parent)
             .with_context(|| format!("create app settings directory {}", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(settings)?;
+    let json = serde_json::to_string_pretty(&settings)?;
     let tmp_path = temp_settings_path(path);
     fs::write(&tmp_path, format!("{json}\n"))
         .with_context(|| format!("write app settings to {}", tmp_path.display()))?;
@@ -453,7 +534,7 @@ pub fn save_settings(path: &Path, settings: &AppSettings) -> anyhow::Result<()> 
 }
 
 #[allow(dead_code)]
-fn mobile_profile_id(name: &str, control: &str) -> String {
+pub fn mobile_profile_id(name: &str, control: &str) -> String {
     let name = name.trim();
     let control = control.trim();
     if name.is_empty() {
@@ -464,8 +545,9 @@ fn mobile_profile_id(name: &str, control: &str) -> String {
 }
 
 #[allow(dead_code)]
-fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerProfile {
+pub fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerProfile {
     profile.name = profile.name.trim().to_string();
+    profile.server_host = profile.server_host.trim().to_string();
     profile.server = profile.server.trim().to_string();
     profile.control = profile.control.trim().to_string();
     profile.admin = profile
@@ -480,6 +562,40 @@ fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerPro
         .version
         .map(|version| version.trim().to_string())
         .filter(|version| !version.is_empty());
+    if profile.server_host.is_empty() {
+        if let Ok(server) = profile.server.parse::<SocketAddr>() {
+            let endpoints = ClientEndpointOverrides::normalized(
+                "",
+                server,
+                &profile.control,
+                profile.admin.clone(),
+                false,
+            );
+            if !endpoints.advanced_endpoints {
+                let admin = endpoints.effective_admin().unwrap_or_else(|_| {
+                    derive_admin_url_from_control(&endpoints.control).unwrap_or_default()
+                });
+                profile.server_host = endpoints.server_host;
+                profile.server = endpoints.server.to_string();
+                profile.control = endpoints.control;
+                profile.admin = Some(admin).filter(|admin| !admin.is_empty());
+            } else {
+                profile.server_host = endpoints.server_host;
+            }
+        }
+    } else if let Ok(endpoint) = ClientServerEndpoint::new(&profile.server_host) {
+        if profile.server.is_empty() {
+            if let Ok(server) = endpoint.resolve_audio_addr() {
+                profile.server = server.to_string();
+            }
+        }
+        if profile.control.is_empty() {
+            profile.control = endpoint.control_url();
+        }
+        if profile.admin.is_none() {
+            profile.admin = Some(endpoint.admin_url());
+        }
+    }
     if profile.id.trim().is_empty() {
         profile.id = mobile_profile_id(&profile.name, &profile.control);
     }
@@ -487,7 +603,7 @@ fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerPro
 }
 
 #[allow(dead_code)]
-fn remember_mobile_profile(settings: &mut AppSettings, profile: MobileServerProfile) {
+pub fn remember_mobile_profile(settings: &mut AppSettings, profile: MobileServerProfile) {
     let profile = normalize_mobile_profile(profile);
     if profile.server.is_empty() || profile.control.is_empty() {
         return;
@@ -500,7 +616,36 @@ fn remember_mobile_profile(settings: &mut AppSettings, profile: MobileServerProf
 }
 
 #[allow(dead_code)]
-fn mobile_connected_timestamp_ms() -> u64 {
+fn mobile_profile_uses_ipv4(profile: &MobileServerProfile) -> bool {
+    profile
+        .server_host
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_ipv4())
+}
+
+#[allow(dead_code)]
+fn mobile_profiles_match_discovered_service(
+    left: &MobileServerProfile,
+    right: &MobileServerProfile,
+) -> bool {
+    (!left.id.trim().is_empty() && left.id == right.id)
+        || (left.discovered
+            && right.discovered
+            && !left.name.trim().is_empty()
+            && left.name == right.name
+            && left.auth == right.auth
+            && left.version == right.version)
+}
+
+#[allow(dead_code)]
+fn should_replace_mobile_profile(
+    existing: &MobileServerProfile,
+    candidate: &MobileServerProfile,
+) -> bool {
+    mobile_profile_uses_ipv4(candidate) || !mobile_profile_uses_ipv4(existing)
+}
+
+pub fn mobile_connected_timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -681,17 +826,22 @@ mod mobile {
     use std::sync::Mutex;
     use std::thread;
     use std::thread::JoinHandle;
+    use std::time::Instant;
 
-    use anyhow::Context;
-    use client_core::{ClientAudioBackend, ClientRuntimePhase};
-    use common::{AlertId, ButtonId, Codec, TalkMode};
+    use anyhow::{bail, Context};
+    use client_core::{ClientAudioBackend, ClientEndpointOverrides, ClientRuntimePhase};
+    use common::{
+        AlertId, ButtonId, CaptureHealthStatus, ClientTelemetryRuntimeStatus, Codec, TalkMode,
+    };
     use serde::Serialize;
     use tauri::Manager;
     use tokio::sync::oneshot;
 
     use super::{
-        load_settings, mobile_connected_timestamp_ms, mobile_profile_id, normalize_mobile_profile,
-        remember_mobile_profile, save_settings, AppSettings, AppWindowMode, MobileServerProfile,
+        load_settings, mobile_connected_timestamp_ms, mobile_profile_id,
+        mobile_profiles_match_discovered_service, normalize_mobile_profile,
+        prepare_mobile_identity_path, remember_mobile_profile, save_settings,
+        should_replace_mobile_profile, AppSettings, AppWindowMode, MobileServerProfile,
     };
     use crate::mobile_audio::DefaultMobileAudioPlatform;
 
@@ -809,6 +959,7 @@ mod mobile {
                     "main",
                     tauri::WebviewUrl::App("mobile.html".into()),
                 )
+                .background_color(tauri::utils::config::Color(247, 249, 251, 255))
                 .build()?;
                 Ok(())
             })
@@ -819,8 +970,10 @@ mod mobile {
     #[tauri::command]
     fn mobile_default_settings() -> AppSettings {
         let mut settings = AppSettings::default();
+        settings.codec = Codec::Opus;
         settings.window_mode = AppWindowMode::Native;
         settings.disable_local_ui = true;
+        settings.normalize_endpoints();
         settings
     }
 
@@ -843,13 +996,18 @@ mod mobile {
     }
 
     #[tauri::command]
-    fn mobile_discover_servers(
+    async fn mobile_discover_servers(
         app: tauri::AppHandle,
     ) -> std::result::Result<Vec<MobileServerProfile>, String> {
         let path = mobile_settings_path(&app)?;
-        let settings = load_settings(&path).map_err(|err| err.to_string())?;
-        let discovered = discover_mobile_servers().map_err(|err| err.to_string())?;
-        Ok(merge_mobile_profiles(settings.server_profiles, discovered))
+        run_mobile_command_blocking("mobile_discover_servers", move || {
+            let mut settings = load_settings(&path).map_err(|err| err.to_string())?;
+            let discovered = discover_mobile_servers().map_err(|err| err.to_string())?;
+            settings.server_profiles = merge_mobile_profiles(Vec::new(), discovered);
+            save_settings(&path, &settings).map_err(|err| err.to_string())?;
+            Ok(settings.server_profiles)
+        })
+        .await
     }
 
     #[tauri::command]
@@ -874,8 +1032,18 @@ mod mobile {
 
         let path = mobile_settings_path(&app)?;
         let mut settings = load_settings(&path).map_err(|err| err.to_string())?;
+        let endpoints = ClientEndpointOverrides::normalized(
+            &profile.server_host,
+            server,
+            &profile.control,
+            profile.admin.clone(),
+            false,
+        );
+        settings.server_host = endpoints.server_host;
         settings.server = server;
         settings.control = profile.control.clone();
+        settings.admin = profile.admin.clone();
+        settings.advanced_endpoints = endpoints.advanced_endpoints;
         remember_mobile_profile(&mut settings, profile);
         prepare_mobile_settings(&mut settings);
         save_settings(&path, &settings).map_err(|err| err.to_string())?;
@@ -895,13 +1063,14 @@ mod mobile {
     }
 
     #[tauri::command]
-    fn mobile_start_client(
+    async fn mobile_start_client(
         app: tauri::AppHandle,
         state: tauri::State<'_, MobileAppState>,
         mut settings: AppSettings,
     ) -> std::result::Result<MobileStartResponse, String> {
-        prepare_mobile_settings(&mut settings);
         let path = mobile_settings_path(&app)?;
+        prepare_mobile_settings(&mut settings);
+        prepare_mobile_identity_path(&mut settings, &path);
         save_settings(&path, &settings).map_err(|err| err.to_string())?;
 
         {
@@ -1034,11 +1203,58 @@ mod mobile {
             })
     }
 
+    fn mobile_runtime_phase_name(phase: ClientRuntimePhase) -> &'static str {
+        match phase {
+            ClientRuntimePhase::Stopped => "stopped",
+            ClientRuntimePhase::Starting => "starting",
+            ClientRuntimePhase::Running => "running",
+            ClientRuntimePhase::Failed => "failed",
+        }
+    }
+
     #[tauri::command]
-    fn client_state(
+    async fn client_state(
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::StateResponse, String> {
-        Ok(mobile_runtime_api(&state)?.state())
+        let (api, phase, last_error) = {
+            let mut runtime_state = state
+                .runtime
+                .lock()
+                .map_err(|_| "mobile runtime state is poisoned".to_string())?;
+            refresh_mobile_runtime_state(&mut runtime_state);
+            let api = runtime_state
+                .runtime
+                .as_ref()
+                .map(|runtime| runtime.api.clone())
+                .ok_or_else(|| {
+                    runtime_state
+                        .last_error
+                        .clone()
+                        .unwrap_or_else(|| "mobile client is not running".to_string())
+                })?;
+            (api, runtime_state.phase, runtime_state.last_error.clone())
+        };
+        let phase = mobile_runtime_phase_name(phase).to_string();
+        run_mobile_command_blocking("client_state", move || {
+            let mut response = api.state();
+            let runtime = ClientTelemetryRuntimeStatus {
+                client_kind: "mobile".to_string(),
+                phase,
+                last_error,
+            };
+            if let Some(telemetry) = response.telemetry.as_mut() {
+                telemetry.runtime = Some(runtime);
+            } else {
+                response.telemetry = Some(CaptureHealthStatus {
+                    runtime: Some(runtime),
+                    adc_input: "mobile".to_string(),
+                    capture_channel: "mobile".to_string(),
+                    ..CaptureHealthStatus::default()
+                });
+            }
+            Ok(response)
+        })
+        .await
     }
 
     #[tauri::command]
@@ -1058,8 +1274,7 @@ mod mobile {
         mode: TalkMode,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .set_talk_mode(mode)
-            .await
+            .queue_set_talk_mode(mode)
             .map_err(|err| err.to_string())
     }
 
@@ -1068,8 +1283,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .mute()
-            .await
+            .queue_mute()
             .map_err(|err| err.to_string())
     }
 
@@ -1078,8 +1292,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .unmute()
-            .await
+            .queue_unmute()
             .map_err(|err| err.to_string())
     }
 
@@ -1088,8 +1301,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .talk_down()
-            .await
+            .queue_talk(true)
             .map_err(|err| err.to_string())
     }
 
@@ -1098,8 +1310,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .talk_up()
-            .await
+            .queue_talk(false)
             .map_err(|err| err.to_string())
     }
 
@@ -1108,8 +1319,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .talk_toggle()
-            .await
+            .queue_talk_toggle()
             .map_err(|err| err.to_string())
     }
 
@@ -1119,19 +1329,20 @@ mod mobile {
         codec: Codec,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .set_codec(codec)
-            .await
+            .queue_set_codec(codec)
             .map_err(|err| err.to_string())
     }
 
     #[tauri::command]
-    fn client_gain(
+    async fn client_gain(
         state: tauri::State<'_, MobileAppState>,
         request: client_core::GainRequest,
     ) -> std::result::Result<client_core::OkResponse, String> {
-        mobile_runtime_api(&state)?
-            .set_gain(request)
-            .map_err(|err| err.to_string())
+        let api = mobile_runtime_api(&state)?;
+        run_mobile_command_blocking("client_gain", move || {
+            api.set_gain(request).map_err(|err| err.to_string())
+        })
+        .await
     }
 
     #[tauri::command]
@@ -1140,8 +1351,7 @@ mod mobile {
         id: ButtonId,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .button_down(id)
-            .await
+            .queue_button(id, true)
             .map_err(|err| err.to_string())
     }
 
@@ -1151,8 +1361,7 @@ mod mobile {
         id: ButtonId,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .button_up(id)
-            .await
+            .queue_button(id, false)
             .map_err(|err| err.to_string())
     }
 
@@ -1162,8 +1371,7 @@ mod mobile {
         id: ButtonId,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .button_toggle(id)
-            .await
+            .queue_button(id, true)
             .map_err(|err| err.to_string())
     }
 
@@ -1173,8 +1381,7 @@ mod mobile {
         id: u16,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .call_down(id)
-            .await
+            .queue_direct_call(id, true, false)
             .map_err(|err| err.to_string())
     }
 
@@ -1184,8 +1391,7 @@ mod mobile {
         id: u16,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .call_up(id)
-            .await
+            .queue_direct_call(id, false, false)
             .map_err(|err| err.to_string())
     }
 
@@ -1195,8 +1401,7 @@ mod mobile {
         id: u16,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .call_toggle(id)
-            .await
+            .queue_direct_call_toggle(id)
             .map_err(|err| err.to_string())
     }
 
@@ -1205,8 +1410,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .reply_down()
-            .await
+            .queue_reply_call(true, false)
             .map_err(|err| err.to_string())
     }
 
@@ -1215,8 +1419,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .reply_up()
-            .await
+            .queue_reply_call(false, false)
             .map_err(|err| err.to_string())
     }
 
@@ -1225,8 +1428,7 @@ mod mobile {
         state: tauri::State<'_, MobileAppState>,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .reply_toggle()
-            .await
+            .queue_reply_toggle()
             .map_err(|err| err.to_string())
     }
 
@@ -1236,8 +1438,7 @@ mod mobile {
         request: client_core::AlertRequest,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .send_alert(request)
-            .await
+            .queue_send_alert(request)
             .map_err(|err| err.to_string())
     }
 
@@ -1247,8 +1448,7 @@ mod mobile {
         id: AlertId,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .ack_alert(id)
-            .await
+            .queue_ack_alert(id)
             .map_err(|err| err.to_string())
     }
 
@@ -1258,8 +1458,7 @@ mod mobile {
         id: AlertId,
     ) -> std::result::Result<client_core::OkResponse, String> {
         mobile_runtime_api(&state)?
-            .cancel_alert(id)
-            .await
+            .queue_cancel_alert(id)
             .map_err(|err| err.to_string())
     }
 
@@ -1287,6 +1486,27 @@ mod mobile {
         }
     }
 
+    async fn run_mobile_command_blocking<T, F>(
+        name: &'static str,
+        work: F,
+    ) -> std::result::Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> std::result::Result<T, String> + Send + 'static,
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            let started = Instant::now();
+            let result = work();
+            let elapsed_ms = started.elapsed().as_millis();
+            if elapsed_ms >= 250 {
+                tracing::warn!(command = name, elapsed_ms, "slow mobile Tauri command");
+            }
+            result
+        })
+        .await
+        .map_err(|err| format!("{name} task failed: {err}"))?
+    }
+
     fn set_mobile_runtime_failure(state: &tauri::State<'_, MobileAppState>, err: &str) {
         if let Ok(mut runtime_state) = state.runtime.lock() {
             runtime_state.runtime = None;
@@ -1299,7 +1519,15 @@ mod mobile {
         settings: &AppSettings,
         last_connected_ms: Option<u64>,
     ) -> MobileServerProfile {
-        let control = settings.control.clone();
+        let endpoints = settings.endpoint_overrides();
+        let control = endpoints
+            .effective_control()
+            .unwrap_or_else(|_| settings.control.clone());
+        let server = endpoints
+            .effective_server()
+            .map(|server| server.to_string())
+            .unwrap_or_else(|_| settings.server.to_string());
+        let admin = endpoints.effective_admin().ok();
         let existing = settings
             .server_profiles
             .iter()
@@ -1315,9 +1543,10 @@ mod mobile {
         MobileServerProfile {
             id,
             name,
-            server: settings.server.to_string(),
+            server_host: endpoints.server_host,
+            server,
             control,
-            admin: existing.and_then(|profile| profile.admin.clone()),
+            admin: existing.and_then(|profile| profile.admin.clone()).or(admin),
             auth: existing.and_then(|profile| profile.auth.clone()),
             version: existing.and_then(|profile| profile.version.clone()),
             last_connected_ms,
@@ -1332,12 +1561,19 @@ mod mobile {
         for mut profile in discovered {
             profile = normalize_mobile_profile(profile);
             profile.discovered = true;
-            if let Some(existing) = saved
-                .iter_mut()
-                .find(|existing| existing.id == profile.id || existing.control == profile.control)
-            {
+            if let Some(existing) = saved.iter_mut().find(|existing| {
+                existing.control == profile.control
+                    || mobile_profiles_match_discovered_service(existing, &profile)
+            }) {
                 let last_connected_ms = existing.last_connected_ms;
-                *existing = profile;
+                if should_replace_mobile_profile(existing, &profile) {
+                    *existing = profile;
+                } else {
+                    existing.name = profile.name;
+                    existing.auth = profile.auth;
+                    existing.version = profile.version;
+                    existing.discovered = true;
+                }
                 existing.last_connected_ms = last_connected_ms;
             } else {
                 saved.push(profile);
@@ -1361,7 +1597,12 @@ mod mobile {
         ios_discover_intercom_servers()
     }
 
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    fn discover_mobile_servers_for_platform() -> anyhow::Result<Vec<MobileServerProfile>> {
+        android_discover_intercom_servers()
+    }
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     fn discover_mobile_servers_for_platform() -> anyhow::Result<Vec<MobileServerProfile>> {
         Ok(Vec::new())
     }
@@ -1385,14 +1626,380 @@ mod mobile {
         serde_json::from_str(&text).context("parse iOS Bonjour discovery results")
     }
 
+    #[cfg(target_os = "android")]
+    const INTERCOM_DISCOVERY_SERVICE: &str = "_intercom-suite._tcp.local";
+
+    #[cfg(target_os = "android")]
+    fn android_discover_intercom_servers() -> anyhow::Result<Vec<MobileServerProfile>> {
+        use std::io::ErrorKind;
+        use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+        use std::time::{Duration, Instant};
+
+        let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+            .context("bind Android mDNS discovery socket")?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .context("configure Android mDNS discovery timeout")?;
+        socket
+            .set_multicast_ttl_v4(255)
+            .context("configure Android mDNS multicast TTL")?;
+
+        let query = build_mdns_ptr_query(INTERCOM_DISCOVERY_SERVICE)?;
+        let mdns_addr = SocketAddrV4::new(Ipv4Addr::new(224, 0, 0, 251), 5353);
+        socket
+            .send_to(&query, mdns_addr)
+            .context("send Android mDNS discovery query")?;
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut responses = Vec::new();
+        let mut buf = [0_u8; 4096];
+        while Instant::now() < deadline {
+            match socket.recv_from(&mut buf) {
+                Ok((len, _peer)) => {
+                    responses.extend(profiles_from_mdns_packet(&buf[..len])?);
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+                    ) => {}
+                Err(err) => return Err(err).context("receive Android mDNS discovery response"),
+            }
+        }
+        dedupe_discovered_profiles(responses)
+    }
+
+    #[cfg(target_os = "android")]
+    fn build_mdns_ptr_query(service: &str) -> anyhow::Result<Vec<u8>> {
+        let mut query = Vec::with_capacity(64);
+        query.extend_from_slice(&0_u16.to_be_bytes()); // transaction id
+        query.extend_from_slice(&0_u16.to_be_bytes()); // flags
+        query.extend_from_slice(&1_u16.to_be_bytes()); // questions
+        query.extend_from_slice(&0_u16.to_be_bytes()); // answers
+        query.extend_from_slice(&0_u16.to_be_bytes()); // authorities
+        query.extend_from_slice(&0_u16.to_be_bytes()); // additionals
+        write_dns_name(&mut query, service)?;
+        query.extend_from_slice(&12_u16.to_be_bytes()); // PTR
+        query.extend_from_slice(&0x8001_u16.to_be_bytes()); // IN + unicast response requested
+        Ok(query)
+    }
+
+    #[cfg(target_os = "android")]
+    fn write_dns_name(out: &mut Vec<u8>, name: &str) -> anyhow::Result<()> {
+        for label in name.trim_end_matches('.').split('.') {
+            if label.is_empty() || label.len() > 63 {
+                bail!("invalid DNS label in {name}");
+            }
+            out.push(label.len() as u8);
+            out.extend_from_slice(label.as_bytes());
+        }
+        out.push(0);
+        Ok(())
+    }
+
+    #[cfg(target_os = "android")]
+    #[derive(Debug, Default)]
+    struct MdnsService {
+        instance: String,
+        name: Option<String>,
+        target: Option<String>,
+        control_port: Option<u16>,
+        audio_port: Option<u16>,
+        admin_port: Option<u16>,
+        auth: Option<String>,
+        version: Option<String>,
+    }
+
+    #[cfg(target_os = "android")]
+    fn profiles_from_mdns_packet(packet: &[u8]) -> anyhow::Result<Vec<MobileServerProfile>> {
+        use std::collections::{HashMap, HashSet};
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        if packet.len() < 12 {
+            return Ok(Vec::new());
+        }
+        let qdcount = dns_u16(packet, 4)? as usize;
+        let record_count = dns_u16(packet, 6)? as usize
+            + dns_u16(packet, 8)? as usize
+            + dns_u16(packet, 10)? as usize;
+        let mut offset = 12;
+        for _ in 0..qdcount {
+            let (_name, next) = read_dns_name(packet, offset)?;
+            offset = next + 4;
+            if offset > packet.len() {
+                return Ok(Vec::new());
+            }
+        }
+
+        let mut instances = HashSet::new();
+        let mut services = HashMap::<String, MdnsService>::new();
+        let mut addresses = HashMap::<String, Vec<IpAddr>>::new();
+
+        for _ in 0..record_count {
+            let (record_name, next) = read_dns_name(packet, offset)?;
+            offset = next;
+            if offset + 10 > packet.len() {
+                break;
+            }
+            let record_type = dns_u16(packet, offset)?;
+            offset += 2;
+            let _class = dns_u16(packet, offset)?;
+            offset += 2;
+            let _ttl = dns_u32(packet, offset)?;
+            offset += 4;
+            let rdlen = dns_u16(packet, offset)? as usize;
+            offset += 2;
+            if offset + rdlen > packet.len() {
+                break;
+            }
+            let rdata_offset = offset;
+            offset += rdlen;
+
+            match record_type {
+                1 if rdlen == 4 => {
+                    addresses
+                        .entry(normalize_dns_name(&record_name))
+                        .or_default()
+                        .push(IpAddr::V4(Ipv4Addr::new(
+                            packet[rdata_offset],
+                            packet[rdata_offset + 1],
+                            packet[rdata_offset + 2],
+                            packet[rdata_offset + 3],
+                        )));
+                }
+                12 if normalize_dns_name(&record_name) == INTERCOM_DISCOVERY_SERVICE => {
+                    let (instance, _) = read_dns_name(packet, rdata_offset)?;
+                    let instance = normalize_dns_name(&instance);
+                    instances.insert(instance.clone());
+                    services
+                        .entry(instance.clone())
+                        .or_insert_with(|| MdnsService {
+                            instance,
+                            ..MdnsService::default()
+                        });
+                }
+                16 => {
+                    let service = services
+                        .entry(normalize_dns_name(&record_name))
+                        .or_default();
+                    service.instance = normalize_dns_name(&record_name);
+                    for (key, value) in read_txt_records(&packet[rdata_offset..offset]) {
+                        match key.as_str() {
+                            "audio_port" => service.audio_port = value.parse().ok(),
+                            "admin_port" => service.admin_port = value.parse().ok(),
+                            "auth" => service.auth = Some(value),
+                            "name" => service.name = Some(value),
+                            "version" => service.version = Some(value),
+                            _ => {}
+                        }
+                    }
+                }
+                28 if rdlen == 16 => {
+                    let mut octets = [0_u8; 16];
+                    octets.copy_from_slice(&packet[rdata_offset..rdata_offset + 16]);
+                    addresses
+                        .entry(normalize_dns_name(&record_name))
+                        .or_default()
+                        .push(IpAddr::V6(Ipv6Addr::from(octets)));
+                }
+                33 if rdlen >= 6 => {
+                    let service = services
+                        .entry(normalize_dns_name(&record_name))
+                        .or_default();
+                    service.instance = normalize_dns_name(&record_name);
+                    service.control_port = Some(dns_u16(packet, rdata_offset + 4)?);
+                    let (target, _) = read_dns_name(packet, rdata_offset + 6)?;
+                    service.target = Some(normalize_dns_name(&target));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(services
+            .into_iter()
+            .filter(|(instance, service)| {
+                instances.contains(instance)
+                    || instance.ends_with(INTERCOM_DISCOVERY_SERVICE)
+                    || service.target.is_some()
+            })
+            .filter_map(|(_instance, service)| profile_from_mdns_service(service, &addresses))
+            .collect())
+    }
+
+    #[cfg(target_os = "android")]
+    fn profile_from_mdns_service(
+        service: MdnsService,
+        addresses: &std::collections::HashMap<String, Vec<std::net::IpAddr>>,
+    ) -> Option<MobileServerProfile> {
+        use client_core::{DEFAULT_AUDIO_PORT, DEFAULT_CONTROL_PORT};
+
+        let target = service.target?;
+        let ip = addresses
+            .get(&target)?
+            .iter()
+            .copied()
+            .find(std::net::IpAddr::is_ipv4)
+            .or_else(|| addresses.get(&target)?.iter().copied().next())?;
+        let server_host = ip.to_string();
+        let url_host = match ip {
+            std::net::IpAddr::V4(ip) => ip.to_string(),
+            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        };
+        let name = service
+            .name
+            .unwrap_or_else(|| mdns_instance_label(&service.instance));
+        let control_port = service.control_port.unwrap_or(DEFAULT_CONTROL_PORT);
+        let audio_port = service.audio_port.unwrap_or(DEFAULT_AUDIO_PORT);
+        let server = std::net::SocketAddr::new(ip, audio_port).to_string();
+        let control = format!("ws://{url_host}:{control_port}");
+        let admin = service
+            .admin_port
+            .map(|port| format!("http://{url_host}:{port}"));
+        let id = if service.instance.trim().is_empty() {
+            mobile_profile_id(&name, &control)
+        } else {
+            service.instance.clone()
+        };
+
+        Some(MobileServerProfile {
+            id,
+            name,
+            server_host,
+            server,
+            control,
+            admin,
+            auth: service.auth,
+            version: service.version,
+            last_connected_ms: None,
+            discovered: true,
+        })
+    }
+
+    #[cfg(target_os = "android")]
+    fn dedupe_discovered_profiles(
+        profiles: Vec<MobileServerProfile>,
+    ) -> anyhow::Result<Vec<MobileServerProfile>> {
+        let mut merged = Vec::<MobileServerProfile>::new();
+        for profile in profiles {
+            if let Some(existing) = merged.iter_mut().find(|existing| {
+                existing.control == profile.control
+                    || mobile_profiles_match_discovered_service(existing, &profile)
+            }) {
+                if should_replace_mobile_profile(existing, &profile) {
+                    *existing = profile;
+                }
+            } else if !merged
+                .iter()
+                .any(|existing| existing.control == profile.control)
+            {
+                merged.push(profile);
+            }
+        }
+        Ok(merged)
+    }
+
+    #[cfg(target_os = "android")]
+    fn normalize_dns_name(name: &str) -> String {
+        name.trim_end_matches('.').to_ascii_lowercase()
+    }
+
+    #[cfg(target_os = "android")]
+    fn mdns_instance_label(instance: &str) -> String {
+        instance
+            .strip_suffix(&format!(".{INTERCOM_DISCOVERY_SERVICE}"))
+            .unwrap_or(instance)
+            .to_string()
+    }
+
+    #[cfg(target_os = "android")]
+    fn read_txt_records(data: &[u8]) -> Vec<(String, String)> {
+        let mut records = Vec::new();
+        let mut offset = 0;
+        while offset < data.len() {
+            let len = data[offset] as usize;
+            offset += 1;
+            if offset + len > data.len() {
+                break;
+            }
+            let text = String::from_utf8_lossy(&data[offset..offset + len]);
+            offset += len;
+            if let Some((key, value)) = text.split_once('=') {
+                records.push((key.to_ascii_lowercase(), value.to_string()));
+            }
+        }
+        records
+    }
+
+    #[cfg(target_os = "android")]
+    fn read_dns_name(packet: &[u8], offset: usize) -> anyhow::Result<(String, usize)> {
+        let mut labels = Vec::new();
+        let mut pos = offset;
+        let mut consumed = None;
+        let mut jumps = 0;
+        loop {
+            if pos >= packet.len() {
+                bail!("DNS name offset out of bounds");
+            }
+            let len = packet[pos];
+            if len & 0xC0 == 0xC0 {
+                if pos + 1 >= packet.len() {
+                    bail!("DNS compression pointer out of bounds");
+                }
+                let pointer = (((len & 0x3F) as usize) << 8) | packet[pos + 1] as usize;
+                consumed.get_or_insert(pos + 2);
+                pos = pointer;
+                jumps += 1;
+                if jumps > 16 {
+                    bail!("too many DNS compression jumps");
+                }
+                continue;
+            }
+            if len == 0 {
+                return Ok((labels.join("."), consumed.unwrap_or(pos + 1)));
+            }
+            if len & 0xC0 != 0 {
+                bail!("unsupported DNS label encoding");
+            }
+            let start = pos + 1;
+            let end = start + len as usize;
+            if end > packet.len() {
+                bail!("DNS label out of bounds");
+            }
+            labels.push(String::from_utf8_lossy(&packet[start..end]).into_owned());
+            pos = end;
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn dns_u16(packet: &[u8], offset: usize) -> anyhow::Result<u16> {
+        if offset + 2 > packet.len() {
+            bail!("DNS u16 out of bounds");
+        }
+        Ok(u16::from_be_bytes([packet[offset], packet[offset + 1]]))
+    }
+
+    #[cfg(target_os = "android")]
+    fn dns_u32(packet: &[u8], offset: usize) -> anyhow::Result<u32> {
+        if offset + 4 > packet.len() {
+            bail!("DNS u32 out of bounds");
+        }
+        Ok(u32::from_be_bytes([
+            packet[offset],
+            packet[offset + 1],
+            packet[offset + 2],
+            packet[offset + 3],
+        ]))
+    }
+
     fn spawn_mobile_runtime(settings: AppSettings) -> anyhow::Result<MobileRuntimeHandle> {
         let desktop_args = settings.desktop_args(false)?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let (api_tx, api_rx) = std::sync::mpsc::channel::<desktop::LocalClientApi>();
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
         let join = thread::Builder::new()
             .name("intercom-mobile-client-runtime".to_string())
             .spawn(move || {
-                tokio::runtime::Builder::new_multi_thread()
+                let result = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
                     .context("build mobile client runtime")
@@ -1404,16 +2011,53 @@ mod mobile {
                             },
                             Some(api_tx),
                         ))
-                    })
+                    });
+                let reported = result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|err| format!("{err:#}"));
+                let _ = result_tx.send(reported);
+                result
             })
             .context("spawn mobile client runtime")?;
-        let api = match api_rx.recv_timeout(std::time::Duration::from_secs(15)) {
-            Ok(api) => api,
-            Err(err) => {
-                let _ = shutdown_tx.send(());
-                return Err(anyhow::anyhow!(
-                    "mobile client runtime did not become ready: {err}"
-                ));
+        let ready_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let api = loop {
+            match api_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(api) => break api,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if let Ok(result) = result_rx.try_recv() {
+                        let _ = shutdown_tx.send(());
+                        let _ = join.join();
+                        match result {
+                            Ok(()) => bail!("mobile client runtime exited before becoming ready"),
+                            Err(err) => bail!("mobile client runtime failed before ready: {err}"),
+                        }
+                    }
+                    if std::time::Instant::now() >= ready_deadline {
+                        let _ = shutdown_tx.send(());
+                        bail!("mobile client runtime did not become ready within 15 seconds");
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = shutdown_tx.send(());
+                    let joined = join
+                        .join()
+                        .map_err(|_| "mobile client runtime thread panicked".to_string())
+                        .and_then(|result| result.map_err(|err| format!("{err:#}")));
+                    let runtime_result = result_rx.try_recv().ok();
+                    match runtime_result {
+                        Some(Ok(())) => {
+                            bail!("mobile client runtime exited before becoming ready")
+                        }
+                        Some(Err(err)) => {
+                            bail!("mobile client runtime failed before ready: {err}")
+                        }
+                        None => match joined {
+                            Ok(()) => bail!("mobile client runtime exited before becoming ready"),
+                            Err(err) => bail!("mobile client runtime failed before ready: {err}"),
+                        },
+                    }
+                }
             }
         };
         Ok(MobileRuntimeHandle {
@@ -1425,12 +2069,17 @@ mod mobile {
     }
 
     fn prepare_mobile_settings(settings: &mut AppSettings) {
+        settings.user_id = None;
+        settings.codec = Codec::Opus;
+        settings.buttons.clear();
+        settings.button_keys.clear();
         settings.window_mode = AppWindowMode::Native;
         settings.disable_local_ui = true;
+        settings.normalize_endpoints();
     }
 
     fn mobile_controls_url() -> String {
-        "client-controls.html".to_string()
+        "client-controls.html?mobile=1".to_string()
     }
 
     fn mobile_settings_path(app: &tauri::AppHandle) -> std::result::Result<PathBuf, String> {
@@ -1443,8 +2092,8 @@ mod mobile {
 }
 
 fn validate_gain(name: &str, gain: f32) -> anyhow::Result<()> {
-    if !gain.is_finite() || !(0.0..=8.0).contains(&gain) {
-        bail!("{name} must be a finite value between 0 and 8");
+    if !gain.is_finite() || !(0.0..=2.0).contains(&gain) {
+        bail!("{name} must be a finite value between 0 and 2");
     }
     Ok(())
 }
@@ -1456,6 +2105,23 @@ fn temp_settings_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| "intercom-app-settings.json".into());
     file_name.push(format!(".{}.tmp", std::process::id()));
     path.with_file_name(file_name)
+}
+
+#[cfg(any(
+    test,
+    all(feature = "native", any(target_os = "ios", target_os = "android"))
+))]
+fn prepare_mobile_identity_path(settings: &mut AppSettings, settings_path: &Path) {
+    if settings
+        .client_uid
+        .as_deref()
+        .is_some_and(|uid| !uid.trim().is_empty())
+    {
+        return;
+    }
+    settings.identity_file = settings_path
+        .parent()
+        .map(|dir| dir.join("client-identity.json"));
 }
 
 fn app_input_backend_to_core(backend: desktop::AudioInputBackend) -> ClientAudioBackendKind {
@@ -1524,6 +2190,7 @@ mod tests {
             init_config: false,
             print_config: false,
             print_launch_plan: false,
+            server_host: None,
             server: None,
             control: None,
             user_id: None,
@@ -1543,6 +2210,7 @@ mod tests {
             input_channel: None,
             output_device: None,
             debug_audio_dir: None,
+            button_count: None,
             buttons: Vec::new(),
             button_keys: Vec::new(),
             local_ui_bind: None,
@@ -1560,11 +2228,13 @@ mod tests {
     fn defaults_match_desktop_launcher_defaults() {
         let settings = AppSettings::default();
 
-        assert_eq!(settings.user_id, Some(1));
+        assert_eq!(settings.user_id, None);
+        assert_eq!(settings.server_host, "127.0.0.1");
         assert_eq!(settings.server, "127.0.0.1:40000".parse().unwrap());
         assert_eq!(settings.control, "ws://127.0.0.1:40001");
-        assert_eq!(settings.tx_channel, 1);
-        assert_eq!(settings.listen_channel, 1);
+        assert!(!settings.advanced_endpoints);
+        assert_eq!(settings.tx_channel, 0);
+        assert_eq!(settings.listen_channel, 0);
         assert_eq!(settings.codec, Codec::Pcm16);
         assert_eq!(settings.opus_profile, OpusProfile::Speech24Standard);
         assert!(!settings.input_limiter);
@@ -1573,10 +2243,82 @@ mod tests {
         assert_eq!(settings.input_channel, desktop::InputChannelMode::Average);
         assert_eq!(settings.local_ui_bind, "127.0.0.1:41002".parse().unwrap());
         assert_eq!(settings.local_ui_token, None);
-        assert_eq!(settings.app_title, "Intercom Suite");
+        assert_eq!(settings.button_count, DEFAULT_CLIENT_BUTTON_COUNT);
+        assert_eq!(settings.app_title, "RedLine");
         assert_eq!(settings.window_mode, AppWindowMode::SystemBrowser);
         assert_eq!(settings.ui_open_delay_ms, 750);
         assert!(settings.server_profiles.is_empty());
+    }
+
+    #[test]
+    fn mobile_identity_path_tracks_current_settings_container() {
+        let settings_path = PathBuf::from(
+            "/private/var/mobile/Containers/Data/Application/current/Library/Application Support/com.intercomsuite.client/intercom-app-settings.json",
+        );
+        let stale_identity = PathBuf::from(
+            "/private/var/mobile/Containers/Data/Application/previous/Library/Application Support/com.intercomsuite.client/client-identity.json",
+        );
+        let mut settings = AppSettings {
+            identity_file: Some(stale_identity),
+            ..AppSettings::default()
+        };
+
+        prepare_mobile_identity_path(&mut settings, &settings_path);
+
+        assert_eq!(
+            settings.identity_file,
+            Some(settings_path.parent().unwrap().join("client-identity.json"))
+        );
+    }
+
+    #[test]
+    fn mobile_identity_path_keeps_explicit_client_uid() {
+        let settings_path = PathBuf::from(
+            "/private/var/mobile/Containers/Data/Application/current/Library/Application Support/com.intercomsuite.client/intercom-app-settings.json",
+        );
+        let stale_identity = PathBuf::from(
+            "/private/var/mobile/Containers/Data/Application/previous/Library/Application Support/com.intercomsuite.client/client-identity.json",
+        );
+        let mut settings = AppSettings {
+            client_uid: Some("explicit-client".to_string()),
+            identity_file: Some(stale_identity.clone()),
+            ..AppSettings::default()
+        };
+
+        prepare_mobile_identity_path(&mut settings, &settings_path);
+
+        assert_eq!(settings.identity_file, Some(stale_identity));
+    }
+
+    #[test]
+    fn server_host_derives_runtime_endpoints() {
+        let settings = AppSettings {
+            server_host: "192.168.12.84".to_string(),
+            ..AppSettings::default()
+        };
+
+        let runtime = settings.client_runtime_config(false).unwrap();
+        assert_eq!(runtime.server_host, "192.168.12.84");
+        assert_eq!(runtime.server, "192.168.12.84:40000".parse().unwrap());
+        assert_eq!(runtime.control, "ws://192.168.12.84:40001");
+    }
+
+    #[test]
+    fn legacy_default_port_settings_migrate_to_server_host() {
+        let mut settings = AppSettings {
+            server_host: String::new(),
+            server: "192.168.1.20:40000".parse().unwrap(),
+            control: "ws://192.168.1.20:40001".to_string(),
+            admin: Some("http://192.168.1.20:40002".to_string()),
+            ..AppSettings::default()
+        };
+
+        settings.normalize_endpoints();
+        assert_eq!(settings.server_host, "192.168.1.20");
+        assert!(!settings.advanced_endpoints);
+        assert_eq!(settings.server, "192.168.1.20:40000".parse().unwrap());
+        assert_eq!(settings.control, "ws://192.168.1.20:40001");
+        assert_eq!(settings.admin, None);
     }
 
     #[test]
@@ -1585,6 +2327,7 @@ mod tests {
             codec: Codec::Opus,
             input_backend: desktop::AudioInputBackend::VoiceProcessing,
             input_channel: desktop::InputChannelMode::Left,
+            button_count: 8,
             buttons: vec!["director=Director".to_string()],
             ..AppSettings::default()
         };
@@ -1597,6 +2340,7 @@ mod tests {
             ClientAudioBackendKind::VoiceProcessing
         );
         assert_eq!(runtime.input_channel, ClientInputChannelMode::Left);
+        assert_eq!(runtime.button_count, 8);
         assert_eq!(runtime.buttons, vec!["director=Director"]);
         assert!(!runtime.list_devices);
     }
@@ -1616,6 +2360,7 @@ mod tests {
         args.codec = Some(AppCodec::Pcm48);
         args.opus_profile = Some(AppOpusProfile::Speech48High);
         args.input_backend = Some(desktop::AudioInputBackend::Raw);
+        args.button_count = Some(4);
         args.buttons = vec!["director=Director".to_string()];
         args.local_ui_token = Some("secret".to_string());
         args.enable_local_ui = true;
@@ -1630,6 +2375,7 @@ mod tests {
         assert_eq!(settings.codec, Codec::Pcm48);
         assert_eq!(settings.opus_profile, OpusProfile::Speech48High);
         assert_eq!(settings.input_backend, desktop::AudioInputBackend::Raw);
+        assert_eq!(settings.button_count, 4);
         assert_eq!(settings.buttons, vec!["director=Director"]);
         assert_eq!(settings.local_ui_token.as_deref(), Some("secret"));
         assert!(!settings.disable_local_ui);
@@ -1725,6 +2471,32 @@ mod tests {
     }
 
     #[test]
+    fn mobile_profile_preference_keeps_ipv4_over_ipv6() {
+        let ipv6 = MobileServerProfile {
+            id: "studio-a._intercom-suite._tcp.local".to_string(),
+            name: "Studio A".to_string(),
+            server_host: "fe80::1".to_string(),
+            server: "[fe80::1]:40000".to_string(),
+            control: "ws://[fe80::1]:40001".to_string(),
+            discovered: true,
+            ..MobileServerProfile::default()
+        };
+        let ipv4 = MobileServerProfile {
+            id: "studio-a._intercom-suite._tcp.local".to_string(),
+            name: "Studio A".to_string(),
+            server_host: "192.168.12.84".to_string(),
+            server: "192.168.12.84:40000".to_string(),
+            control: "ws://192.168.12.84:40001".to_string(),
+            discovered: true,
+            ..MobileServerProfile::default()
+        };
+
+        assert!(mobile_profiles_match_discovered_service(&ipv6, &ipv4));
+        assert!(should_replace_mobile_profile(&ipv6, &ipv4));
+        assert!(!should_replace_mobile_profile(&ipv4, &ipv6));
+    }
+
+    #[test]
     fn desktop_args_parse_button_strings() {
         let settings = AppSettings {
             user_id: Some(1),
@@ -1736,8 +2508,23 @@ mod tests {
         let args = settings.desktop_args(false).unwrap();
 
         assert_eq!(args.user_id, Some(1));
+        assert_eq!(args.server_host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(args.button_count, DEFAULT_CLIENT_BUTTON_COUNT);
         assert_eq!(args.buttons.len(), 1);
         assert_eq!(args.button_keys.len(), 1);
+        assert!(!args.disable_command_loop);
+    }
+
+    #[test]
+    fn native_desktop_args_disable_terminal_command_loop() {
+        let settings = AppSettings {
+            window_mode: AppWindowMode::Native,
+            ..AppSettings::default()
+        };
+
+        let args = settings.desktop_args(false).unwrap();
+
+        assert!(args.disable_command_loop);
     }
 
     #[test]
@@ -1749,7 +2536,7 @@ mod tests {
         assert!(settings.validate().is_err());
 
         settings.jitter_ms = 40;
-        settings.mic_gain = 9.0;
+        settings.mic_gain = 2.5;
         assert!(settings.validate().is_err());
 
         settings.mic_gain = 1.0;
@@ -1760,8 +2547,21 @@ mod tests {
         settings.app_title = "   ".to_string();
         assert!(settings.validate().is_err());
 
-        settings.app_title = "Intercom Suite".to_string();
+        settings.app_title = "RedLine".to_string();
         settings.ui_open_delay_ms = 30_001;
+        assert!(settings.validate().is_err());
+
+        settings.ui_open_delay_ms = 750;
+        settings.button_count = MAX_CLIENT_BUTTON_COUNT + 1;
+        assert!(settings.validate().is_err());
+
+        settings.button_count = DEFAULT_CLIENT_BUTTON_COUNT;
+        settings.server_host = "http://127.0.0.1".to_string();
+        assert!(settings.validate().is_err());
+
+        settings.server_host = "127.0.0.1".to_string();
+        settings.advanced_endpoints = true;
+        settings.control = "http://127.0.0.1:40001".to_string();
         assert!(settings.validate().is_err());
     }
 
@@ -1776,7 +2576,7 @@ mod tests {
 
         assert!(plan.opens_window);
         assert_eq!(plan.window_mode, AppWindowMode::SystemBrowser);
-        assert_eq!(plan.app_title, "Intercom Suite");
+        assert_eq!(plan.app_title, "RedLine");
         assert!(plan.local_ui_url.unwrap().starts_with("http://127.0.0.1:"));
         assert_ne!(settings.local_ui_bind.port(), 0);
     }
@@ -1894,7 +2694,7 @@ mod tests {
         let config: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
 
-        assert_eq!(config["productName"], "Intercom Suite");
+        assert_eq!(config["productName"], "RedLine");
         assert_eq!(config["mainBinaryName"], "app-native");
         assert_eq!(config["build"]["frontendDist"], "tauri-assets");
         assert_eq!(config["app"]["windows"].as_array().unwrap().len(), 0);
@@ -1906,6 +2706,10 @@ mod tests {
             "tauri-assets/mobile.html",
             "tauri-assets/mobile.css",
             "tauri-assets/mobile.js",
+            "tauri-assets/client-controls.html",
+            "tauri-assets/client-controls.css",
+            "tauri-assets/client-controls.js",
+            "tauri-assets/client-api.js",
             "tauri-assets/settings.html",
             "tauri-assets/settings.css",
             "tauri-assets/settings.js",
@@ -1940,8 +2744,18 @@ mod tests {
         let controls_html =
             fs::read_to_string(root.join("tauri-assets/client-controls.html")).unwrap();
         let controls_js = fs::read_to_string(root.join("tauri-assets/client-controls.js")).unwrap();
+        let controls_api = fs::read_to_string(root.join("tauri-assets/client-api.js")).unwrap();
         let controls_css =
             fs::read_to_string(root.join("tauri-assets/client-controls.css")).unwrap();
+        let shared_controls_root = root.join("../shared-ui/talking");
+        let shared_controls_html =
+            fs::read_to_string(shared_controls_root.join("client-controls.html")).unwrap();
+        let shared_controls_js =
+            fs::read_to_string(shared_controls_root.join("client-controls.js")).unwrap();
+        let shared_controls_css =
+            fs::read_to_string(shared_controls_root.join("client-controls.css")).unwrap();
+        let shared_tauri_api =
+            fs::read_to_string(shared_controls_root.join("client-api-tauri.js")).unwrap();
         let ios_dev_script = fs::read_to_string(root.join("scripts/ios-dev.sh")).unwrap();
         let ios_config = fs::read_to_string(root.join("tauri.ios.conf.json")).unwrap();
         let ios_clean_script =
@@ -1955,31 +2769,173 @@ mod tests {
         let ios_bridge = fs::read_to_string(root.join("src/ios_mobile.m")).unwrap();
         let android_manifest =
             fs::read_to_string(root.join("gen/android/app/src/main/AndroidManifest.xml")).unwrap();
-        assert!(settings_html.contains("input_backend"));
-        assert!(settings_js.contains("input_backend"));
+        assert!(settings_html.contains("mobile.css"));
+        assert!(settings_html.contains("mobile-form"));
+        assert!(settings_html.contains("branding/redline-logo.png"));
+        assert!(settings_html.contains("button_count"));
+        assert!(settings_html.contains("server_host"));
+        assert!(settings_html.contains(">Audio<"));
+        assert!(settings_html.contains(">Connect</button>"));
+        assert!(settings_html.contains("Quality"));
+        assert!(!settings_html.contains("User ID"));
+        assert!(!settings_html.contains("Default TX Channel"));
+        assert!(!settings_html.contains("Default Listen Channel"));
+        assert!(!settings_html.contains("Advertised Buttons"));
+        assert!(!settings_html.contains("Button Hotkeys"));
+        assert!(!settings_html.contains("advanced_endpoints"));
+        assert!(!settings_html.contains("Custom Audio Address"));
+        assert!(!settings_html.contains("Custom Control WebSocket URL"));
+        assert!(!settings_html.contains("Custom Admin URL"));
+        assert!(!settings_html.contains(">Codec"));
+        assert!(!settings_html.contains("PCM"));
+        assert!(settings_html.contains("type=\"range\""));
+        assert!(settings_html.contains("id=\"mic_gain\" type=\"range\" min=\"0\" max=\"2\""));
+        assert!(settings_html.contains("id=\"speaker_gain\" type=\"range\" min=\"0\" max=\"2\""));
+        assert!(settings_js.contains("button_count"));
+        assert!(settings_js.contains("server_host"));
+        assert!(settings_js.contains("advanced_endpoints: false"));
+        assert!(settings_js.contains("codec: 'opus'"));
+        assert!(settings_js.contains("buttons: []"));
+        assert!(settings_js.contains("button_keys: []"));
         assert!(settings_js.contains("invoke("));
+        assert!(settings_js.contains("native_start_client"));
+        assert!(settings_js.contains("native_stop_client"));
+        assert!(settings_js.contains("native_open_controls"));
+        assert!(settings_js.contains("native_discover_servers"));
+        assert!(settings_js.contains("MANUAL_SERVER_VALUE"));
+        assert!(!settings_js.contains("mobile_start_client"));
+        assert!(!settings_js.contains("$('codec')"));
         assert!(!settings_js.contains("fetch("));
         assert!(mobile_html.contains("mobile-form"));
         assert!(mobile_html.contains("server-picker"));
         assert!(mobile_html.contains("scan-servers"));
+        assert!(mobile_html.contains("button_count"));
+        assert!(mobile_html.contains("server_host"));
+        assert!(mobile_html.contains(">Audio<"));
+        assert!(mobile_html.contains(">Connect</button>"));
+        assert!(mobile_html.contains("Quality"));
+        assert!(mobile_html.contains(">Low</option>"));
+        assert!(mobile_html.contains(">Standard</option>"));
+        assert!(mobile_html.contains(">High</option>"));
+        assert!(mobile_html.contains(">Music</option>"));
+        assert!(mobile_html.contains("manual-server-row"));
+        assert!(!mobile_html.contains(">Codec"));
+        assert!(!mobile_html.contains("PCM"));
+        assert!(!mobile_html.contains("pcm16"));
+        assert!(!mobile_html.contains("pcm24"));
+        assert!(!mobile_html.contains("pcm48"));
+        assert!(!mobile_html.contains("Opus Profile"));
+        assert!(!mobile_html.contains(">Start</button>"));
+        assert!(!mobile_html.contains(">Stop</button>"));
+        assert!(!mobile_html.contains(">Save</button>"));
+        assert!(!mobile_html.contains(">Controls</button>"));
+        assert!(!mobile_html.contains("forget-server"));
+        assert!(!mobile_html.contains("advanced_endpoints"));
+        assert!(!mobile_html.contains("Custom Audio Address"));
+        assert!(!mobile_html.contains("Custom Control WebSocket URL"));
+        assert!(!mobile_html.contains("Custom Admin URL"));
+        assert!(
+            mobile_html.find("id=\"message\"").unwrap() < mobile_html.find("server-panel").unwrap()
+        );
+        assert!(!mobile_html.contains("User ID"));
+        assert!(!mobile_html.contains("Listen Channel"));
+        assert!(!mobile_html.contains("TX Channel"));
+        assert!(!mobile_html.contains("Button Keys"));
+        assert!(mobile_html.contains("type=\"range\""));
+        assert!(mobile_html.contains("id=\"mic_gain\" type=\"range\" min=\"0\" max=\"2\""));
+        assert!(mobile_html.contains("id=\"speaker_gain\" type=\"range\" min=\"0\" max=\"2\""));
         assert!(mobile_js.contains("invoke("));
+        assert!(mobile_js.contains("button_count"));
+        assert!(mobile_js.contains("server_host"));
+        assert!(mobile_js.contains("advanced_endpoints"));
+        assert!(mobile_js.contains("buttons: []"));
+        assert!(mobile_js.contains("button_keys: []"));
         assert!(mobile_js.contains("mobile_start_client"));
+        assert!(mobile_js.contains("mobile_stop_client"));
         assert!(mobile_js.contains("mobile_open_controls"));
         assert!(mobile_js.contains("mobile_discover_servers"));
-        assert!(mobile_js.contains("mobile_select_server"));
-        assert!(mobile_js.contains("mobile_forget_server"));
+        assert!(mobile_js.contains("MANUAL_SERVER_VALUE"));
+        assert!(mobile_js.contains("server: audioForHost(host)"));
+        assert!(mobile_js.contains("advanced_endpoints: false"));
+        assert!(mobile_js.contains("codec: 'opus'"));
+        assert!(!mobile_js.contains("$('codec')"));
+        assert!(!mobile_js.contains("renderCodecFields"));
+        assert!(mobile_js.contains("setRuntimeRunning(response.running)"));
+        assert!(!mobile_js.contains("mobile_select_server"));
+        assert!(!mobile_js.contains("mobile_forget_server"));
         assert!(mobile_js.contains("server_profiles"));
+        assert!(mobile_js.contains("Choose a server"));
+        assert!(!mobile_js.contains("applyServerProfileToForm"));
         assert!(mobile_js.contains("status.phase"));
         assert!(!mobile_js.contains("fetch("));
         assert!(mobile_css.contains(".phone-shell"));
         assert!(mobile_css.contains(".server-panel"));
+        assert!(mobile_css.contains(".disconnect-button"));
+        assert_eq!(controls_html, shared_controls_html);
+        assert_eq!(controls_js, shared_controls_js);
+        assert_eq!(controls_css, shared_controls_css);
+        assert_eq!(controls_api, shared_tauri_api);
+        assert!(controls_api.contains("open_native_settings"));
+        assert!(controls_api.contains("mobileShell()"));
+        assert!(!controls_api.contains("setup: true"));
+        assert!(controls_html.contains("client-api.js"));
         assert!(controls_html.contains("client-controls.js"));
-        assert!(controls_js.contains("invoke("));
-        assert!(controls_js.contains("client_state"));
-        assert!(controls_js.contains("client_talk_down"));
-        assert!(controls_js.contains("client_config"));
+        assert!(controls_html.contains("id=\"client-title\" hidden"));
+        assert!(controls_html.contains("mobile-shell-controls"));
+        assert!(controls_html.contains(">Runtime</button>"));
+        assert!(controls_js.contains("function bindPressHold"));
+        assert!(controls_js.contains("document.addEventListener('pointerup', finish, true)"));
+        assert!(controls_js.contains("SYNTHETIC_TOUCH_POINTER_IGNORE_MS"));
+        assert!(controls_js.contains("window.addEventListener('touchstart', markUserInteracting"));
+        assert!(!controls_js.contains("onlostpointercapture = regularTalkRelease"));
+        assert!(controls_css.contains("touch-action: none"));
+        assert!(controls_css.contains(":root.mobile-shell-controls"));
+        assert!(controls_css.contains("height: 100dvh"));
+        assert!(controls_css.contains("align-content: start"));
+        assert!(controls_css.contains("--control-height: 64px"));
+        assert!(controls_css.contains("padding-bottom: var(--shell-x-pad)"));
+        assert!(controls_css.contains(".mobile-shell-controls .channel-row"));
+        assert!(controls_css.contains(".mobile-shell-controls .dock-status"));
+        assert!(controls_html.contains("Runtime Controls"));
+        assert!(controls_html.contains("show-all-channels"));
+        assert!(controls_html.contains("channel-view-toggle"));
+        assert!(controls_html.contains("identity-card"));
+        assert!(controls_html.contains("identity-card-value"));
+        assert!(controls_html.contains("max=\"2\""));
+        assert!(!controls_html.contains("Client Settings"));
+        assert!(controls_html.contains("dock-status"));
+        assert!(controls_js.contains("Server connected"));
+        assert!(controls_js.contains("runtimeSettings"));
+        assert!(controls_api.contains("runtimeSettings: false"));
+        assert!(controls_css.contains(".tag.connected"));
+        assert!(controls_api.contains("invoke("));
+        assert!(controls_api.contains("client_state"));
+        assert!(controls_api.contains("client_talk_down"));
+        assert!(controls_api.contains("client_config"));
+        assert!(controls_js.contains("applyButtonColor"));
+        assert!(controls_html.contains("channel-settings-modal"));
+        assert!(controls_html.contains("channel-listen-toggle"));
+        assert!(controls_html.contains("channel-tx-toggle"));
+        assert!(controls_js.contains("function bindChannelSettingsGesture"));
+        assert!(controls_js.contains("function saveChannelSettings()"));
+        assert!(controls_js.contains("showAllChannels"));
+        assert!(controls_js.contains("function allConfiguredChannels()"));
+        assert!(controls_js.contains("function setShowAllChannels"));
+        assert!(controls_js.contains("function assignedClientLabel()"));
+        assert!(controls_js.contains("User ID"));
+        assert!(controls_js.contains("function channelIconTag"));
+        assert!(controls_js.contains("function channelStatusTags"));
+        assert!(controls_css.contains(".tag.icon-tag"));
+        assert!(controls_css.contains(".tag.tx.talking"));
+        assert!(!controls_js.contains(">listening<"));
+        assert!(!controls_js.contains(">regular tx<"));
+        assert!(!controls_js.contains(">talking<"));
+        assert!(!controls_js.contains("clientApi?.name || 'client'} controls"));
+        assert!(controls_js.contains("'Hold Talk'"));
         assert!(!controls_js.contains("fetch("));
+        assert!(!controls_api.contains("fetch("));
         assert!(controls_css.contains(".phone-shell"));
+        assert!(controls_css.contains("--dock-height"));
         assert!(ios_dev_script.contains("simctl bootstatus"));
         assert!(ios_dev_script.contains("cargo tauri ios dev"));
         assert!(ios_dev_script.contains("--features=\"${TAURI_IOS_FEATURES:-native}\""));
@@ -2015,6 +2971,10 @@ mod tests {
         assert!(ios_info.contains("_intercom-suite._tcp"));
         assert!(ios_bridge.contains("AVAudioSessionCategoryPlayAndRecord"));
         assert!(ios_bridge.contains("AVAudioSessionModeVoiceChat"));
+        assert!(ios_bridge.contains("inputGainSettable"));
+        assert!(ios_bridge.contains("setInputGain:1.0"));
+        assert!(ios_bridge.contains("intercom_audio_session_configured"));
+        assert!(ios_bridge.contains("AVAudioSessionRouteChangeReasonCategoryChange"));
         assert!(ios_bridge.contains("intercom_ios_browse_intercom_services"));
         assert!(android_manifest.contains("android.permission.RECORD_AUDIO"));
         assert!(android_manifest.contains("android.permission.INTERNET"));
@@ -2041,7 +3001,7 @@ mod tests {
                 "mobile shell missing {token}"
             );
         }
-        assert!(mobile_html.contains("Intercom Suite"));
+        assert!(mobile_html.contains("RedLine"));
         assert!(!mobile_html.contains(">Mobile Client<"));
     }
 
@@ -2051,7 +3011,7 @@ mod tests {
         let mobile_js = fs::read_to_string(root.join("tauri-assets/mobile.js")).unwrap();
 
         assert!(mobile_js.contains("mobile_status"));
-        assert!(mobile_js.contains("Client is running. Open Controls"));
+        assert!(mobile_js.contains("Client connected. Close to return to controls."));
         assert!(mobile_js.contains("close-config"));
         assert!(mobile_js.contains("async function openControls"));
         assert!(mobile_js.contains("await invoke('mobile_open_controls')"));
