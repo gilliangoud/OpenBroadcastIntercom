@@ -92,7 +92,7 @@ jobs:
         run: |
           version="$(python3 tools/release_version.py --apply --print-next | tail -n 1)"
           tools/check-version-sync.sh
-          git add Cargo.toml clients/app/tauri.conf.json clients/bridge-app/tauri.conf.json server-app/tauri.conf.json
+          git add Cargo.toml Cargo.lock clients/app/tauri.conf.json clients/bridge-app/tauri.conf.json server-app/tauri.conf.json
           if ! git diff --cached --quiet; then
             git commit -m "chore(release): v${version} [skip release]"
           fi
