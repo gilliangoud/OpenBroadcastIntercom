@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 env:
-  TAURI_CLI_VERSION: 2.10.1
+  TAURI_CLI_VERSION: 2.11.0
 
 concurrency:
   group: release-main
@@ -214,6 +214,7 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     env:
+      VERSION: ${{ needs.version.outputs.version }}
       INTERCOM_RELEASE_TAG: ${{ needs.version.outputs.tag }}
       INTERCOM_GIT_SHA: ${{ needs.version.outputs.sha }}
       INTERCOM_BUILD_TIMESTAMP: ${{ needs.version.outputs.timestamp }}
@@ -257,14 +258,145 @@ jobs:
       - name: Collect Android artifacts
         run: |
           mkdir -p artifacts
-          find clients/app/gen/android/app/build/outputs/apk -type f -name '*.apk' -exec cp '{}' artifacts/ \;
+          apk_path="$(find clients/app/gen/android/app/build/outputs/apk -type f -name '*.apk' -print | sort | tail -n 1)"
+          if [ -z "$apk_path" ]; then
+            echo "built Android .apk was not found" >&2
+            exit 1
+          fi
+          cp "$apk_path" "artifacts/Intercom-Suite-android-debug-${VERSION}.apk"
       - uses: actions/upload-artifact@v4
         with:
           name: android-debug-apk
           path: artifacts/*
 
+  ios:
+    needs: version
+    runs-on: macos-26
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      INTERCOM_RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      INTERCOM_GIT_SHA: ${{ needs.version.outputs.sha }}
+      INTERCOM_BUILD_TIMESTAMP: ${{ needs.version.outputs.timestamp }}
+      IOS_SIGNING_CONFIGURED: ${{ secrets.APPLE_DEVELOPMENT_TEAM != '' && secrets.IOS_CERTIFICATE_P12_BASE64 != '' && secrets.IOS_CERTIFICATE_PASSWORD != '' && secrets.IOS_PROVISIONING_PROFILE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          lfs: true
+      - name: Select Xcode 26.4
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.4.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphonesimulator --show-sdk-version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - name: Install cargo-tauri npm shim
+        run: |
+          mkdir -p "$HOME/.cargo/bin"
+          cat > "$HOME/.cargo/bin/cargo-tauri" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [ "${1:-}" = "tauri" ]; then
+            shift
+          fi
+          exec npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" "$@"
+          SH
+          chmod +x "$HOME/.cargo/bin/cargo-tauri"
+      - name: Build iOS simulator app
+        working-directory: clients/app
+        run: ./scripts/ios-build-sim.sh
+      - name: Collect iOS simulator artifact
+        run: |
+          mkdir -p artifacts
+          app_path="$(
+            find clients/app/gen/apple/build -path '*/.stale/*' -prune -o -type d -name '*.app' -print |
+              sort |
+              tail -n 1
+          )"
+          if [ -z "$app_path" ]; then
+            echo "built iOS simulator .app was not found" >&2
+            exit 1
+          fi
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" "artifacts/Intercom-Suite-ios-simulator-${VERSION}.zip"
+      - name: Install iOS signing assets
+        if: env.IOS_SIGNING_CONFIGURED == 'true'
+        env:
+          IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          decode_base64() {
+            if base64 --help 2>&1 | grep -q -- '--decode'; then
+              base64 --decode
+            else
+              base64 -D
+            fi
+          }
+
+          keychain_path="$RUNNER_TEMP/intercom-ios-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          certificate_path="$RUNNER_TEMP/intercom-ios-signing.p12"
+          profile_path="$HOME/Library/MobileDevice/Provisioning Profiles/intercom-suite.mobileprovision"
+
+          printf '%s' "$IOS_CERTIFICATE_P12_BASE64" | decode_base64 > "$certificate_path"
+          mkdir -p "$(dirname "$profile_path")"
+          printf '%s' "$IOS_PROVISIONING_PROFILE_BASE64" | decode_base64 > "$profile_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | tr -d '"')
+          security import "$certificate_path" -P "$IOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+      - name: Build signed iOS IPA
+        if: env.IOS_SIGNING_CONFIGURED == 'true'
+        working-directory: clients/app
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
+        run: ./scripts/ios-device-build.sh
+      - name: Collect signed iOS IPA
+        if: env.IOS_SIGNING_CONFIGURED == 'true'
+        run: |
+          ipa_path="$(find clients/app/gen/apple/build -type f -name '*.ipa' -print | sort | tail -n 1)"
+          if [ -z "$ipa_path" ]; then
+            echo "signed iOS .ipa was not found" >&2
+            exit 1
+          fi
+          cp "$ipa_path" "artifacts/Intercom-Suite-ios-${VERSION}.ipa"
+      - name: Add iOS signing setup note
+        if: env.IOS_SIGNING_CONFIGURED != 'true'
+        run: |
+          mkdir -p artifacts
+          cat > "artifacts/Intercom-Suite-ios-device-signing-required-${VERSION}.txt" <<EOF
+          This release includes Intercom-Suite-ios-simulator-${VERSION}.zip for simulator installs.
+
+          A physical-device iPhone/iPad IPA was not produced because the repository
+          does not have all required Apple signing secrets configured:
+
+          - APPLE_DEVELOPMENT_TEAM
+          - IOS_CERTIFICATE_P12_BASE64
+          - IOS_CERTIFICATE_PASSWORD
+          - IOS_PROVISIONING_PROFILE_BASE64
+
+          Add those secrets with an Apple Development or Ad Hoc signing certificate
+          and a provisioning profile for com.intercomsuite.client to publish a
+          GitHub-release IPA that can be installed on provisioned devices.
+          EOF
+      - name: Remove iOS signing keychain
+        if: always() && env.IOS_SIGNING_CONFIGURED == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/intercom-ios-signing.keychain-db" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-client
+          path: artifacts/*
+
   publish:
-    needs: [version, macos, linux, windows, android]
+    needs: [version, macos, linux, windows, android, ios]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
