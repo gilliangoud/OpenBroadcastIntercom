@@ -1,4 +1,4 @@
-# Intercom Suite Hardware Plan
+# RedLine Hardware Plan
 
 This is a working hardware path for the first low-cost units. Prices and stock
 change often; verify before ordering.
@@ -73,7 +73,7 @@ Optional breakout route if not using an audio dev board:
 | Item | Qty | Notes |
 | --- | ---: | --- |
 | I2S MEMS microphone breakout | 1 | Adafruit SPH0645 breakout is a convenient digital mic reference. |
-| I2S speaker amp / headphone codec | 1 | Needed for practical monitoring; prefer a codec with headphone driver for intercom. |
+| I2S speaker amp / headphone codec | 1 | Needed for practical monitoring; prefer a codec with headphone driver for RedLine. |
 | ESP32-S3 module/dev board with PSRAM | 1 | Do not choose a no-PSRAM board for Opus work. |
 
 ## Button Layout
@@ -147,7 +147,7 @@ Current GOU-59 hardware:
   ADC input, PGA gain, capture channel, high-pass, software gains, and sidetone
   mode/gain at runtime through `config_update`.
 - Local monitoring: optional ESP32 sidetone is configured in
-  `Intercom ESP32 Client -> Local sidetone / self-monitor`. Firmware sidetone
+  `RedLine ESP32 Client -> Local sidetone / self-monitor`. Firmware sidetone
   is the safe bring-up mode with one local audio-frame of delay. ES8388
   line-bypass sidetone fields are retained in config JSON for visibility, but
   codec-bypass sidetone is currently forced off until the fixed playback/capture

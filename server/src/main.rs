@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
         .admin_token
         .clone()
         .map_or_else(server::HttpAuthConfig::disabled, |token| {
-            server::HttpAuthConfig::token(token, "Intercom Admin")
+            server::HttpAuthConfig::token(token, "RedLine Admin")
         });
 
     if args.disable_admin_ui {

@@ -68,7 +68,7 @@ struct BridgeAppConfig {
 impl Default for BridgeAppConfig {
     fn default() -> Self {
         Self {
-            app_title: "Intercom Bridge App".to_string(),
+            app_title: "RedLine Bridge".to_string(),
             server_host: DEFAULT_SERVER_HOST.to_string(),
             server: default_audio_addr(),
             control: ClientServerEndpoint::default().control_url(),
@@ -82,7 +82,7 @@ impl Default for BridgeAppConfig {
                 mode: BridgeMode::Input,
                 tx_channels: vec![1],
                 listen_channels: Vec::new(),
-                note: "vMix or virtual audio program feed into Intercom".to_string(),
+                note: "vMix or virtual audio program feed into RedLine".to_string(),
                 ..BridgeRouteConfig::default()
             }],
         }
@@ -1078,7 +1078,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Intercom Bridge App</title>
+  <title>RedLine Bridge</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -1089,7 +1089,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <main>
     <section class="panel connection-panel">
       <h1>Connection</h1>
-      <p class="muted">Use one server host for standard Intercom deployments. Custom ports and URLs stay in Advanced.</p>
+      <p class="muted">Use one server host for standard RedLine deployments. Custom ports and URLs stay in Advanced.</p>
       <div class="grid">
         <label>Server Host<input id="server-host" autocomplete="off" placeholder="192.168.1.10"></label>
         <label class="check"><input id="advanced-endpoints" type="checkbox"> Advanced endpoints</label>

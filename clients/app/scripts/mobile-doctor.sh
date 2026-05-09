@@ -73,7 +73,7 @@ check_tauri_cli_version() {
   fi
 }
 
-printf 'Intercom Suite mobile doctor\n'
+printf 'RedLine mobile doctor\n'
 printf 'app: %s\n' "$APP_DIR"
 printf 'ANDROID_HOME=%s\n' "$ANDROID_HOME"
 printf 'NDK_HOME=%s\n' "$NDK_HOME"

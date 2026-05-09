@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Intercom Bridge App",
+  "productName": "RedLine Bridge",
   "version": "2026.5.4",
   "identifier": "com.intercomsuite.bridge",
   "mainBinaryName": "bridge-app-native",
@@ -17,10 +17,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "publisher": "Intercom Suite",
+    "publisher": "Goud Sport",
     "category": "Productivity",
     "shortDescription": "Multi-route production audio bridge launcher",
-    "longDescription": "Intercom Bridge App manages multiple production audio bridge routes for vMix, PA, virtual audio, USB interfaces, and venue workflows.",
+    "longDescription": "RedLine Bridge manages multiple production audio bridge routes for vMix, PA, virtual audio, USB interfaces, and venue workflows.",
     "icon": [
       "../app/icons/icon.png",
       "../app/icons/icon.ico",

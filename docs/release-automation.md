@@ -20,12 +20,12 @@ python3 -m unittest tools/test_release_version.py
 
 ## First-Pass Artifacts
 
-- macOS: Intercom Suite, Intercom Bridge App, and Intercom Server `.app` zip
+- macOS: RedLine, RedLine Bridge, and RedLine Server `.app` zip
   archives.
-- Windows: Intercom Suite and Intercom Bridge App NSIS installers.
-- Linux: Intercom Suite and Intercom Bridge App AppImage/deb bundles.
-- Android: Intercom Suite debug/sideload APK.
-- iOS: Intercom Suite simulator `.app` zip. When Apple signing secrets are
+- Windows: RedLine and RedLine Bridge NSIS installers.
+- Linux: RedLine and RedLine Bridge AppImage/deb bundles.
+- Android: RedLine debug/sideload APK.
+- iOS: RedLine simulator `.app` zip. When Apple signing secrets are
   configured, the workflow also publishes a signed device `.ipa` for
   provisioned iPhone/iPad installs.
 

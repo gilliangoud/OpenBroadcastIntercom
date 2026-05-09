@@ -1,6 +1,8 @@
-# Rust Intercom Prototype
+# RedLine
 
-This repository contains a first-pass intercom prototype:
+RedLine is a first-pass, low-latency broadcast intercom prototype for production
+teams, sports crews, referees, and live event operators. The repository
+contains:
 
 - `common`: shared packet format and control messages.
 - `clients/core`: shared client runtime pieces for config state, audio codec
@@ -40,7 +42,9 @@ git lfs install
 Use `intercom-state.example.json` and
 `intercom-app-settings.example.json` as sanitized starting points; do not commit
 local runtime state, credentials, signing material, or generated build output.
-See `docs/public-repo-hygiene.md` before publishing changes.
+See `docs/public-repo-hygiene.md` before publishing changes. Some internal
+default filenames and service identifiers still use `intercom-*` names for
+compatibility with existing local configs and dev installs.
 
 The default/debug edge audio format is 16 kHz mono PCM16 in 10 ms frames.
 `pcm24` and `pcm48` are also available when bandwidth is less important than
@@ -204,7 +208,7 @@ server playback loudness.
 For local self-monitoring on the ESP32, use:
 
 ```text
-Intercom ESP32 Client -> Local sidetone / self-monitor
+RedLine ESP32 Client -> Local sidetone / self-monitor
 ```
 
 `Firmware mix into playback` is the supported test mode and uses `Firmware
@@ -307,7 +311,7 @@ Desktop capture also applies a low-level de-click silence gate before packets
 are sent. This is meant to suppress chopped background-noise residue from
 platform voice-processing modes without changing normal speech. Client/server
 processing is server-owned through the `processing` config block. Use `raw` for
-external audio interfaces, `voice` for normal intercom speech,
+external audio interfaces, `voice` for normal RedLine speech,
 `voice_isolation` for the strongest speech VAD/transient rejection, and
 `broadcast` when preserving more room tone matters. `native_voice_processing`
 tells capable clients to use OS-level voice features when available. On macOS,
@@ -342,7 +346,7 @@ cargo run -p pi -- --user-id 10 --tx-channel 1 --listen-channel 1 --codec opus
 Opus profiles are selected separately from the `opus` codec:
 
 - `speech-16-low`: 16 kHz, lower CPU/bandwidth speech.
-- `speech-24-standard`: 24 kHz, default intercom speech and the first ESP32 Opus target.
+- `speech-24-standard`: 24 kHz, default RedLine speech and the first ESP32 Opus target.
 - `speech-48-high`: 48 kHz, higher speech quality.
 - `music-48`: 48 kHz higher-detail audio with Opus music signal/application hints.
 
@@ -863,7 +867,7 @@ Settings file shape:
 
 ```json
 {
-  "app_title": "Intercom Suite",
+  "app_title": "RedLine",
   "server": "127.0.0.1:40000",
   "control": "ws://127.0.0.1:40001",
   "user_id": 1,
@@ -954,7 +958,7 @@ clients/bridge-app/scripts/package-native.sh
 
 Options:
 
-- `--mode <input|output|duplex>`: capture into Intercom, play out of Intercom, or both. Default: `duplex`.
+- `--mode <input|output|duplex>`: capture into RedLine, play out of RedLine, or both. Default: `duplex`.
 - `--user-id <ID>`: requested numeric alias for the bridge.
 - `--client-uid <UUID>`: stable bridge identity override. By default the bridge creates/reuses a UUID in the OS config directory.
 - `--identity-file <PATH>`: path to the JSON file used for the generated stable bridge UUID.
@@ -975,8 +979,8 @@ on the same channel because that can feed PA/program audio back into itself.
 
 Common setups:
 
-- vMix input into Intercom: route vMix or a virtual audio cable to a bridge `input` device and set `--tx-channels` to the program channel.
-- Intercom to PA: run an `output` bridge listening to a PA channel and select the USB/audio-interface output feeding the PA chain.
+- vMix input into RedLine: route vMix or a virtual audio cable to a bridge `input` device and set `--tx-channels` to the program channel.
+- RedLine to PA: run an `output` bridge listening to a PA channel and select the USB/audio-interface output feeding the PA chain.
 - Two-way production bridge: use `duplex` only when the physical interface has separate input/output paths and feedback is controlled externally.
 - Multi-route vMix PC: run `cargo run -p bridge-app --features native --bin bridge-app-native`, add one `input` route for the vMix/program bus, one `output` route for PA or production monitor, and optional extra `output` routes for recorder/stream feeds.
 

@@ -606,7 +606,7 @@ async fn admin_api_serves_state_assets_and_channel_crud() {
 
     let (status, html) = http_request(admin_addr, "GET", "/admin/", None).await;
     assert_eq!(status, 200);
-    assert!(html.contains("Intercom Admin"));
+    assert!(html.contains("RedLine Admin"));
 
     let (status, js) = http_request(admin_addr, "GET", "/admin/app.js", None).await;
     assert_eq!(status, 200);

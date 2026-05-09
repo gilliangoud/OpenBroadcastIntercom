@@ -626,7 +626,7 @@ pub async fn run_until_shutdown_with_local_api(
             .local_ui_token
             .clone()
             .map_or_else(LocalHttpAuth::disabled, |token| {
-                LocalHttpAuth::token(token, "Intercom Client")
+                LocalHttpAuth::token(token, "RedLine Client")
             });
         tokio::spawn(run_local_ui(args.local_ui_bind, local_api, local_ui_auth))
     };

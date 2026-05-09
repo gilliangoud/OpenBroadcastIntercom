@@ -2581,6 +2581,7 @@ fn admin_router(state: Arc<ServerState>, auth: HttpAuthConfig) -> Router {
         .route("/admin/system/", get(admin_system_index))
         .route("/admin/app.js", get(admin_js))
         .route("/admin/style.css", get(admin_css))
+        .route("/admin/branding/redline-logo.png", get(admin_logo_png))
         .route("/admin/api/state", get(admin_state_handler))
         .route(
             "/admin/api/clients/:user_id",
@@ -2709,6 +2710,10 @@ async fn admin_js() -> impl IntoResponse {
 
 async fn admin_css() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/css")], ADMIN_CSS)
+}
+
+async fn admin_logo_png() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "image/png")], ADMIN_LOGO_PNG)
 }
 
 async fn admin_state_handler(State(state): State<Arc<ServerState>>) -> Json<AdminStateResponse> {
@@ -8579,6 +8584,7 @@ const ADMIN_RECORDING_HTML: &str = include_str!("../admin/recording.html");
 const ADMIN_SYSTEM_HTML: &str = include_str!("../admin/system.html");
 const ADMIN_JS: &str = include_str!("../admin/app.js");
 const ADMIN_CSS: &str = include_str!("../admin/style.css");
+const ADMIN_LOGO_PNG: &[u8] = include_bytes!("../admin/branding/redline-logo.png");
 
 async fn next_output_seq(state: &ServerState, user_id: UserId) -> u16 {
     let mut output_seq = state.output_seq.write().await;
@@ -11390,8 +11396,10 @@ mod tests {
             assert!(page.contains("/admin/system/"));
             assert!(page.contains("/admin/app.js"));
             assert!(page.contains("/admin/style.css"));
+            assert!(page.contains("/admin/branding/redline-logo.png"));
         }
 
+        assert!(!ADMIN_LOGO_PNG.is_empty());
         assert!(ADMIN_JS.contains("function renderDashboardPage()"));
         assert!(ADMIN_JS.contains("function renderClientsPage()"));
         assert!(ADMIN_JS.contains("function clientCards()"));
@@ -13007,7 +13015,7 @@ mod tests {
     #[test]
     fn discovery_command_advertises_control_service() {
         let advertisement = DiscoveryAdvertisement {
-            name: "Intercom Suite".to_string(),
+            name: "RedLine".to_string(),
             control_port: 41001,
             audio_port: 41000,
             admin_port: None,
@@ -13023,7 +13031,7 @@ mod tests {
 
         assert_eq!(command.get_program().to_string_lossy(), "dns-sd");
         assert_eq!(args[0], "-R");
-        assert_eq!(args[1], "Intercom Suite");
+        assert_eq!(args[1], "RedLine");
         assert_eq!(args[2], DISCOVERY_SERVICE_TYPE);
         assert_eq!(args[3], "local.");
         assert_eq!(args[4], "41001");

@@ -213,7 +213,7 @@ impl Default for MobileServerProfile {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            app_title: "Intercom Suite".to_string(),
+            app_title: "RedLine".to_string(),
             server_profiles: Vec::new(),
             server_host: DEFAULT_SERVER_HOST.to_string(),
             server: default_audio_addr(),
@@ -534,7 +534,7 @@ pub fn save_settings(path: &Path, settings: &AppSettings) -> anyhow::Result<()> 
 }
 
 #[allow(dead_code)]
-fn mobile_profile_id(name: &str, control: &str) -> String {
+pub fn mobile_profile_id(name: &str, control: &str) -> String {
     let name = name.trim();
     let control = control.trim();
     if name.is_empty() {
@@ -545,7 +545,7 @@ fn mobile_profile_id(name: &str, control: &str) -> String {
 }
 
 #[allow(dead_code)]
-fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerProfile {
+pub fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerProfile {
     profile.name = profile.name.trim().to_string();
     profile.server_host = profile.server_host.trim().to_string();
     profile.server = profile.server.trim().to_string();
@@ -603,7 +603,7 @@ fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerPro
 }
 
 #[allow(dead_code)]
-fn remember_mobile_profile(settings: &mut AppSettings, profile: MobileServerProfile) {
+pub fn remember_mobile_profile(settings: &mut AppSettings, profile: MobileServerProfile) {
     let profile = normalize_mobile_profile(profile);
     if profile.server.is_empty() || profile.control.is_empty() {
         return;
@@ -645,8 +645,7 @@ fn should_replace_mobile_profile(
     mobile_profile_uses_ipv4(candidate) || !mobile_profile_uses_ipv4(existing)
 }
 
-#[allow(dead_code)]
-fn mobile_connected_timestamp_ms() -> u64 {
+pub fn mobile_connected_timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -2245,7 +2244,7 @@ mod tests {
         assert_eq!(settings.local_ui_bind, "127.0.0.1:41002".parse().unwrap());
         assert_eq!(settings.local_ui_token, None);
         assert_eq!(settings.button_count, DEFAULT_CLIENT_BUTTON_COUNT);
-        assert_eq!(settings.app_title, "Intercom Suite");
+        assert_eq!(settings.app_title, "RedLine");
         assert_eq!(settings.window_mode, AppWindowMode::SystemBrowser);
         assert_eq!(settings.ui_open_delay_ms, 750);
         assert!(settings.server_profiles.is_empty());
@@ -2548,7 +2547,7 @@ mod tests {
         settings.app_title = "   ".to_string();
         assert!(settings.validate().is_err());
 
-        settings.app_title = "Intercom Suite".to_string();
+        settings.app_title = "RedLine".to_string();
         settings.ui_open_delay_ms = 30_001;
         assert!(settings.validate().is_err());
 
@@ -2577,7 +2576,7 @@ mod tests {
 
         assert!(plan.opens_window);
         assert_eq!(plan.window_mode, AppWindowMode::SystemBrowser);
-        assert_eq!(plan.app_title, "Intercom Suite");
+        assert_eq!(plan.app_title, "RedLine");
         assert!(plan.local_ui_url.unwrap().starts_with("http://127.0.0.1:"));
         assert_ne!(settings.local_ui_bind.port(), 0);
     }
@@ -2695,7 +2694,7 @@ mod tests {
         let config: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(config_path).unwrap()).unwrap();
 
-        assert_eq!(config["productName"], "Intercom Suite");
+        assert_eq!(config["productName"], "RedLine");
         assert_eq!(config["mainBinaryName"], "app-native");
         assert_eq!(config["build"]["frontendDist"], "tauri-assets");
         assert_eq!(config["app"]["windows"].as_array().unwrap().len(), 0);
@@ -2770,25 +2769,42 @@ mod tests {
         let ios_bridge = fs::read_to_string(root.join("src/ios_mobile.m")).unwrap();
         let android_manifest =
             fs::read_to_string(root.join("gen/android/app/src/main/AndroidManifest.xml")).unwrap();
-        assert!(settings_html.contains("input_backend"));
+        assert!(settings_html.contains("mobile.css"));
+        assert!(settings_html.contains("mobile-form"));
+        assert!(settings_html.contains("branding/redline-logo.png"));
         assert!(settings_html.contains("button_count"));
         assert!(settings_html.contains("server_host"));
-        assert!(settings_html.contains("advanced_endpoints"));
+        assert!(settings_html.contains(">Audio<"));
+        assert!(settings_html.contains(">Connect</button>"));
+        assert!(settings_html.contains("Quality"));
         assert!(!settings_html.contains("User ID"));
         assert!(!settings_html.contains("Default TX Channel"));
         assert!(!settings_html.contains("Default Listen Channel"));
         assert!(!settings_html.contains("Advertised Buttons"));
         assert!(!settings_html.contains("Button Hotkeys"));
+        assert!(!settings_html.contains("advanced_endpoints"));
+        assert!(!settings_html.contains("Custom Audio Address"));
+        assert!(!settings_html.contains("Custom Control WebSocket URL"));
+        assert!(!settings_html.contains("Custom Admin URL"));
+        assert!(!settings_html.contains(">Codec"));
+        assert!(!settings_html.contains("PCM"));
         assert!(settings_html.contains("type=\"range\""));
         assert!(settings_html.contains("id=\"mic_gain\" type=\"range\" min=\"0\" max=\"2\""));
         assert!(settings_html.contains("id=\"speaker_gain\" type=\"range\" min=\"0\" max=\"2\""));
-        assert!(settings_js.contains("input_backend"));
         assert!(settings_js.contains("button_count"));
         assert!(settings_js.contains("server_host"));
-        assert!(settings_js.contains("advanced_endpoints"));
+        assert!(settings_js.contains("advanced_endpoints: false"));
+        assert!(settings_js.contains("codec: 'opus'"));
         assert!(settings_js.contains("buttons: []"));
         assert!(settings_js.contains("button_keys: []"));
         assert!(settings_js.contains("invoke("));
+        assert!(settings_js.contains("native_start_client"));
+        assert!(settings_js.contains("native_stop_client"));
+        assert!(settings_js.contains("native_open_controls"));
+        assert!(settings_js.contains("native_discover_servers"));
+        assert!(settings_js.contains("MANUAL_SERVER_VALUE"));
+        assert!(!settings_js.contains("mobile_start_client"));
+        assert!(!settings_js.contains("$('codec')"));
         assert!(!settings_js.contains("fetch("));
         assert!(mobile_html.contains("mobile-form"));
         assert!(mobile_html.contains("server-picker"));
@@ -2985,7 +3001,7 @@ mod tests {
                 "mobile shell missing {token}"
             );
         }
-        assert!(mobile_html.contains("Intercom Suite"));
+        assert!(mobile_html.contains("RedLine"));
         assert!(!mobile_html.contains(">Mobile Client<"));
     }
 

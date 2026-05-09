@@ -198,7 +198,7 @@ function collect() {
 
 async function load() {
   if (!invoke) {
-    setMessage('This page must be opened inside the Tauri mobile app.', 'error');
+    setMessage('This page must be opened inside the RedLine mobile app.', 'error');
     return;
   }
   try {
@@ -236,7 +236,7 @@ $('scan-servers').addEventListener('click', async event => {
   try {
     const profiles = await invoke('mobile_discover_servers');
     setServerProfiles(profiles, { preferFirst: true });
-    setMessage(profiles.length ? 'Scan refreshed servers. Select one or choose Manual.' : 'No Intercom servers found. Manual entry is still available.', profiles.length ? 'running' : '');
+    setMessage(profiles.length ? 'Scan refreshed servers. Select one or choose Manual.' : 'No RedLine servers found. Manual entry is still available.', profiles.length ? 'running' : '');
   } catch (err) {
     setMessage(String(err), 'error');
     $('server-list-status').textContent = 'Server scan failed.';

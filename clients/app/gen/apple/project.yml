@@ -10,7 +10,7 @@ configs:
 settingGroups:
   app:
     base:
-      PRODUCT_NAME: Intercom Suite
+      PRODUCT_NAME: RedLine
       PRODUCT_BUNDLE_IDENTIFIER: com.intercomsuite.client
 targetTemplates:
   app:
@@ -53,8 +53,8 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         CFBundleShortVersionString: 0.1.0
         CFBundleVersion: 0.1.0
-        NSMicrophoneUsageDescription: Intercom Suite needs microphone access so this device can transmit intercom audio.
-        NSLocalNetworkUsageDescription: Intercom Suite needs local network access to connect to your intercom server over UDP and WebSocket.
+        NSMicrophoneUsageDescription: RedLine needs microphone access so this device can transmit intercom audio.
+        NSLocalNetworkUsageDescription: RedLine needs local network access to connect to your intercom server over UDP and WebSocket.
         NSBonjourServices:
           - _intercom-suite._tcp
         UIBackgroundModes:
