@@ -2838,6 +2838,9 @@ mod tests {
         assert!(controls_css.contains(":root.mobile-shell-controls"));
         assert!(controls_css.contains("height: 100dvh"));
         assert!(controls_css.contains("align-content: start"));
+        assert!(controls_css.contains("--control-height: 64px"));
+        assert!(controls_css.contains("padding-bottom: var(--shell-x-pad)"));
+        assert!(controls_css.contains(".mobile-shell-controls .channel-row"));
         assert!(controls_css.contains(".mobile-shell-controls .dock-status"));
         assert!(controls_html.contains("Runtime Controls"));
         assert!(controls_html.contains("show-all-channels"));

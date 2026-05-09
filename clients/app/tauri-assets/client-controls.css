@@ -794,9 +794,9 @@ select {
     --shell-gap: 6px;
     --panel-pad: 10px;
     --row-gap: 6px;
-    --row-pad: 8px;
+    --row-pad: 10px;
     --dock-pad-y: 6px;
-    --control-height: 50px;
+    --control-height: 64px;
   }
 
   .mobile-shell-controls h2 {
@@ -808,8 +808,8 @@ select {
   }
 
   .mobile-shell-controls .top-actions button {
-    padding: 6px 8px;
-    font-size: 12px;
+    padding: 8px 10px;
+    font-size: 15px;
   }
 
   .mobile-shell-controls .identity-card {
@@ -842,13 +842,18 @@ select {
   .mobile-shell-controls .special-buttons {
     grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
     gap: 6px;
-    max-height: min(18svh, 104px);
+    max-height: min(22svh, 136px);
   }
 
   .mobile-shell-controls .special-talk {
+    min-height: 55px;
+    padding: 9px 10px;
+    font-size: 18px;
+  }
+
+  .mobile-shell-controls .compact-toggle,
+  .mobile-shell-controls .channel-row {
     min-height: 42px;
-    padding: 7px 8px;
-    font-size: 14px;
   }
 
   .mobile-shell-controls .button-meta {
@@ -856,12 +861,12 @@ select {
   }
 
   .mobile-shell-controls .control-button {
-    font-size: 16px;
+    font-size: 18px;
   }
 
   .mobile-shell-controls .bottom-dock {
     background: var(--panel);
-    padding-bottom: 0;
+    padding-bottom: var(--shell-x-pad);
   }
 
   .mobile-shell-controls .dock-status {
@@ -878,9 +883,9 @@ select {
   :root.mobile-shell-controls {
     --shell-gap: 5px;
     --panel-pad: 8px;
-    --row-pad: 7px;
+    --row-pad: 9px;
     --dock-pad-y: 5px;
-    --control-height: 46px;
+    --control-height: 56px;
   }
 
   .mobile-shell-controls .identity-card {
@@ -888,11 +893,11 @@ select {
   }
 
   .mobile-shell-controls .special-buttons {
-    max-height: min(15svh, 86px);
+    max-height: min(19svh, 112px);
   }
 
   .mobile-shell-controls .special-talk {
-    min-height: 38px;
+    min-height: 49px;
   }
 }
 
