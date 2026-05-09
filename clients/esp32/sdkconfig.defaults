@@ -1,0 +1,8 @@
+# Keep optional Opus support within the 2 MB ESP32 flash layout.
+# The generated local sdkconfig remains ignored.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_PARTITION_TABLE_FILENAME="partitions_singleapp_large.csv"
+
+CONFIG_INTERCOM_OPUS=y
+CONFIG_INTERCOM_OPUS_BITRATE_BPS=32000
+CONFIG_INTERCOM_OPUS_COMPLEXITY=5

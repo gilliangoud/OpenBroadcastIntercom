@@ -4,13 +4,13 @@ use std::path::PathBuf;
 
 use common::{
     AlertId, AlertStatus, AlertTarget, BuildInfo, ButtonCapability, ButtonId,
-    ChannelPresenceRoster, ClientLockoutPolicy, Codec, ControlMessage, DirectCallHistoryEntry,
-    DirectCallStatus, EmergencyStatus, IfbConfig, OpusProfile, ProcessingConfig, StereoConfig,
-    TalkButtonConfig, TalkMode,
+    ChannelPresenceRoster, ClientLockoutPolicy, ClientTelemetryStatus, Codec, ControlMessage,
+    DirectCallHistoryEntry, DirectCallStatus, EmergencyStatus, IfbConfig, OpusProfile,
+    ProcessingConfig, StereoConfig, TalkButtonConfig, TalkMode,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{supported_codecs, AudioSettings, ClientConfig, PlaybackStats};
+use crate::{supported_codecs, AudioSettings, ClientConfig, ClientConnectionEvent, PlaybackStats};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -93,6 +93,7 @@ pub trait ClientAudioBackend: Send + Sync {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClientRuntimeConfig {
+    pub server_host: String,
     pub server: SocketAddr,
     pub control: String,
     pub user_id: Option<u16>,
@@ -112,6 +113,7 @@ pub struct ClientRuntimeConfig {
     pub input_channel: ClientInputChannelMode,
     pub output_device: Option<String>,
     pub debug_audio_dir: Option<PathBuf>,
+    pub button_count: u16,
     pub buttons: Vec<String>,
     pub button_keys: Vec<String>,
     pub local_ui_bind: SocketAddr,
@@ -144,6 +146,7 @@ pub struct OkResponse {
 #[derive(Debug, Serialize, PartialEq)]
 pub struct StateResponse {
     pub build: BuildInfo,
+    pub server_connection: ClientConnectionEvent,
     pub user_id: u16,
     pub client_uid: String,
     pub name: String,
@@ -179,6 +182,7 @@ pub struct StateResponse {
     pub input_backend_note: Option<String>,
     pub macos_microphone_mode: Option<MacosMicrophoneModeStatus>,
     pub playback: PlaybackStats,
+    pub telemetry: Option<ClientTelemetryStatus>,
 }
 
 impl StateResponse {
@@ -188,9 +192,12 @@ impl StateResponse {
         input_backend: InputBackendState,
         macos_microphone_mode: Option<MacosMicrophoneModeStatus>,
         playback: PlaybackStats,
+        telemetry: Option<ClientTelemetryStatus>,
+        server_connection: ClientConnectionEvent,
     ) -> Self {
         Self {
             build: common::current_build_info(),
+            server_connection,
             user_id: config.user_id,
             client_uid: config.client_uid.clone(),
             name: config.name.clone(),
@@ -226,6 +233,7 @@ impl StateResponse {
             input_backend_note: input_backend.note,
             macos_microphone_mode,
             playback,
+            telemetry,
         }
     }
 }

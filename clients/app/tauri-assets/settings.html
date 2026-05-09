@@ -21,30 +21,35 @@
       <form id="settings-form">
         <section>
           <h2>Connection</h2>
-          <label>Server UDP Address<input id="server" autocomplete="off" /></label>
-          <label>Control WebSocket URL<input id="control" autocomplete="off" /></label>
-          <label>User ID<input id="user_id" type="number" min="1" max="65535" /></label>
+          <label>Server Host<input id="server_host" autocomplete="off" placeholder="192.168.1.10" /></label>
+          <label class="check"><input id="advanced_endpoints" type="checkbox" /> Use custom endpoint URLs</label>
+          <details id="advanced-connection">
+            <summary>Advanced Connection</summary>
+            <label>Custom Audio Address<input id="server" autocomplete="off" placeholder="192.168.1.10:40000" /></label>
+            <label>Custom Control WebSocket URL<input id="control" autocomplete="off" placeholder="ws://192.168.1.10:40001" /></label>
+            <label>Custom Admin URL<input id="admin" autocomplete="off" placeholder="http://192.168.1.10:40002" /></label>
+          </details>
         </section>
 
         <section>
-          <h2>Routing</h2>
-          <label>Default TX Channel<input id="tx_channel" type="number" min="1" max="65535" /></label>
-          <label>Default Listen Channel<input id="listen_channel" type="number" min="1" max="65535" /></label>
-          <label>Advertised Buttons<input id="buttons" placeholder="director=Director,pa=PA" /></label>
-          <label>Button Hotkeys<input id="button_keys" placeholder="director=d" /></label>
+          <h2>Buttons</h2>
+          <label>Button Count<input id="button_count" type="number" min="0" max="24" step="1" /></label>
         </section>
 
         <section>
           <h2>Audio</h2>
           <label>Codec<select id="codec"><option value="pcm16">PCM Low CPU (16 kHz)</option><option value="pcm24">PCM Balanced (24 kHz)</option><option value="pcm48">PCM High Quality (48 kHz)</option><option value="opus">Opus</option></select></label>
-          <label>Opus Profile<select id="opus_profile"><option value="speech_16_low">Opus Speech 16 Low</option><option value="speech_24_standard">Opus Speech 24 Standard</option><option value="speech_48_high">Opus Speech 48 High</option><option value="music_48">Opus Music 48</option></select></label>
-          <label>Mic Gain<input id="mic_gain" type="number" min="0" max="8" step="0.05" /></label>
-          <label class="check"><input id="input_transient_suppression" type="checkbox" /> Keyboard transient suppression</label>
-          <label>Speaker Gain<input id="speaker_gain" type="number" min="0" max="8" step="0.05" /></label>
-          <label>Jitter Buffer MS<input id="jitter_ms" type="number" min="0" max="250" step="1" /></label>
-          <label>Input Backend<select id="input_backend"><option value="auto">Auto</option><option value="raw">Raw</option><option value="voice_processing">macOS Voice Processing</option></select><span class="hint">Startup-only setting. Use Auto or macOS Voice Processing without an Input Device Match to get Apple voice processing on the default mic.</span></label>
-          <label>Input Device Match<input id="input_device" placeholder="microphone" /></label>
-          <label>Output Device Match<input id="output_device" placeholder="headphones" /></label>
+          <label>Mic Gain <output id="mic_gain_value"></output><input id="mic_gain" type="range" min="0" max="2" step="0.05" /></label>
+          <label>Speaker Gain <output id="speaker_gain_value"></output><input id="speaker_gain" type="range" min="0" max="2" step="0.05" /></label>
+          <details>
+            <summary>Advanced Audio</summary>
+            <label>Opus Profile<select id="opus_profile"><option value="speech_16_low">Opus Speech 16 Low</option><option value="speech_24_standard">Opus Speech 24 Standard</option><option value="speech_48_high">Opus Speech 48 High</option><option value="music_48">Opus Music 48</option></select></label>
+            <label class="check"><input id="input_transient_suppression" type="checkbox" /> Keyboard transient suppression</label>
+            <label>Jitter Buffer MS<input id="jitter_ms" type="number" min="0" max="250" step="1" /></label>
+            <label>Input Backend<select id="input_backend"><option value="auto">Auto</option><option value="raw">Raw</option><option value="voice_processing">macOS Voice Processing</option></select><span class="hint">Startup-only setting. Use Auto or macOS Voice Processing without an Input Device Match to get Apple voice processing on the default mic.</span></label>
+            <label>Input Device Match<input id="input_device" placeholder="microphone" /></label>
+            <label>Output Device Match<input id="output_device" placeholder="headphones" /></label>
+          </details>
         </section>
 
         <section>

@@ -1,5 +1,9 @@
 const invoke = window.__TAURI__.core.invoke;
 const $ = id => document.getElementById(id);
+const DEFAULT_HOST = '127.0.0.1';
+const AUDIO_PORT = 40000;
+const CONTROL_PORT = 40001;
+const ADMIN_PORT = 40002;
 let current = null;
 
 function setMessage(text, kind = 'muted') {
@@ -8,19 +12,52 @@ function setMessage(text, kind = 'muted') {
   el.textContent = text;
 }
 
-function csv(values) {
-  return (values || []).join(',');
-}
-
-function parseList(text) {
-  return text.trim()
-    ? text.split(',').map(value => value.trim()).filter(Boolean)
-    : [];
-}
-
 function readNumber(id, fallback) {
   const value = Number($(id).value);
   return Number.isFinite(value) ? value : fallback;
+}
+
+function showGainValues() {
+  $('mic_gain_value').textContent = Number($('mic_gain').value || 1).toFixed(2);
+  $('speaker_gain_value').textContent = Number($('speaker_gain').value || 1).toFixed(2);
+}
+
+function normalizeHost(host) {
+  return String(host || '').trim().replace(/^\[(.*)\]$/, '$1');
+}
+
+function hostForUrl(host) {
+  const normalized = normalizeHost(host);
+  return normalized.includes(':') ? `[${normalized}]` : normalized;
+}
+
+function audioForHost(host) {
+  const normalized = normalizeHost(host) || DEFAULT_HOST;
+  return `${hostForUrl(normalized)}:${AUDIO_PORT}`;
+}
+
+function controlForHost(host) {
+  const normalized = normalizeHost(host) || DEFAULT_HOST;
+  return `ws://${hostForUrl(normalized)}:${CONTROL_PORT}`;
+}
+
+function adminForHost(host) {
+  const normalized = normalizeHost(host) || DEFAULT_HOST;
+  return `http://${hostForUrl(normalized)}:${ADMIN_PORT}`;
+}
+
+function syncEndpointFields() {
+  const advanced = $('advanced_endpoints').checked;
+  $('advanced-connection').open = advanced;
+  for (const id of ['server', 'control', 'admin']) {
+    $(id).disabled = !advanced;
+  }
+  if (!advanced) {
+    const host = $('server_host').value.trim() || DEFAULT_HOST;
+    $('server').value = audioForHost(host);
+    $('control').value = controlForHost(host);
+    $('admin').value = adminForHost(host);
+  }
 }
 
 function normalizeOpusProfile(profile) {
@@ -35,38 +72,43 @@ function normalizeOpusProfile(profile) {
 function fill(settings) {
   current = settings;
   $('app_title').value = settings.app_title || 'Intercom Suite';
+  $('server_host').value = settings.server_host || DEFAULT_HOST;
   $('server').value = settings.server || '127.0.0.1:40000';
   $('control').value = settings.control || 'ws://127.0.0.1:40001';
-  $('user_id').value = settings.user_id ?? '';
-  $('tx_channel').value = settings.tx_channel ?? 1;
-  $('listen_channel').value = settings.listen_channel ?? 1;
+  $('admin').value = settings.admin || adminForHost(settings.server_host || DEFAULT_HOST);
+  $('advanced_endpoints').checked = !!settings.advanced_endpoints;
   $('codec').value = settings.codec || 'pcm16';
   $('opus_profile').value = normalizeOpusProfile(settings.opus_profile);
   $('mic_gain').value = settings.mic_gain ?? 1;
   $('input_transient_suppression').checked = settings.input_transient_suppression !== false;
   $('speaker_gain').value = settings.speaker_gain ?? 1;
+  showGainValues();
   $('jitter_ms').value = settings.jitter_ms ?? 40;
   $('input_backend').value = settings.input_backend || 'auto';
   $('input_device').value = settings.input_device || '';
   $('output_device').value = settings.output_device || '';
-  $('buttons').value = csv(settings.buttons);
-  $('button_keys').value = csv(settings.button_keys);
+  $('button_count').value = settings.button_count ?? 6;
   $('local_ui_bind').value = settings.local_ui_bind || '127.0.0.1:41002';
   $('local_ui_token').value = settings.local_ui_token || '';
   $('disable_local_ui').checked = !!settings.disable_local_ui;
   $('window_mode').value = settings.window_mode || 'native';
   $('ui_open_delay_ms').value = settings.ui_open_delay_ms ?? 750;
+  syncEndpointFields();
 }
 
 function collect() {
+  syncEndpointFields();
   return {
     ...current,
     app_title: $('app_title').value.trim() || 'Intercom Suite',
+    server_host: normalizeHost($('server_host').value) || DEFAULT_HOST,
     server: $('server').value.trim(),
     control: $('control').value.trim(),
-    user_id: $('user_id').value ? readNumber('user_id', 1) : null,
-    tx_channel: readNumber('tx_channel', 1),
-    listen_channel: readNumber('listen_channel', 1),
+    admin: $('admin').value.trim() || null,
+    advanced_endpoints: $('advanced_endpoints').checked,
+    user_id: null,
+    tx_channel: Number(current?.tx_channel ?? 0),
+    listen_channel: Number(current?.listen_channel ?? 0),
     codec: $('codec').value,
     opus_profile: $('opus_profile').value,
     mic_gain: readNumber('mic_gain', 1),
@@ -76,8 +118,9 @@ function collect() {
     input_backend: $('input_backend').value,
     input_device: $('input_device').value.trim() || null,
     output_device: $('output_device').value.trim() || null,
-    buttons: parseList($('buttons').value),
-    button_keys: parseList($('button_keys').value),
+    button_count: readNumber('button_count', 6),
+    buttons: [],
+    button_keys: [],
     local_ui_bind: $('local_ui_bind').value.trim(),
     local_ui_token: $('local_ui_token').value || null,
     disable_local_ui: $('disable_local_ui').checked,
@@ -116,4 +159,8 @@ $('settings-form').addEventListener('submit', async event => {
 
 $('reload').addEventListener('click', load);
 $('defaults').addEventListener('click', loadDefaults);
+$('server_host').addEventListener('input', syncEndpointFields);
+$('advanced_endpoints').addEventListener('change', syncEndpointFields);
+$('mic_gain').addEventListener('input', showGainValues);
+$('speaker_gain').addEventListener('input', showGainValues);
 load();

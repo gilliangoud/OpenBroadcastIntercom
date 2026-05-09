@@ -1,4 +1,4 @@
-*.bin filter=lfs diff=lfs merge=lfs -text
-*.onnx filter=lfs diff=lfs merge=lfs -text
-*.tar.gz filter=lfs diff=lfs merge=lfs -text
-
+# Whisper/whisper.cpp .bin models are downloaded from Hugging Face using
+# intercom-models/manifest.json and are intentionally not tracked through LFS.
+server/assets/supertonic/onnx/*.onnx filter=lfs diff=lfs merge=lfs -text
+deepfilternet-models/*.tar.gz filter=lfs diff=lfs merge=lfs -text

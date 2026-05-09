@@ -4,30 +4,33 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
 use axum::extract::Request;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{Parser, ValueEnum};
 use client_core::{
-    bind_tcp_listener_with_port_fallback, load_or_create_client_uid, normalize_button_capabilities,
-    run_connection_cue_task, run_control_connection, samples_for_ms, send_control_message,
-    send_control_request, supported_codecs, AudioDecoder, AudioEncoder, ClientConfig,
-    ClientConnectionEvent, ControlRequest, PlaybackBuffer, PlaybackStats,
+    basic_client_telemetry, bind_tcp_listener_with_port_fallback, default_button_capabilities,
+    load_or_create_client_uid, merge_button_capabilities, run_connection_cue_task,
+    run_control_connection, samples_for_ms, send_control_message, send_control_request,
+    supported_codecs, AudioDecoder, AudioEncoder, ClientConfig, ClientConnectionEvent,
+    ClientServerEndpoint, ClientTelemetryCounters, ControlRequest, PlaybackBuffer, PlaybackStats,
+    DEFAULT_CLIENT_BUTTON_COUNT, DEFAULT_CONTROL_PORT, DEFAULT_SERVER_HOST,
+    MAX_CLIENT_BUTTON_COUNT,
 };
 use common::{
     codec_samples_per_frame, AlertId, AlertStatus, AlertTarget, AudioPacket, ButtonCapability,
-    ButtonId, ChannelPresenceRoster, ClientLockoutPolicy, ClientRole, Codec, ControlMessage,
-    ControlResponse, DirectCallHistoryEntry, DirectCallStatus, EmergencyStatus, Esp32AudioConfig,
-    IfbConfig, OpusProfile, ProcessingConfig, StereoConfig, TalkButtonConfig, TalkMode,
-    MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
+    ButtonId, CaptureHealthStatus, ChannelPresenceRoster, ClientLockoutPolicy, ClientRole, Codec,
+    ControlMessage, ControlResponse, DirectCallHistoryEntry, DirectCallStatus, EmergencyStatus,
+    Esp32AudioConfig, IfbConfig, OpusProfile, ProcessingConfig, StereoConfig, TalkButtonConfig,
+    TalkMode, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -38,19 +41,21 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 struct Args {
+    #[arg(long)]
+    server_host: Option<String>,
     #[arg(long, default_value = "127.0.0.1:40000")]
     server: SocketAddr,
     #[arg(long, default_value = "ws://127.0.0.1:40001")]
     control: String,
-    #[arg(long, required_unless_present = "list_devices")]
+    #[arg(long)]
     user_id: Option<u16>,
     #[arg(long)]
     client_uid: Option<String>,
     #[arg(long)]
     identity_file: Option<std::path::PathBuf>,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 0)]
     tx_channel: u16,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 0)]
     listen_channel: u16,
     #[arg(long, value_enum, default_value_t = WireCodec::Pcm16)]
     codec: WireCodec,
@@ -68,6 +73,8 @@ struct Args {
     output_device: Option<String>,
     #[arg(long)]
     receive_only: bool,
+    #[arg(long, default_value_t = DEFAULT_CLIENT_BUTTON_COUNT, value_parser = clap::value_parser!(u16).range(0..=MAX_CLIENT_BUTTON_COUNT as i64))]
+    button_count: u16,
     #[arg(long = "button", value_name = "ID[=LABEL]")]
     buttons: Vec<ButtonArg>,
     #[arg(long, default_value = "0.0.0.0:41001")]
@@ -182,6 +189,11 @@ fn authorization_matches(headers: &HeaderMap, token: &str) -> bool {
         .is_some_and(|(_, password)| password == token)
 }
 
+const LOCAL_UI_HTML: &str = include_str!("../../shared-ui/talking/client-controls.html");
+const LOCAL_UI_CSS: &str = include_str!("../../shared-ui/talking/client-controls.css");
+const LOCAL_UI_JS: &str = include_str!("../../shared-ui/talking/client-controls.js");
+const LOCAL_UI_API_JS: &str = include_str!("../../shared-ui/talking/client-api-http.js");
+
 async fn require_local_auth(
     State(auth): State<LocalHttpAuth>,
     headers: HeaderMap,
@@ -249,16 +261,18 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("pi=info".parse()?))
         .init();
 
-    let args = Args::parse();
+    let mut args = Args::parse();
+    resolve_endpoint_args(&mut args)?;
     if args.list_devices {
         list_audio_devices()?;
         return Ok(());
     }
 
-    let user_id = args.user_id.context("--user-id is required")?;
+    let user_id = args.user_id.unwrap_or(0);
     let client_uid =
         load_or_create_client_uid(args.client_uid.as_deref(), args.identity_file.as_deref())?;
-    let advertised_buttons = normalize_button_capabilities(
+    let advertised_buttons = merge_button_capabilities(
+        default_button_capabilities(args.button_count),
         args.buttons
             .clone()
             .into_iter()
@@ -310,12 +324,26 @@ async fn main() -> anyhow::Result<()> {
         jitter_samples + MIX_SAMPLES_PER_FRAME * 12,
         jitter_samples,
     )));
+    let telemetry_counters = ClientTelemetryCounters::default();
+    let latest_telemetry = Arc::new(Mutex::new(None));
 
     let (control_tx, control_rx) = mpsc::channel::<ControlRequest>(16);
     let (connection_event_tx, connection_event_rx) = mpsc::channel::<ClientConnectionEvent>(8);
+    let (connection_cue_tx, connection_cue_rx) = mpsc::channel::<ClientConnectionEvent>(8);
+    let connection_status = Arc::new(Mutex::new(ClientConnectionEvent::Reconnecting));
     let control_config = Arc::clone(&runtime_config);
     let cue_playback = Arc::clone(&playback);
-    tokio::spawn(run_connection_cue_task(cue_playback, connection_event_rx));
+    tokio::spawn(run_connection_cue_task(cue_playback, connection_cue_rx));
+    {
+        let connection_status = Arc::clone(&connection_status);
+        tokio::spawn(async move {
+            let mut connection_event_rx = connection_event_rx;
+            while let Some(event) = connection_event_rx.recv().await {
+                *connection_status.lock().unwrap() = event;
+                let _ = connection_cue_tx.send(event).await;
+            }
+        });
+    }
     let control_task = tokio::spawn(async move {
         run_control_connection(
             args.control,
@@ -331,7 +359,7 @@ async fn main() -> anyhow::Result<()> {
         &control_tx,
         ControlMessage::Hello {
             user_id: initial_config.user_id,
-            requested_user_id: Some(initial_config.user_id),
+            requested_user_id: (initial_config.user_id > 0).then_some(initial_config.user_id),
             client_uid: initial_config.client_uid.clone(),
             codecs: supported_codecs(),
             buttons: advertised_buttons.clone(),
@@ -380,6 +408,8 @@ async fn main() -> anyhow::Result<()> {
             config: Arc::clone(&runtime_config),
             control_tx: control_tx.clone(),
             playback: Arc::clone(&playback),
+            latest_telemetry: Arc::clone(&latest_telemetry),
+            connection_status: Arc::clone(&connection_status),
         };
         let local_api_bind = args.local_api_bind;
         tokio::spawn(async move {
@@ -455,7 +485,49 @@ async fn main() -> anyhow::Result<()> {
 
     let (mic_tx, mut mic_rx) = mpsc::channel::<Vec<i16>>(8);
 
-    let input_stream = build_input_stream(mic_tx, args.mic_gain, args.input_device.as_deref())?;
+    let telemetry_control_tx = control_tx.clone();
+    let telemetry_config = Arc::clone(&runtime_config);
+    let telemetry_playback = Arc::clone(&playback);
+    let telemetry_counters_task = telemetry_counters.clone();
+    let telemetry_latest = Arc::clone(&latest_telemetry);
+    let telemetry_started_at = Instant::now();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let user_id = telemetry_config.lock().unwrap().user_id;
+            if user_id == 0 {
+                continue;
+            }
+            let mut health = basic_client_telemetry(
+                "pi",
+                telemetry_playback.lock().unwrap().stats(),
+                telemetry_counters_task.snapshot(),
+            );
+            health.uptime_ms = telemetry_started_at
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            *telemetry_latest.lock().unwrap() = Some(health.clone());
+            if let Err(err) = send_control_message(
+                &telemetry_control_tx,
+                ControlMessage::CaptureHealth { user_id, health },
+            )
+            .await
+            {
+                tracing::debug!(%err, "could not report pi client telemetry");
+            }
+        }
+    });
+
+    let input_stream = build_input_stream(
+        mic_tx,
+        args.mic_gain,
+        args.input_device.as_deref(),
+        telemetry_counters.clone(),
+    )?;
     let output_stream = build_output_stream(
         Arc::clone(&playback),
         args.speaker_gain,
@@ -466,6 +538,7 @@ async fn main() -> anyhow::Result<()> {
 
     let send_socket = Arc::clone(&socket);
     let send_config = Arc::clone(&runtime_config);
+    let send_telemetry = telemetry_counters.clone();
     let send_task = tokio::spawn(async move {
         let seq = AtomicU16::new(0);
         let timestamp = AtomicU32::new(0);
@@ -478,17 +551,13 @@ async fn main() -> anyhow::Result<()> {
         let mut send_error_logged = false;
 
         while let Some(frame) = mic_rx.recv().await {
-            let (tx_targets, codec, opus_profile) = {
-                let config = send_config.lock().unwrap();
-                (
-                    config.active_tx_targets(),
-                    config.codec,
-                    config.opus_profile,
-                )
-            };
-            if tx_targets.is_empty() {
+            let Some(snapshot) = send_config.lock().unwrap().active_transmit_snapshot() else {
                 continue;
-            }
+            };
+            let user_id = snapshot.user_id;
+            let tx_targets = snapshot.targets;
+            let codec = snapshot.codec;
+            let opus_profile = snapshot.opus_profile;
 
             if codec != current_codec || opus_profile != current_opus_profile {
                 match AudioEncoder::new(codec, opus_profile) {
@@ -517,6 +586,7 @@ async fn main() -> anyhow::Result<()> {
             let payload = match audio_encoder.encode(&frame) {
                 Ok(payload) => payload,
                 Err(err) => {
+                    send_telemetry.record_codec_drop();
                     tracing::warn!(codec = ?current_codec, %err, "failed to encode mic frame");
                     continue;
                 }
@@ -535,17 +605,20 @@ async fn main() -> anyhow::Result<()> {
                     payload: payload.clone(),
                 };
                 if let Err(err) = packet.encode(&mut encoded) {
+                    send_telemetry.record_payload_decode_error();
                     tracing::warn!(%err, "failed to encode audio packet");
                     continue;
                 }
                 match send_socket.send(&encoded).await {
                     Ok(_) => {
+                        send_telemetry.record_tx_packet();
                         if send_error_logged {
                             tracing::info!("audio UDP send recovered");
                             send_error_logged = false;
                         }
                     }
                     Err(err) => {
+                        send_telemetry.record_tx_send_failure();
                         if !send_error_logged {
                             tracing::warn!(%err, "audio UDP send failed; keeping client alive");
                             send_error_logged = true;
@@ -563,6 +636,7 @@ async fn main() -> anyhow::Result<()> {
     let recv_socket = Arc::clone(&socket);
     let recv_playback = Arc::clone(&playback);
     let recv_config = Arc::clone(&runtime_config);
+    let recv_telemetry = telemetry_counters.clone();
     let recv_task = tokio::spawn(async move {
         let mut buf = vec![0_u8; common::MAX_PACKET_BYTES];
         let mut audio_decoder = AudioDecoder::default();
@@ -586,8 +660,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             let packet = match AudioPacket::decode(&buf[..len]) {
-                Ok(packet) => packet,
+                Ok(packet) => {
+                    recv_telemetry.record_udp_rx_packet();
+                    packet
+                }
                 Err(err) => {
+                    recv_telemetry.record_malformed_packet();
                     tracing::warn!(%err, "dropped malformed incoming packet");
                     continue;
                 }
@@ -611,6 +689,7 @@ async fn main() -> anyhow::Result<()> {
             ) {
                 Ok(samples) => samples,
                 Err(err) => {
+                    recv_telemetry.record_decode_error();
                     tracing::warn!(codec = ?packet.codec, %err, "dropped invalid audio payload");
                     continue;
                 }
@@ -637,11 +716,28 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn resolve_endpoint_args(args: &mut Args) -> anyhow::Result<()> {
+    let Some(server_host) = args.server_host.as_deref() else {
+        return Ok(());
+    };
+    let endpoint = ClientServerEndpoint::new(server_host)?;
+    let default_control = format!("ws://{DEFAULT_SERVER_HOST}:{DEFAULT_CONTROL_PORT}");
+    if args.server == client_core::default_audio_addr() {
+        args.server = endpoint.resolve_audio_addr()?;
+    }
+    if args.control == default_control {
+        args.control = endpoint.control_url();
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct ApiState {
     config: Arc<Mutex<ClientConfig>>,
     control_tx: mpsc::Sender<ControlRequest>,
     playback: Arc<Mutex<PlaybackBuffer>>,
+    latest_telemetry: Arc<Mutex<Option<CaptureHealthStatus>>>,
+    connection_status: Arc<Mutex<ClientConnectionEvent>>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -656,6 +752,7 @@ struct ErrorResponse {
 
 #[derive(Debug, Serialize, PartialEq)]
 struct StateResponse {
+    server_connection: ClientConnectionEvent,
     user_id: u16,
     client_uid: String,
     name: String,
@@ -685,11 +782,18 @@ struct StateResponse {
     lockout: ClientLockoutPolicy,
     stereo: StereoConfig,
     playback: PlaybackStats,
+    telemetry: Option<CaptureHealthStatus>,
 }
 
 impl StateResponse {
-    fn from_state(config: &ClientConfig, playback: PlaybackStats) -> Self {
+    fn from_state(
+        config: &ClientConfig,
+        playback: PlaybackStats,
+        telemetry: Option<CaptureHealthStatus>,
+        server_connection: ClientConnectionEvent,
+    ) -> Self {
         Self {
+            server_connection,
             user_id: config.user_id,
             client_uid: config.client_uid.clone(),
             name: config.name.clone(),
@@ -719,6 +823,7 @@ impl StateResponse {
             lockout: config.lockout.clone(),
             stereo: config.stereo.clone(),
             playback,
+            telemetry,
         }
     }
 }
@@ -807,6 +912,13 @@ impl IntoResponse for ApiError {
 
 fn local_api_router(state: ApiState, auth: LocalHttpAuth) -> Router {
     Router::new()
+        .route("/", get(local_ui_index))
+        .route("/client-controls.js", get(local_ui_js))
+        .route("/client-controls.css", get(local_ui_css))
+        .route("/client-api.js", get(local_ui_api_js))
+        .route("/client-api-http.js", get(local_ui_api_js))
+        .route("/app.js", get(local_ui_js))
+        .route("/style.css", get(local_ui_css))
         .route("/health", get(health_handler))
         .route("/state", get(state_handler))
         .route("/config", put(config_handler))
@@ -833,6 +945,28 @@ fn local_api_router(state: ApiState, auth: LocalHttpAuth) -> Router {
         .with_state(state)
 }
 
+async fn local_ui_index() -> Html<&'static str> {
+    Html(LOCAL_UI_HTML)
+}
+
+async fn local_ui_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript")],
+        LOCAL_UI_JS,
+    )
+}
+
+async fn local_ui_css() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/css")], LOCAL_UI_CSS)
+}
+
+async fn local_ui_api_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript")],
+        LOCAL_UI_API_JS,
+    )
+}
+
 async fn health_handler() -> Json<OkResponse> {
     Json(OkResponse { ok: true })
 }
@@ -840,7 +974,14 @@ async fn health_handler() -> Json<OkResponse> {
 async fn state_handler(State(state): State<ApiState>) -> Json<StateResponse> {
     let snapshot = state.config.lock().unwrap().clone();
     let playback = state.playback.lock().unwrap().stats();
-    Json(StateResponse::from_state(&snapshot, playback))
+    let telemetry = state.latest_telemetry.lock().unwrap().clone();
+    let server_connection = *state.connection_status.lock().unwrap();
+    Json(StateResponse::from_state(
+        &snapshot,
+        playback,
+        telemetry,
+        server_connection,
+    ))
 }
 
 async fn config_handler(
@@ -1303,6 +1444,7 @@ fn build_input_stream(
     tx: mpsc::Sender<Vec<i16>>,
     mic_gain: f32,
     input_device: Option<&str>,
+    telemetry: ClientTelemetryCounters,
 ) -> anyhow::Result<cpal::Stream> {
     let host = cpal::default_host();
     let device = select_input_device(&host, input_device)?;
@@ -1313,7 +1455,7 @@ fn build_input_stream(
     let sample_rate = config.sample_rate.0;
     tracing::info!(device = %device.name()?, ?config, ?sample_format, "opened input device");
 
-    let mut capture = CaptureAdapter::new(tx, sample_rate, channels, mic_gain);
+    let mut capture = CaptureAdapter::new(tx, sample_rate, channels, mic_gain, telemetry);
     let err_fn = |err| tracing::error!(%err, "input stream error");
 
     match sample_format {
@@ -1412,10 +1554,17 @@ struct CaptureAdapter {
     smoothed_mono: f32,
     has_previous: bool,
     mic_gain: f32,
+    telemetry: ClientTelemetryCounters,
 }
 
 impl CaptureAdapter {
-    fn new(tx: mpsc::Sender<Vec<i16>>, input_rate: u32, channels: usize, mic_gain: f32) -> Self {
+    fn new(
+        tx: mpsc::Sender<Vec<i16>>,
+        input_rate: u32,
+        channels: usize,
+        mic_gain: f32,
+        telemetry: ClientTelemetryCounters,
+    ) -> Self {
         Self {
             tx,
             frame: Vec::with_capacity(MIX_SAMPLES_PER_FRAME),
@@ -1428,6 +1577,7 @@ impl CaptureAdapter {
             smoothed_mono: 0.0,
             has_previous: false,
             mic_gain: mic_gain.max(0.0),
+            telemetry,
         }
     }
 
@@ -1478,6 +1628,7 @@ impl CaptureAdapter {
                 std::mem::replace(&mut self.frame, Vec::with_capacity(MIX_SAMPLES_PER_FRAME));
             if self.tx.try_send(full_frame).is_err() {
                 tracing::warn!("dropped mic frame because network queue is full");
+                self.telemetry.record_tx_queue_drop();
             }
         }
     }
@@ -1635,9 +1786,17 @@ mod tests {
                     SAMPLES_PER_FRAME * 4,
                     SAMPLES_PER_FRAME,
                 ))),
+                latest_telemetry: Arc::new(Mutex::new(None)),
+                connection_status: Arc::new(Mutex::new(ClientConnectionEvent::Connected)),
             },
             control_rx,
         )
+    }
+
+    #[test]
+    fn user_id_is_optional_for_server_assigned_enrollment() {
+        let args = Args::try_parse_from(["pi"]).unwrap();
+        assert_eq!(args.user_id, None);
     }
 
     #[test]
@@ -1701,6 +1860,7 @@ mod tests {
         config.buttons = vec![TalkButtonConfig {
             id: "director".to_string(),
             label: "Director".to_string(),
+            color: None,
             mode: common::TalkButtonMode::Momentary,
             actions: vec![common::TalkButtonAction::Transmit {
                 channels: vec![2, 3],
@@ -1791,6 +1951,48 @@ mod tests {
         assert_eq!(response.lockout, ClientLockoutPolicy::default());
         assert_eq!(response.playback.available_samples, 0);
         assert_eq!(response.playback.underflows, 0);
+    }
+
+    #[test]
+    fn local_ui_uses_shared_operator_console_assets() {
+        assert!(LOCAL_UI_HTML.contains("Operator Console"));
+        assert!(LOCAL_UI_HTML.contains("client-api.js"));
+        assert!(LOCAL_UI_HTML.contains("id=\"client-title\" hidden"));
+        assert!(LOCAL_UI_HTML.contains(">Runtime</button>"));
+        assert!(LOCAL_UI_HTML.contains("Runtime Controls"));
+        assert!(LOCAL_UI_HTML.contains("show-all-channels"));
+        assert!(LOCAL_UI_HTML.contains("channel-view-toggle"));
+        assert!(LOCAL_UI_HTML.contains("identity-card"));
+        assert!(LOCAL_UI_HTML.contains("identity-card-value"));
+        assert!(LOCAL_UI_HTML.contains("max=\"2\""));
+        assert!(!LOCAL_UI_HTML.contains("Client Settings"));
+        assert!(LOCAL_UI_HTML.contains("route-editor"));
+        assert!(LOCAL_UI_HTML.contains("bottom-special"));
+        assert!(LOCAL_UI_JS.contains("function renderButtons()"));
+        assert!(LOCAL_UI_JS.contains("function renderCapabilityPanels()"));
+        assert!(LOCAL_UI_JS.contains("data-requires-gain"));
+        assert!(LOCAL_UI_HTML.contains("channel-settings-modal"));
+        assert!(LOCAL_UI_JS.contains("function bindChannelSettingsGesture"));
+        assert!(LOCAL_UI_JS.contains("showAllChannels"));
+        assert!(LOCAL_UI_JS.contains("function allConfiguredChannels()"));
+        assert!(LOCAL_UI_JS.contains("function setShowAllChannels"));
+        assert!(LOCAL_UI_JS.contains("function assignedClientLabel()"));
+        assert!(LOCAL_UI_JS.contains("User ID"));
+        assert!(LOCAL_UI_JS.contains("function channelIconTag"));
+        assert!(LOCAL_UI_JS.contains("function channelStatusTags"));
+        assert!(LOCAL_UI_CSS.contains(".tag.icon-tag"));
+        assert!(LOCAL_UI_CSS.contains(".tag.tx.talking"));
+        assert!(LOCAL_UI_JS.contains("contextmenu"));
+        assert!(!LOCAL_UI_JS.contains("clientApi?.name || 'client'} controls"));
+        assert!(LOCAL_UI_HTML.contains("dock-status"));
+        assert!(LOCAL_UI_JS.contains("Server connected"));
+        assert!(LOCAL_UI_JS.contains("'Hold Talk'"));
+        assert!(LOCAL_UI_CSS.contains(".tag.connected"));
+        assert!(!LOCAL_UI_JS.contains("fetch("));
+        assert!(LOCAL_UI_API_JS.contains("fetch("));
+        assert!(LOCAL_UI_API_JS.contains("runtimeSettings: !mobileShell()"));
+        assert!(LOCAL_UI_CSS.contains(".phone-shell"));
+        assert!(LOCAL_UI_CSS.contains("--dock-height"));
     }
 
     #[tokio::test]

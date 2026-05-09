@@ -78,6 +78,21 @@ button:active:not(:disabled) {
   line-height: 1.1;
 }
 
+.title-block {
+  width: 100%;
+}
+
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.title-row button {
+  flex: 0 0 auto;
+}
+
 .section-title {
   display: flex;
   align-items: center;
@@ -88,11 +103,6 @@ button:active:not(:disabled) {
 
 .section-title h2 {
   font-size: 17px;
-}
-
-.top-actions {
-  display: flex;
-  gap: 8px;
 }
 
 .tag {
@@ -144,18 +154,18 @@ button:active:not(:disabled) {
 
 .server-picker {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
+}
+
+.manual-server[hidden] {
+  display: none;
 }
 
 .config-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
-}
-
-.wide {
-  grid-column: 1 / -1;
 }
 
 label {
@@ -178,6 +188,18 @@ select {
   color: #111827;
   padding: 11px 12px;
   text-transform: none;
+}
+
+input[type="range"] {
+  min-height: 34px;
+  padding: 0;
+  accent-color: var(--brand);
+}
+
+output {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
 }
 
 .hint {
@@ -203,7 +225,7 @@ select {
 
 .bottom-controls {
   display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 
@@ -213,7 +235,7 @@ select {
   font-weight: 950;
 }
 
-.mute-button {
+.disconnect-button {
   border-color: #f1a7ad;
   color: var(--brand-dark);
   background: #fff;
@@ -228,18 +250,6 @@ select {
 @media (max-width: 470px) {
   .phone-shell {
     padding-top: 14px;
-  }
-
-  .topbar {
-    flex-direction: column;
-  }
-
-  .top-actions {
-    width: 100%;
-  }
-
-  .top-actions button {
-    flex: 1;
   }
 
   .config-form,
