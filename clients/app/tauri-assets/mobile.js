@@ -163,14 +163,12 @@ function adminForHost(host) {
 function fill(settings) {
   current = settings;
   $('server_host').value = settings.server_host || DEFAULT_HOST;
-  $('codec').value = settings.codec || 'pcm16';
   $('opus_profile').value = settings.opus_profile || 'speech_24_standard';
   $('mic_gain').value = settings.mic_gain ?? 1;
   $('speaker_gain').value = settings.speaker_gain ?? 1;
   $('button_count').value = settings.button_count ?? 6;
   setServerProfiles(settings.server_profiles || serverProfiles);
   showGainValues();
-  renderCodecFields();
 }
 
 function collect() {
@@ -183,7 +181,7 @@ function collect() {
     admin: adminForHost(host),
     advanced_endpoints: false,
     user_id: null,
-    codec: $('codec').value,
+    codec: 'opus',
     opus_profile: $('opus_profile').value,
     listen_channel: Number(current?.listen_channel ?? 0),
     tx_channel: Number(current?.tx_channel ?? 0),
@@ -196,10 +194,6 @@ function collect() {
     disable_local_ui: false,
     window_mode: 'native',
   };
-}
-
-function renderCodecFields() {
-  $('opus-profile-row').hidden = $('codec').value !== 'opus';
 }
 
 async function load() {
@@ -227,7 +221,6 @@ async function load() {
   }
 }
 
-$('codec').addEventListener('change', renderCodecFields);
 $('server_host').addEventListener('input', () => {
   $('server-picker').value = MANUAL_SERVER_VALUE;
   syncServerSelection();

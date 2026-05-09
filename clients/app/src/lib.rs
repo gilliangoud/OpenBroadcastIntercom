@@ -971,6 +971,7 @@ mod mobile {
     #[tauri::command]
     fn mobile_default_settings() -> AppSettings {
         let mut settings = AppSettings::default();
+        settings.codec = Codec::Opus;
         settings.window_mode = AppWindowMode::Native;
         settings.disable_local_ui = true;
         settings.normalize_endpoints();
@@ -2070,6 +2071,7 @@ mod mobile {
 
     fn prepare_mobile_settings(settings: &mut AppSettings) {
         settings.user_id = None;
+        settings.codec = Codec::Opus;
         settings.buttons.clear();
         settings.button_keys.clear();
         settings.window_mode = AppWindowMode::Native;
@@ -2795,7 +2797,18 @@ mod tests {
         assert!(mobile_html.contains("server_host"));
         assert!(mobile_html.contains(">Audio<"));
         assert!(mobile_html.contains(">Connect</button>"));
+        assert!(mobile_html.contains("Quality"));
+        assert!(mobile_html.contains(">Low</option>"));
+        assert!(mobile_html.contains(">Standard</option>"));
+        assert!(mobile_html.contains(">High</option>"));
+        assert!(mobile_html.contains(">Music</option>"));
         assert!(mobile_html.contains("manual-server-row"));
+        assert!(!mobile_html.contains(">Codec"));
+        assert!(!mobile_html.contains("PCM"));
+        assert!(!mobile_html.contains("pcm16"));
+        assert!(!mobile_html.contains("pcm24"));
+        assert!(!mobile_html.contains("pcm48"));
+        assert!(!mobile_html.contains("Opus Profile"));
         assert!(!mobile_html.contains(">Start</button>"));
         assert!(!mobile_html.contains(">Stop</button>"));
         assert!(!mobile_html.contains(">Save</button>"));
@@ -2828,6 +2841,9 @@ mod tests {
         assert!(mobile_js.contains("MANUAL_SERVER_VALUE"));
         assert!(mobile_js.contains("server: audioForHost(host)"));
         assert!(mobile_js.contains("advanced_endpoints: false"));
+        assert!(mobile_js.contains("codec: 'opus'"));
+        assert!(!mobile_js.contains("$('codec')"));
+        assert!(!mobile_js.contains("renderCodecFields"));
         assert!(mobile_js.contains("setRuntimeRunning(response.running)"));
         assert!(!mobile_js.contains("mobile_select_server"));
         assert!(!mobile_js.contains("mobile_forget_server"));
