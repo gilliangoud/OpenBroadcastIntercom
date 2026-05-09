@@ -845,8 +845,12 @@ select {
     font-size: 16px;
   }
 
+  .bottom-dock {
+    padding-bottom: 0;
+  }
+
   .dock-status {
-    font-size: 10px;
+    display: none;
   }
 
   #message {
