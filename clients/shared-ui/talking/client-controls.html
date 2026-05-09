@@ -4,6 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Intercom Operator Console</title>
+    <script>
+      try {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get("mobile") === "1" || sessionStorage.getItem("intercom-mobile-shell") === "1") {
+          document.documentElement.classList.add("mobile-shell-controls");
+        }
+      } catch (_) {}
+    </script>
     <link rel="stylesheet" href="client-controls.css" />
   </head>
   <body>

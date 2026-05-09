@@ -47,6 +47,11 @@ body {
   overscroll-behavior: none;
 }
 
+html.mobile-shell-controls,
+html.mobile-shell-controls body {
+  background: var(--panel);
+}
+
 button,
 input,
 select {
@@ -774,7 +779,7 @@ select {
 }
 
 @media (max-width: 520px), (max-height: 860px) {
-  :root {
+  :root.mobile-shell-controls {
     --shell-x-pad: 8px;
     --shell-top-pad: 4px;
     --shell-gap: 6px;
@@ -785,82 +790,83 @@ select {
     --control-height: 50px;
   }
 
-  h2 {
+  .mobile-shell-controls h2 {
     font-size: 14px;
   }
 
-  .top-actions {
+  .mobile-shell-controls .top-actions {
     gap: 5px;
   }
 
-  .top-actions button {
+  .mobile-shell-controls .top-actions button {
     padding: 6px 8px;
     font-size: 12px;
   }
 
-  .identity-card {
+  .mobile-shell-controls .identity-card {
     padding: 7px 10px;
   }
 
-  .identity-label {
+  .mobile-shell-controls .identity-label {
     font-size: 10px;
   }
 
-  .identity-value {
+  .mobile-shell-controls .identity-value {
     font-size: 14px;
   }
 
-  .section-title,
-  .modal-head {
+  .mobile-shell-controls .section-title,
+  .mobile-shell-controls .modal-head {
     margin-bottom: 7px;
   }
 
-  .tag {
+  .mobile-shell-controls .tag {
     padding: 2px 7px;
     font-size: 11px;
   }
 
-  .tag.icon-tag {
+  .mobile-shell-controls .tag.icon-tag {
     width: 28px;
     height: 24px;
   }
 
-  .special-buttons {
+  .mobile-shell-controls .special-buttons {
     grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
     gap: 6px;
     max-height: min(18svh, 104px);
   }
 
-  .special-talk {
+  .mobile-shell-controls .special-talk {
     min-height: 42px;
     padding: 7px 8px;
     font-size: 14px;
   }
 
-  .button-meta {
+  .mobile-shell-controls .button-meta {
     display: none;
   }
 
-  .control-button {
+  .mobile-shell-controls .control-button {
     font-size: 16px;
   }
 
-  .bottom-dock {
+  .mobile-shell-controls .bottom-dock {
+    background: var(--panel);
     padding-bottom: 0;
   }
 
-  .dock-status {
+  .mobile-shell-controls .dock-status {
     display: none;
   }
 
-  #message {
+  .mobile-shell-controls #message {
     min-height: 16px;
     font-size: 12px;
   }
 }
 
 @media (max-height: 760px) {
-  :root {
+  :root.mobile-shell-controls {
     --shell-gap: 5px;
     --panel-pad: 8px;
     --row-pad: 7px;
@@ -868,15 +874,15 @@ select {
     --control-height: 46px;
   }
 
-  .identity-card {
+  .mobile-shell-controls .identity-card {
     padding-block: 6px;
   }
 
-  .special-buttons {
+  .mobile-shell-controls .special-buttons {
     max-height: min(15svh, 86px);
   }
 
-  .special-talk {
+  .mobile-shell-controls .special-talk {
     min-height: 38px;
   }
 }

@@ -960,6 +960,7 @@ mod mobile {
                     "main",
                     tauri::WebviewUrl::App("mobile.html".into()),
                 )
+                .background_color(tauri::utils::config::Color(247, 249, 251, 255))
                 .build()?;
                 Ok(())
             })
@@ -2075,7 +2076,7 @@ mod mobile {
     }
 
     fn mobile_controls_url() -> String {
-        "client-controls.html".to_string()
+        "client-controls.html?mobile=1".to_string()
     }
 
     fn mobile_settings_path(app: &tauri::AppHandle) -> std::result::Result<PathBuf, String> {
@@ -2826,6 +2827,7 @@ mod tests {
         assert!(controls_html.contains("client-api.js"));
         assert!(controls_html.contains("client-controls.js"));
         assert!(controls_html.contains("id=\"client-title\" hidden"));
+        assert!(controls_html.contains("mobile-shell-controls"));
         assert!(controls_html.contains(">Runtime</button>"));
         assert!(controls_js.contains("function bindPressHold"));
         assert!(controls_js.contains("document.addEventListener('pointerup', finish, true)"));
@@ -2833,6 +2835,8 @@ mod tests {
         assert!(controls_js.contains("window.addEventListener('touchstart', markUserInteracting"));
         assert!(!controls_js.contains("onlostpointercapture = regularTalkRelease"));
         assert!(controls_css.contains("touch-action: none"));
+        assert!(controls_css.contains(":root.mobile-shell-controls"));
+        assert!(controls_css.contains(".mobile-shell-controls .dock-status"));
         assert!(controls_html.contains("Runtime Controls"));
         assert!(controls_html.contains("show-all-channels"));
         assert!(controls_html.contains("channel-view-toggle"));
