@@ -452,8 +452,7 @@ pub fn save_settings(path: &Path, settings: &AppSettings) -> anyhow::Result<()> 
     Ok(())
 }
 
-#[allow(dead_code)]
-fn mobile_profile_id(name: &str, control: &str) -> String {
+pub fn mobile_profile_id(name: &str, control: &str) -> String {
     let name = name.trim();
     let control = control.trim();
     if name.is_empty() {
@@ -463,8 +462,7 @@ fn mobile_profile_id(name: &str, control: &str) -> String {
     }
 }
 
-#[allow(dead_code)]
-fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerProfile {
+pub fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerProfile {
     profile.name = profile.name.trim().to_string();
     profile.server = profile.server.trim().to_string();
     profile.control = profile.control.trim().to_string();
@@ -486,8 +484,7 @@ fn normalize_mobile_profile(mut profile: MobileServerProfile) -> MobileServerPro
     profile
 }
 
-#[allow(dead_code)]
-fn remember_mobile_profile(settings: &mut AppSettings, profile: MobileServerProfile) {
+pub fn remember_mobile_profile(settings: &mut AppSettings, profile: MobileServerProfile) {
     let profile = normalize_mobile_profile(profile);
     if profile.server.is_empty() || profile.control.is_empty() {
         return;
@@ -499,8 +496,7 @@ fn remember_mobile_profile(settings: &mut AppSettings, profile: MobileServerProf
     settings.server_profiles.truncate(20);
 }
 
-#[allow(dead_code)]
-fn mobile_connected_timestamp_ms() -> u64 {
+pub fn mobile_connected_timestamp_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1959,10 +1955,16 @@ mod tests {
         let ios_bridge = fs::read_to_string(root.join("src/ios_mobile.m")).unwrap();
         let android_manifest =
             fs::read_to_string(root.join("gen/android/app/src/main/AndroidManifest.xml")).unwrap();
-        assert!(settings_html.contains("input_backend"));
+        assert!(settings_html.contains("mobile.css"));
+        assert!(settings_html.contains("mobile-form"));
         assert!(settings_html.contains("branding/redline-logo.png"));
-        assert!(settings_js.contains("input_backend"));
         assert!(settings_js.contains("invoke("));
+        assert!(settings_js.contains("native_start_client"));
+        assert!(settings_js.contains("native_open_controls"));
+        assert!(settings_js.contains("native_discover_servers"));
+        assert!(settings_js.contains("native_select_server"));
+        assert!(settings_js.contains("native_forget_server"));
+        assert!(settings_js.contains("native_status"));
         assert!(!settings_js.contains("fetch("));
         assert!(mobile_html.contains("mobile-form"));
         assert!(mobile_html.contains("branding/redline-logo.png"));

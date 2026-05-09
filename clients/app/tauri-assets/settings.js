@@ -1,26 +1,96 @@
-const invoke = window.__TAURI__.core.invoke;
+const invoke = window.__TAURI__?.core?.invoke;
 const $ = id => document.getElementById(id);
+const CONTROLS_PAGE = 'client-controls.html';
+
 let current = null;
+let currentLocalUiUrl = null;
+let serverProfiles = [];
 
-function setMessage(text, kind = 'muted') {
-  const el = $('message');
-  el.className = kind;
-  el.textContent = text;
+function setMessage(text, kind = '') {
+  const message = $('message');
+  message.textContent = text || '';
+  message.className = kind ? `hint ${kind}` : 'hint';
 }
 
-function csv(values) {
-  return (values || []).join(',');
+function setStatus(text, kind = 'offline') {
+  const status = $('status');
+  status.textContent = text;
+  status.className = `tag ${kind}`;
 }
 
-function parseList(text) {
-  return text.trim()
-    ? text.split(',').map(value => value.trim()).filter(Boolean)
-    : [];
+function setControlsUrl(url) {
+  currentLocalUiUrl = url || null;
+  $('open-controls').disabled = !currentLocalUiUrl;
+  $('close-config').disabled = !currentLocalUiUrl;
 }
 
-function readNumber(id, fallback) {
-  const value = Number($(id).value);
-  return Number.isFinite(value) ? value : fallback;
+function serverProfileLabel(profile) {
+  const badges = [];
+  if (profile.discovered) badges.push('LAN');
+  if (profile.last_connected_ms) badges.push('Recent');
+  if (profile.auth === 'required') badges.push('Auth');
+  return `${profile.name || profile.control} - ${profile.server}${badges.length ? ` (${badges.join(', ')})` : ''}`;
+}
+
+function setServerProfiles(profiles = []) {
+  const byId = new Map();
+  for (const profile of profiles) {
+    if (!profile || !profile.id) continue;
+    byId.set(profile.id, profile);
+  }
+  serverProfiles = Array.from(byId.values());
+  const picker = $('server-picker');
+  picker.innerHTML = '';
+  if (!serverProfiles.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No saved or discovered servers';
+    picker.appendChild(option);
+    picker.disabled = true;
+    $('forget-server').disabled = true;
+    $('server-list-status').textContent = 'Use Scan or enter server addresses manually.';
+    return;
+  }
+  picker.disabled = false;
+  for (const profile of serverProfiles) {
+    const option = document.createElement('option');
+    option.value = profile.id;
+    option.textContent = serverProfileLabel(profile);
+    picker.appendChild(option);
+  }
+  const currentProfile = serverProfiles.find(profile => profile.control === $('control').value.trim());
+  if (currentProfile) picker.value = currentProfile.id;
+  $('forget-server').disabled = !picker.value;
+  $('server-list-status').textContent = `${serverProfiles.length} server${serverProfiles.length === 1 ? '' : 's'} available.`;
+}
+
+async function openControls() {
+  if (!currentLocalUiUrl) return;
+  if (invoke) {
+    try {
+      await invoke('native_open_controls');
+    } catch (err) {
+      setMessage(`Could not open controls. ${err}`, 'error');
+      return;
+    }
+  }
+  sessionStorage.setItem('intercom-mobile-shell', '1');
+  window.location.href = currentLocalUiUrl;
+}
+
+function parseList(value) {
+  return value.split(',').map(item => item.trim()).filter(Boolean);
+}
+
+function csv(value) {
+  return Array.isArray(value) ? value.join(',') : '';
+}
+
+function numberOrNull(value) {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function normalizeOpusProfile(profile) {
@@ -34,86 +104,168 @@ function normalizeOpusProfile(profile) {
 
 function fill(settings) {
   current = settings;
-  $('app_title').value = settings.app_title || 'RedLine';
   $('server').value = settings.server || '127.0.0.1:40000';
   $('control').value = settings.control || 'ws://127.0.0.1:40001';
   $('user_id').value = settings.user_id ?? '';
-  $('tx_channel').value = settings.tx_channel ?? 1;
-  $('listen_channel').value = settings.listen_channel ?? 1;
   $('codec').value = settings.codec || 'pcm16';
   $('opus_profile').value = normalizeOpusProfile(settings.opus_profile);
+  $('listen_channel').value = settings.listen_channel ?? 1;
+  $('tx_channel').value = settings.tx_channel ?? 1;
   $('mic_gain').value = settings.mic_gain ?? 1;
-  $('input_transient_suppression').checked = settings.input_transient_suppression !== false;
   $('speaker_gain').value = settings.speaker_gain ?? 1;
-  $('jitter_ms').value = settings.jitter_ms ?? 40;
-  $('input_backend').value = settings.input_backend || 'auto';
-  $('input_device').value = settings.input_device || '';
-  $('output_device').value = settings.output_device || '';
   $('buttons').value = csv(settings.buttons);
   $('button_keys').value = csv(settings.button_keys);
-  $('local_ui_bind').value = settings.local_ui_bind || '127.0.0.1:41002';
-  $('local_ui_token').value = settings.local_ui_token || '';
-  $('disable_local_ui').checked = !!settings.disable_local_ui;
-  $('window_mode').value = settings.window_mode || 'native';
-  $('ui_open_delay_ms').value = settings.ui_open_delay_ms ?? 750;
+  setServerProfiles(settings.server_profiles || serverProfiles);
+  renderCodecFields();
 }
 
 function collect() {
   return {
-    ...current,
-    app_title: $('app_title').value.trim() || 'RedLine',
+    ...(current || {}),
+    app_title: (current && current.app_title) || 'RedLine',
     server: $('server').value.trim(),
     control: $('control').value.trim(),
-    user_id: $('user_id').value ? readNumber('user_id', 1) : null,
-    tx_channel: readNumber('tx_channel', 1),
-    listen_channel: readNumber('listen_channel', 1),
+    user_id: numberOrNull($('user_id').value),
     codec: $('codec').value,
     opus_profile: $('opus_profile').value,
-    mic_gain: readNumber('mic_gain', 1),
-    input_transient_suppression: $('input_transient_suppression').checked,
-    speaker_gain: readNumber('speaker_gain', 1),
-    jitter_ms: readNumber('jitter_ms', 40),
-    input_backend: $('input_backend').value,
-    input_device: $('input_device').value.trim() || null,
-    output_device: $('output_device').value.trim() || null,
+    listen_channel: Number($('listen_channel').value || 1),
+    tx_channel: Number($('tx_channel').value || 1),
+    mic_gain: Number($('mic_gain').value || 1),
+    speaker_gain: Number($('speaker_gain').value || 1),
     buttons: parseList($('buttons').value),
     button_keys: parseList($('button_keys').value),
-    local_ui_bind: $('local_ui_bind').value.trim(),
-    local_ui_token: $('local_ui_token').value || null,
-    disable_local_ui: $('disable_local_ui').checked,
-    window_mode: $('window_mode').value,
-    ui_open_delay_ms: readNumber('ui_open_delay_ms', 750)
+    server_profiles: serverProfiles,
+    disable_local_ui: false,
+    window_mode: 'native',
   };
 }
 
+function renderCodecFields() {
+  $('opus-profile-row').hidden = $('codec').value !== 'opus';
+}
+
+async function refreshStatus() {
+  const status = await invoke('native_status');
+  setControlsUrl(status.local_ui_url || (status.running ? CONTROLS_PAGE : null));
+  const phase = status.phase || (status.running ? 'running' : 'stopped');
+  setStatus(phase, phase === 'running' ? 'talk' : phase === 'failed' ? 'error' : phase === 'starting' ? 'starting' : 'offline');
+  setMessage(status.last_error || (status.running ? 'Client is running. Open Controls for the main client UI.' : 'Choose a server, configure audio, and start the client.'), status.last_error ? 'error' : status.running ? 'running' : '');
+}
+
 async function load() {
+  if (!invoke) {
+    setMessage('This page must be opened inside the RedLine macOS app.', 'error');
+    return;
+  }
   try {
-    fill(await invoke('load_native_settings'));
-    setMessage('Settings loaded. Save changes and restart the client to apply startup settings.');
+    const settings = await invoke('load_native_settings');
+    fill(settings);
+    await refreshStatus();
   } catch (err) {
+    try {
+      fill(await invoke('default_native_settings'));
+    } catch (_) {}
+    setStatus('error', 'error');
     setMessage(String(err), 'error');
   }
 }
 
-async function loadDefaults() {
-  try {
-    fill(await invoke('default_native_settings'));
-    setMessage('Defaults loaded. Save to replace the settings file.', 'ok');
-  } catch (err) {
-    setMessage(String(err), 'error');
-  }
-}
+$('codec').addEventListener('change', renderCodecFields);
 
-$('settings-form').addEventListener('submit', async event => {
+$('save').addEventListener('click', async event => {
   event.preventDefault();
+  if (!invoke) return;
   try {
     await invoke('save_native_settings', { settings: collect() });
-    setMessage('Settings saved. Restart or reconnect the app to use startup-level changes.', 'ok');
+    setMessage('Saved. Use Start to connect with these settings.', 'running');
   } catch (err) {
     setMessage(String(err), 'error');
   }
 });
 
-$('reload').addEventListener('click', load);
-$('defaults').addEventListener('click', loadDefaults);
+$('scan-servers').addEventListener('click', async event => {
+  event.preventDefault();
+  if (!invoke) return;
+  $('scan-servers').disabled = true;
+  $('server-list-status').textContent = 'Scanning local network...';
+  try {
+    const profiles = await invoke('native_discover_servers');
+    setServerProfiles(profiles);
+    setMessage(profiles.length ? 'Select a server or keep manual addresses.' : 'No RedLine servers found. Manual entry is still available.', profiles.length ? 'running' : '');
+  } catch (err) {
+    setMessage(String(err), 'error');
+    $('server-list-status').textContent = 'Server scan failed.';
+  } finally {
+    $('scan-servers').disabled = false;
+  }
+});
+
+$('server-picker').addEventListener('change', async event => {
+  event.preventDefault();
+  if (!invoke || !$('server-picker').value) return;
+  const profile = serverProfiles.find(item => item.id === $('server-picker').value);
+  if (!profile) return;
+  try {
+    const settings = await invoke('native_select_server', { profile });
+    fill(settings);
+    setMessage(`Selected ${profile.name || profile.control}.`, 'running');
+  } catch (err) {
+    setMessage(String(err), 'error');
+  }
+});
+
+$('forget-server').addEventListener('click', async event => {
+  event.preventDefault();
+  if (!invoke || !$('server-picker').value) return;
+  try {
+    const settings = await invoke('native_forget_server', { id: $('server-picker').value });
+    fill(settings);
+    setMessage('Server removed from saved list.');
+  } catch (err) {
+    setMessage(String(err), 'error');
+  }
+});
+
+$('stop').addEventListener('click', async event => {
+  event.preventDefault();
+  if (!invoke) return;
+  try {
+    await invoke('native_stop_client');
+    setControlsUrl(null);
+    setStatus('stopped', 'offline');
+    setMessage('Client stopped.');
+  } catch (err) {
+    setStatus('error', 'error');
+    setMessage(String(err), 'error');
+  }
+});
+
+$('open-controls').addEventListener('click', event => {
+  event.preventDefault();
+  openControls();
+});
+
+$('close-config').addEventListener('click', event => {
+  event.preventDefault();
+  openControls();
+});
+
+$('mobile-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!invoke) return;
+  try {
+    setControlsUrl(null);
+    setStatus('starting', 'starting');
+    setMessage('Starting audio client...');
+    const response = await invoke('native_start_client', { settings: collect() });
+    setControlsUrl(response.local_ui_url);
+    setStatus(response.phase || 'running', 'talk');
+    setMessage(response.last_error || 'Opening client controls.', response.last_error ? 'error' : 'running');
+    await openControls();
+  } catch (err) {
+    setStatus('error', 'error');
+    setMessage(String(err), 'error');
+  }
+});
+
 load();
