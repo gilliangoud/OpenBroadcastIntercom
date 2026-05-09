@@ -251,6 +251,16 @@ jobs:
           if [ "${1:-}" = "tauri" ]; then
             shift
           fi
+
+          project_dir="$PWD"
+          while [ "$project_dir" != "/" ]; do
+            if [ -f "$project_dir/tauri.conf.json" ] || [ -f "$project_dir/tauri.conf.json5" ] || [ -f "$project_dir/Tauri.toml" ]; then
+              cd "$project_dir"
+              break
+            fi
+            project_dir="$(dirname "$project_dir")"
+          done
+
           exec npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" "$@"
           SH
           chmod +x "$HOME/.cargo/bin/cargo-tauri"
@@ -305,6 +315,16 @@ jobs:
           if [ "${1:-}" = "tauri" ]; then
             shift
           fi
+
+          project_dir="$PWD"
+          while [ "$project_dir" != "/" ]; do
+            if [ -f "$project_dir/tauri.conf.json" ] || [ -f "$project_dir/tauri.conf.json5" ] || [ -f "$project_dir/Tauri.toml" ]; then
+              cd "$project_dir"
+              break
+            fi
+            project_dir="$(dirname "$project_dir")"
+          done
+
           exec npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" "$@"
           SH
           chmod +x "$HOME/.cargo/bin/cargo-tauri"
