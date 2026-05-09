@@ -180,6 +180,7 @@ mod native {
             .manage(app_state)
             .invoke_handler(tauri::generate_handler![
                 load_native_settings,
+                open_native_settings,
                 save_native_settings,
                 default_native_settings,
                 client_ack_alert,
@@ -371,6 +372,11 @@ mod native {
         state: tauri::State<'_, NativeAppState>,
     ) -> Result<app::AppSettings, String> {
         app::load_settings(&state.config_file).map_err(|err| err.to_string())
+    }
+
+    #[tauri::command]
+    fn open_native_settings(app: tauri::AppHandle) -> Result<(), String> {
+        open_settings_window(&app).map_err(|err| err.to_string())
     }
 
     #[tauri::command]

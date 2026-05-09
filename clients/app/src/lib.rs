@@ -2859,6 +2859,9 @@ mod tests {
         assert_eq!(controls_js, shared_controls_js);
         assert_eq!(controls_css, shared_controls_css);
         assert_eq!(controls_api, shared_tauri_api);
+        assert!(controls_api.contains("open_native_settings"));
+        assert!(controls_api.contains("mobileShell()"));
+        assert!(!controls_api.contains("setup: true"));
         assert!(controls_html.contains("client-api.js"));
         assert!(controls_html.contains("client-controls.js"));
         assert!(controls_html.contains("id=\"client-title\" hidden"));

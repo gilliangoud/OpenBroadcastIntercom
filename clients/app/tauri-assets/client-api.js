@@ -44,14 +44,29 @@
     throw new Error(`Unsupported local client command ${method} ${path}`);
   }
 
-  function setup() {
-    window.location.href = 'mobile.html';
+  function mobileShell() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('mobile') === '1' || sessionStorage.getItem('intercom-mobile-shell') === '1';
+    } catch (_) {
+      return false;
+    }
   }
+
+  function setup() {
+    if (mobileShell()) {
+      window.location.href = 'mobile.html';
+      return;
+    }
+    return invoke('open_native_settings');
+  }
+
+  const setupAvailable = mobileShell() || !!invoke;
 
   window.intercomClientApi = {
     name: 'tauri',
     capabilities: {
-      setup: true,
+      setup: setupAvailable,
       runtimeSettings: false,
       gain: true,
       macosMicrophoneModes: false
