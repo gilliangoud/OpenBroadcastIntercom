@@ -10,8 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -26,6 +24,8 @@ jobs:
         run: tools/check-public-secrets.sh
       - name: Check version sync
         run: tools/check-version-sync.sh
+      - name: Check external model manifest
+        run: python3 tools/check-model-manifest.py
       - name: Test release version tool
         run: python3 -m unittest tools/test_release_version.py
       - name: Test client core
@@ -38,15 +38,11 @@ jobs:
         run: cargo test -p server --no-default-features
       - name: Test server app shell
         run: cargo test -p server-app
-      - name: Verify Git LFS objects
-        run: git lfs fsck
 
   ios-check:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
       - name: Select Xcode 26.4
         run: |
           sudo xcode-select -s /Applications/Xcode_26.4.app/Contents/Developer

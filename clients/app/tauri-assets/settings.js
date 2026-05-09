@@ -1,9 +1,15 @@
 const invoke = window.__TAURI__?.core?.invoke;
 const $ = id => document.getElementById(id);
 const CONTROLS_PAGE = 'client-controls.html';
+const DEFAULT_HOST = '127.0.0.1';
+const AUDIO_PORT = 40000;
+const CONTROL_PORT = 40001;
+const ADMIN_PORT = 40002;
+const MANUAL_SERVER_VALUE = '__manual__';
 
 let current = null;
 let currentLocalUiUrl = null;
+let runtimeRunning = false;
 let serverProfiles = [];
 
 function setMessage(text, kind = '') {
@@ -20,8 +26,16 @@ function setStatus(text, kind = 'offline') {
 
 function setControlsUrl(url) {
   currentLocalUiUrl = url || null;
-  $('open-controls').disabled = !currentLocalUiUrl;
   $('close-config').disabled = !currentLocalUiUrl;
+}
+
+function setRuntimeRunning(running) {
+  runtimeRunning = !!running;
+  const button = $('start');
+  button.textContent = runtimeRunning ? 'Disconnect' : 'Connect';
+  button.classList.toggle('talk-button-main', !runtimeRunning);
+  button.classList.toggle('disconnect-button', runtimeRunning);
+  button.setAttribute('aria-pressed', runtimeRunning ? 'true' : 'false');
 }
 
 function serverProfileLabel(profile) {
@@ -29,10 +43,39 @@ function serverProfileLabel(profile) {
   if (profile.discovered) badges.push('LAN');
   if (profile.last_connected_ms) badges.push('Recent');
   if (profile.auth === 'required') badges.push('Auth');
-  return `${profile.name || profile.control} - ${profile.server}${badges.length ? ` (${badges.join(', ')})` : ''}`;
+  return `${profile.name || profile.server_host || profile.control} - ${profile.server_host || profile.server}${badges.length ? ` (${badges.join(', ')})` : ''}`;
 }
 
-function setServerProfiles(profiles = []) {
+function selectedServerProfile() {
+  const value = $('server-picker').value;
+  if (!value || value === MANUAL_SERVER_VALUE) return null;
+  return serverProfiles.find(profile => profile.id === value) || null;
+}
+
+function selectedServerHost() {
+  const profile = selectedServerProfile();
+  return normalizeHost(profile?.server_host) || normalizeHost($('server_host').value) || DEFAULT_HOST;
+}
+
+function setManualServerVisible(visible) {
+  $('manual-server-row').hidden = !visible;
+}
+
+function syncServerSelection() {
+  const picker = $('server-picker');
+  const manual = picker.value === MANUAL_SERVER_VALUE || !selectedServerProfile();
+  setManualServerVisible(manual);
+  if (!manual) {
+    const profile = selectedServerProfile();
+    const host = normalizeHost(profile?.server_host);
+    if (host) $('server_host').value = host;
+    $('server-list-status').textContent = `Selected ${profile.name || host || profile.control}.`;
+  } else {
+    $('server-list-status').textContent = 'Manual server host will be used when you connect.';
+  }
+}
+
+function setServerProfiles(profiles = [], opts = {}) {
   const byId = new Map();
   for (const profile of profiles) {
     if (!profile || !profile.id) continue;
@@ -41,16 +84,7 @@ function setServerProfiles(profiles = []) {
   serverProfiles = Array.from(byId.values());
   const picker = $('server-picker');
   picker.innerHTML = '';
-  if (!serverProfiles.length) {
-    const option = document.createElement('option');
-    option.value = '';
-    option.textContent = 'No saved or discovered servers';
-    picker.appendChild(option);
-    picker.disabled = true;
-    $('forget-server').disabled = true;
-    $('server-list-status').textContent = 'Use Scan or enter server addresses manually.';
-    return;
-  }
+
   picker.disabled = false;
   for (const profile of serverProfiles) {
     const option = document.createElement('option');
@@ -58,10 +92,25 @@ function setServerProfiles(profiles = []) {
     option.textContent = serverProfileLabel(profile);
     picker.appendChild(option);
   }
-  const currentProfile = serverProfiles.find(profile => profile.control === $('control').value.trim());
-  if (currentProfile) picker.value = currentProfile.id;
-  $('forget-server').disabled = !picker.value;
-  $('server-list-status').textContent = `${serverProfiles.length} server${serverProfiles.length === 1 ? '' : 's'} available.`;
+
+  const manual = document.createElement('option');
+  manual.value = MANUAL_SERVER_VALUE;
+  manual.textContent = 'Manual';
+  picker.appendChild(manual);
+
+  const currentHost = normalizeHost($('server_host').value || current?.server_host || DEFAULT_HOST);
+  const currentControl = current?.control || controlForHost(currentHost);
+  const currentProfile = serverProfiles.find(profile =>
+    profile.control === currentControl || normalizeHost(profile.server_host) === currentHost
+  );
+  if (currentProfile) {
+    picker.value = currentProfile.id;
+  } else if (opts.preferFirst && serverProfiles.length) {
+    picker.value = serverProfiles[0].id;
+  } else {
+    picker.value = MANUAL_SERVER_VALUE;
+  }
+  syncServerSelection();
 }
 
 async function openControls() {
@@ -78,78 +127,74 @@ async function openControls() {
   window.location.href = currentLocalUiUrl;
 }
 
-function parseList(value) {
-  return value.split(',').map(item => item.trim()).filter(Boolean);
+function showGainValues() {
+  if ($('mic_gain_value') && $('mic_gain')) {
+    $('mic_gain_value').textContent = Number($('mic_gain').value || 1).toFixed(2);
+  }
+  if ($('speaker_gain_value') && $('speaker_gain')) {
+    $('speaker_gain_value').textContent = Number($('speaker_gain').value || 1).toFixed(2);
+  }
 }
 
-function csv(value) {
-  return Array.isArray(value) ? value.join(',') : '';
+function normalizeHost(host) {
+  return String(host || '').trim().replace(/^\[(.*)\]$/, '$1');
 }
 
-function numberOrNull(value) {
-  const trimmed = String(value ?? '').trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  return Number.isFinite(parsed) ? parsed : null;
+function hostForUrl(host) {
+  const normalized = normalizeHost(host);
+  return normalized.includes(':') ? `[${normalized}]` : normalized;
 }
 
-function normalizeOpusProfile(profile) {
-  return {
-    speech_low: 'speech_16_low',
-    speech_standard: 'speech_24_standard',
-    speech_high: 'speech_48_high',
-    music_high: 'music_48'
-  }[profile] || profile || 'speech_24_standard';
+function audioForHost(host) {
+  const normalized = normalizeHost(host) || DEFAULT_HOST;
+  return `${hostForUrl(normalized)}:${AUDIO_PORT}`;
+}
+
+function controlForHost(host) {
+  const normalized = normalizeHost(host) || DEFAULT_HOST;
+  return `ws://${hostForUrl(normalized)}:${CONTROL_PORT}`;
+}
+
+function adminForHost(host) {
+  const normalized = normalizeHost(host) || DEFAULT_HOST;
+  return `http://${hostForUrl(normalized)}:${ADMIN_PORT}`;
 }
 
 function fill(settings) {
   current = settings;
-  $('server').value = settings.server || '127.0.0.1:40000';
-  $('control').value = settings.control || 'ws://127.0.0.1:40001';
-  $('user_id').value = settings.user_id ?? '';
-  $('codec').value = settings.codec || 'pcm16';
-  $('opus_profile').value = normalizeOpusProfile(settings.opus_profile);
-  $('listen_channel').value = settings.listen_channel ?? 1;
-  $('tx_channel').value = settings.tx_channel ?? 1;
+  $('server_host').value = settings.server_host || DEFAULT_HOST;
+  $('opus_profile').value = settings.opus_profile || 'speech_24_standard';
   $('mic_gain').value = settings.mic_gain ?? 1;
   $('speaker_gain').value = settings.speaker_gain ?? 1;
-  $('buttons').value = csv(settings.buttons);
-  $('button_keys').value = csv(settings.button_keys);
+  $('button_count').value = settings.button_count ?? 6;
   setServerProfiles(settings.server_profiles || serverProfiles);
-  renderCodecFields();
+  showGainValues();
 }
 
 function collect() {
+  const host = selectedServerHost();
   return {
     ...(current || {}),
-    app_title: (current && current.app_title) || 'RedLine',
-    server: $('server').value.trim(),
-    control: $('control').value.trim(),
-    user_id: numberOrNull($('user_id').value),
-    codec: $('codec').value,
+    app_title: 'RedLine',
+    server_host: host,
+    server: audioForHost(host),
+    control: controlForHost(host),
+    admin: adminForHost(host),
+    advanced_endpoints: false,
+    user_id: null,
+    codec: 'opus',
     opus_profile: $('opus_profile').value,
-    listen_channel: Number($('listen_channel').value || 1),
-    tx_channel: Number($('tx_channel').value || 1),
+    listen_channel: Number(current?.listen_channel ?? 0),
+    tx_channel: Number(current?.tx_channel ?? 0),
     mic_gain: Number($('mic_gain').value || 1),
     speaker_gain: Number($('speaker_gain').value || 1),
-    buttons: parseList($('buttons').value),
-    button_keys: parseList($('button_keys').value),
+    button_count: Number($('button_count').value || 6),
+    buttons: [],
+    button_keys: [],
     server_profiles: serverProfiles,
     disable_local_ui: false,
     window_mode: 'native',
   };
-}
-
-function renderCodecFields() {
-  $('opus-profile-row').hidden = $('codec').value !== 'opus';
-}
-
-async function refreshStatus() {
-  const status = await invoke('native_status');
-  setControlsUrl(status.local_ui_url || (status.running ? CONTROLS_PAGE : null));
-  const phase = status.phase || (status.running ? 'running' : 'stopped');
-  setStatus(phase, phase === 'running' ? 'talk' : phase === 'failed' ? 'error' : phase === 'starting' ? 'starting' : 'offline');
-  setMessage(status.last_error || (status.running ? 'Client is running. Open Controls for the main client UI.' : 'Choose a server, configure audio, and start the client.'), status.last_error ? 'error' : status.running ? 'running' : '');
 }
 
 async function load() {
@@ -160,28 +205,29 @@ async function load() {
   try {
     const settings = await invoke('load_native_settings');
     fill(settings);
-    await refreshStatus();
+    const status = await invoke('native_status');
+
+    setControlsUrl(status.local_ui_url);
+    const phase = status.phase || (status.running ? 'running' : 'stopped');
+    setRuntimeRunning(status.running);
+    setStatus(phase, phase === 'running' ? 'talk' : phase === 'failed' ? 'error' : phase === 'starting' ? 'starting' : 'offline');
+    setMessage(status.last_error || (status.running ? 'Client connected. Close to return to controls.' : 'Choose a server, configure audio, and connect.'), status.last_error ? 'error' : status.running ? 'running' : '');
   } catch (err) {
     try {
       fill(await invoke('default_native_settings'));
     } catch (_) {}
+    setRuntimeRunning(false);
     setStatus('error', 'error');
     setMessage(String(err), 'error');
   }
 }
 
-$('codec').addEventListener('change', renderCodecFields);
-
-$('save').addEventListener('click', async event => {
-  event.preventDefault();
-  if (!invoke) return;
-  try {
-    await invoke('save_native_settings', { settings: collect() });
-    setMessage('Saved. Use Start to connect with these settings.', 'running');
-  } catch (err) {
-    setMessage(String(err), 'error');
-  }
+$('server_host').addEventListener('input', () => {
+  $('server-picker').value = MANUAL_SERVER_VALUE;
+  syncServerSelection();
 });
+$('mic_gain').addEventListener('input', showGainValues);
+$('speaker_gain').addEventListener('input', showGainValues);
 
 $('scan-servers').addEventListener('click', async event => {
   event.preventDefault();
@@ -190,8 +236,8 @@ $('scan-servers').addEventListener('click', async event => {
   $('server-list-status').textContent = 'Scanning local network...';
   try {
     const profiles = await invoke('native_discover_servers');
-    setServerProfiles(profiles);
-    setMessage(profiles.length ? 'Select a server or keep manual addresses.' : 'No RedLine servers found. Manual entry is still available.', profiles.length ? 'running' : '');
+    setServerProfiles(profiles, { preferFirst: true });
+    setMessage(profiles.length ? 'Scan refreshed servers. Select one or choose Manual.' : 'No RedLine servers found. Manual entry is still available.', profiles.length ? 'running' : '');
   } catch (err) {
     setMessage(String(err), 'error');
     $('server-list-status').textContent = 'Server scan failed.';
@@ -200,50 +246,27 @@ $('scan-servers').addEventListener('click', async event => {
   }
 });
 
-$('server-picker').addEventListener('change', async event => {
+$('server-picker').addEventListener('change', event => {
   event.preventDefault();
-  if (!invoke || !$('server-picker').value) return;
-  const profile = serverProfiles.find(item => item.id === $('server-picker').value);
-  if (!profile) return;
-  try {
-    const settings = await invoke('native_select_server', { profile });
-    fill(settings);
-    setMessage(`Selected ${profile.name || profile.control}.`, 'running');
-  } catch (err) {
-    setMessage(String(err), 'error');
-  }
+  syncServerSelection();
 });
 
-$('forget-server').addEventListener('click', async event => {
-  event.preventDefault();
-  if (!invoke || !$('server-picker').value) return;
-  try {
-    const settings = await invoke('native_forget_server', { id: $('server-picker').value });
-    fill(settings);
-    setMessage('Server removed from saved list.');
-  } catch (err) {
-    setMessage(String(err), 'error');
-  }
-});
-
-$('stop').addEventListener('click', async event => {
-  event.preventDefault();
+async function disconnectClient() {
   if (!invoke) return;
   try {
+    $('start').disabled = true;
     await invoke('native_stop_client');
     setControlsUrl(null);
+    setRuntimeRunning(false);
     setStatus('stopped', 'offline');
-    setMessage('Client stopped.');
+    setMessage('Client disconnected.');
   } catch (err) {
     setStatus('error', 'error');
     setMessage(String(err), 'error');
+  } finally {
+    $('start').disabled = false;
   }
-});
-
-$('open-controls').addEventListener('click', event => {
-  event.preventDefault();
-  openControls();
-});
+}
 
 $('close-config').addEventListener('click', event => {
   event.preventDefault();
@@ -253,18 +276,27 @@ $('close-config').addEventListener('click', event => {
 $('mobile-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (!invoke) return;
+  if (runtimeRunning) {
+    await disconnectClient();
+    return;
+  }
   try {
+    $('start').disabled = true;
     setControlsUrl(null);
     setStatus('starting', 'starting');
-    setMessage('Starting audio client...');
+    setMessage('Connecting audio client...');
     const response = await invoke('native_start_client', { settings: collect() });
     setControlsUrl(response.local_ui_url);
+    setRuntimeRunning(response.running);
     setStatus(response.phase || 'running', 'talk');
-    setMessage(response.last_error || 'Opening client controls.', response.last_error ? 'error' : 'running');
+    setMessage(response.last_error || 'Connected. Opening controls.', response.last_error ? 'error' : 'running');
     await openControls();
   } catch (err) {
+    setRuntimeRunning(false);
     setStatus('error', 'error');
     setMessage(String(err), 'error');
+  } finally {
+    $('start').disabled = false;
   }
 });
 

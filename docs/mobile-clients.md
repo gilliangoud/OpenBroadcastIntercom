@@ -11,30 +11,34 @@ On iOS and Android, Tauri calls the Rust mobile entry point exported from the
 `app` crate. The mobile shell opens `tauri-assets/mobile.html` as the setup
 page, lets the operator enter the server/control addresses and startup defaults,
 then starts the existing client runtime on a background Rust thread. Once the
-runtime is running, the shell navigates to the same local phone-shaped client UI
-served by the desktop runtime. That local UI is the main client surface on
-mobile too; the setup page remains reachable through the mobile-only `Setup`
-button in the local UI or the `Controls` button on the setup page.
+runtime is running, the shell navigates to the same phone-shaped client UI used
+by desktop, but as bundled Tauri assets backed by Tauri IPC commands instead of
+the desktop HTTP local UI server. That UI is the main client surface on mobile;
+the setup page remains reachable through the mobile-only `Setup` button in the
+local UI or the `Controls` button on the setup page.
 
 The mobile settings file is stored in the platform app config directory as
-`intercom-app-settings.json`. This legacy filename is kept for compatibility
-with existing local configs. The settings page forces local UI on because the
-local UI is the actual mobile control surface.
+`intercom-app-settings.json`. The settings page disables the desktop HTTP local
+UI because the mobile control surface is bundled in the Tauri app and talks to
+Rust through IPC.
 
 On iOS, the setup page also keeps a saved/recent server picker. `Scan` browses
-the LAN for the RedLine Bonjour service type `_intercom-suite._tcp.local` and
-fills the audio, control, and admin addresses from the server TXT metadata.
-Manual audio/control entry remains the fallback when local-network permission is
-denied or Bonjour is not available on the LAN.
+the LAN for Bonjour `_intercom-suite._tcp.local` services and fills the audio,
+control, and admin addresses from the server TXT metadata. Manual audio/control
+entry remains the fallback when local-network permission is denied or Bonjour is
+not available on the LAN.
+
+Visual references for the mobile setup page and packaged Tauri operator console
+are in [Client UI Screenshots](client-ui-screenshots.md).
 
 ## Permissions
 
 iOS:
 
-- `NSMicrophoneUsageDescription` for live RedLine capture.
+- `NSMicrophoneUsageDescription` for live intercom capture.
 - `NSLocalNetworkUsageDescription` for LAN UDP/WebSocket server access.
 - `NSBonjourServices = _intercom-suite._tcp` for LAN server discovery.
-- `UIBackgroundModes = audio` so the app can be evaluated for ongoing RedLine
+- `UIBackgroundModes = audio` so the app can be evaluated for ongoing intercom
   audio while backgrounded.
 - App Transport Security allows local networking and web content loads for the
   app-hosted local UI.
@@ -159,9 +163,12 @@ APPLE_DEVELOPMENT_TEAM=TEAMID ./app/scripts/ios-device-dev.sh
 
 `ios-device-build.sh` requires the `aarch64-apple-ios` Rust target, clears stale
 Tauri Apple build output, and builds a development-signed generic device
-bundle. It requires the iPhone to already be known to your Apple development
-team or provisioning will fail before an app can be produced.
-`ios-device-dev.sh` is the first-run physical-device path: it detects only
+bundle. It defaults to an optimized release build for physical-device
+performance testing; set `IOS_BUILD_PROFILE=debug` only when you specifically
+need a debug build. It requires the iPhone to already be known to your Apple
+development team or provisioning will fail before an app can be produced.
+`ios-device-dev.sh` is the first-run physical-device path and stays on Tauri's
+debug/dev loop: it detects only
 physical iPhone/iPad/iPod entries from `xcrun xctrace list devices`, rejects
 Mac and simulator entries, then runs `cargo tauri ios dev <device>
 --features=native` so Xcode targets that device directly. It also injects
@@ -170,17 +177,16 @@ runs, because the current Tauri CLI only passes `-allowProvisioningUpdates`.
 Set `IOS_DEVICE_ID` or `IOS_DEVICE_NAME` when more than one physical device is
 attached or Xcode reports the device name differently.
 
-If Xcode reports `No Accounts` or `No profiles for` the current dev bundle ID
-(currently `com.intercomsuite.client`), the app has reached the signing step but
-Xcode is not signed in to an Apple account that can create an iOS App
-Development profile. Open Xcode > Settings > Accounts, add the Apple ID for
-`APPLE_DEVELOPMENT_TEAM`, create or download an Apple Development certificate,
-then rerun the wrapper with the iPhone connected and trusted. If Xcode reports
-that the device is not registered even with the wrapper's device-registration
-flag, add the iPhone UDID manually in the Apple Developer portal for that team.
-If Xcode then reports that the bundle identifier is unavailable, change
-`clients/app/tauri.conf.json` to a unique development identifier before
-regenerating/rerunning.
+If Xcode reports `No Accounts` or `No profiles for 'com.intercomsuite.client'`,
+the app has reached the signing step but Xcode is not signed in to an Apple
+account that can create an iOS App Development profile. Open Xcode > Settings >
+Accounts, add the Apple ID for `APPLE_DEVELOPMENT_TEAM`, create or download an
+Apple Development certificate, then rerun the wrapper with the iPhone connected
+and trusted. If Xcode reports that the device is not registered even with the
+wrapper's device-registration flag, add the iPhone UDID manually in the Apple
+Developer portal for that team. If Xcode then reports that the bundle
+identifier is unavailable, change `clients/app/tauri.conf.json` to a unique
+development identifier before regenerating/rerunning.
 
 Android builds require a connected device/emulator and accepted SDK licenses.
 
@@ -193,10 +199,10 @@ cargo run -p server -- --advertise-name "Studio RedLine"
 cargo run -p server -- --disable-discovery
 ```
 
-The advertised RedLine service is `_intercom-suite._tcp.local`. TXT metadata
-includes `audio_port`, `admin_port` when the admin UI is enabled, `name`,
-`version`, and `auth`. iOS uses that metadata to populate the picker and
-persists selected profiles in the mobile settings file.
+The advertised service is `_intercom-suite._tcp.local`. TXT metadata includes
+`audio_port`, `admin_port` when the admin UI is enabled, `name`, `version`, and
+`auth`. iOS uses that metadata to populate the picker and persists selected
+profiles in the mobile settings file.
 
 ## Validation Notes
 
@@ -208,7 +214,7 @@ desktop `cpal`.
 
 Known follow-ups:
 
-- A foreground-service implementation for Android long-running RedLine use.
+- A foreground-service implementation for Android long-running intercom use.
 - Physical iPhone validation for first-run permissions, LAN discovery, duplex
   audio, background/lock survival, Wi-Fi changes, server restarts, and
   Bluetooth route changes.

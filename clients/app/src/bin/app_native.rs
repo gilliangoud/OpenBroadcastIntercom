@@ -188,6 +188,7 @@ mod native {
             .manage(app_state)
             .invoke_handler(tauri::generate_handler![
                 load_native_settings,
+                open_native_settings,
                 save_native_settings,
                 default_native_settings,
                 native_discover_servers,
@@ -458,6 +459,11 @@ mod native {
     }
 
     #[tauri::command]
+    fn open_native_settings(app: tauri::AppHandle) -> Result<(), String> {
+        open_settings_window(&app).map_err(|err| err.to_string())
+    }
+
+    #[tauri::command]
     fn save_native_settings(
         state: tauri::State<'_, NativeAppState>,
         mut settings: app::AppSettings,
@@ -479,9 +485,11 @@ mod native {
     fn native_discover_servers(
         state: tauri::State<'_, NativeAppState>,
     ) -> Result<Vec<app::MobileServerProfile>, String> {
-        let settings = app::load_settings(&state.config_file).map_err(|err| err.to_string())?;
+        let mut settings = app::load_settings(&state.config_file).map_err(|err| err.to_string())?;
         let discovered = native_discover_servers_for_platform().map_err(|err| err.to_string())?;
-        Ok(native_merge_profiles(settings.server_profiles, discovered))
+        settings.server_profiles = native_merge_profiles(Vec::new(), discovered);
+        app::save_settings(&state.config_file, &settings).map_err(|err| err.to_string())?;
+        Ok(settings.server_profiles)
     }
 
     #[tauri::command]
@@ -502,8 +510,15 @@ mod native {
         }
 
         let mut settings = app::load_settings(&state.config_file).map_err(|err| err.to_string())?;
+        settings.server_host = if profile.server_host.trim().is_empty() {
+            settings.server_host
+        } else {
+            profile.server_host.clone()
+        };
         settings.server = server;
         settings.control = profile.control.clone();
+        settings.admin = profile.admin.clone();
+        settings.advanced_endpoints = false;
         app::remember_mobile_profile(&mut settings, profile);
         prepare_native_saved_settings(&mut settings);
         app::save_settings(&state.config_file, &settings).map_err(|err| err.to_string())?;
@@ -636,8 +651,10 @@ mod native {
         } else {
             settings.app_title.trim().to_string()
         };
+        settings.codec = Codec::Opus;
         settings.window_mode = app::AppWindowMode::Native;
         settings.disable_local_ui = false;
+        settings.normalize_endpoints();
     }
 
     fn prepare_native_runtime_settings(settings: &mut app::AppSettings) {
@@ -665,6 +682,7 @@ mod native {
         app::MobileServerProfile {
             id,
             name,
+            server_host: settings.server_host.clone(),
             server: settings.server.to_string(),
             control,
             admin: existing.and_then(|profile| profile.admin.clone()),
@@ -854,6 +872,7 @@ mod native {
             Some(app::MobileServerProfile {
                 id: app::mobile_profile_id(&name, &control),
                 name,
+                server_host: ip.clone(),
                 server: format!("{ip}:{audio_port}"),
                 control,
                 admin: txt

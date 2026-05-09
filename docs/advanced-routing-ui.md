@@ -64,6 +64,9 @@ The client UI should stay organized around field tasks:
 - local mic/speaker gain
 - IFB state
 
+Current client UI screenshots are maintained in
+[Client UI Screenshots](client-ui-screenshots.md).
+
 ## Next Routing Steps
 
 Presets are server-owned snapshots of desired client configs. They are stored

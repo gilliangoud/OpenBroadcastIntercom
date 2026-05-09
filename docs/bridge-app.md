@@ -54,6 +54,9 @@ The Tauri wrapper opens the same bridge manager inside an OS webview window.
 Closing the native window asks the manager to stop all launched bridge routes so
 production audio child processes are not left running in the background.
 
+A current bridge manager screenshot is included in
+[Client UI Screenshots](client-ui-screenshots.md#bridge-app).
+
 The route editor uses dropdown controls for local audio devices and server
 channels. Device dropdowns are discovered from the local audio host through
 `cpal`. Channel dropdowns are loaded from the server admin state when reachable;

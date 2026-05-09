@@ -62,6 +62,10 @@ defaults to `window_mode = "native"` and should pick an available local UI port:
 cargo run -p app --features native --bin app-native -- --print-launch-plan --local-ui-bind 127.0.0.1:0
 ```
 
+Current visual references for the native app settings, Tauri operator console,
+desktop local UI, Pi browser UI, mobile setup, and bridge app are collected in
+[Client UI Screenshots](client-ui-screenshots.md).
+
 ## Native Controls
 
 The tray/menu exposes:

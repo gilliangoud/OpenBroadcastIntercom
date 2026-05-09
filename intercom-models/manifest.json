@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "model_dir": "intercom-models",
+  "source": {
+    "name": "ggerganov/whisper.cpp",
+    "homepage": "https://huggingface.co/ggerganov/whisper.cpp",
+    "repository": "https://huggingface.co/ggerganov/whisper.cpp/tree/main",
+    "license": "MIT"
+  },
+  "default_model": "ggml-large-v3-turbo-q5_0.bin",
+  "models": [
+    {
+      "id": "whisper-large-v3-turbo",
+      "name": "Whisper large-v3 turbo",
+      "filename": "ggml-large-v3-turbo.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin?download=true",
+      "size": "1.5 GiB",
+      "sha1": "4af2b29d7ec73d781377bfd1758ca957a807e941",
+      "license": "MIT",
+      "notes": "Full large-v3 turbo GGML model for whisper.cpp."
+    },
+    {
+      "id": "whisper-large-v3-turbo-q8_0",
+      "name": "Whisper large-v3 turbo Q8_0",
+      "filename": "ggml-large-v3-turbo-q8_0.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin?download=true",
+      "size": "834 MiB",
+      "sha1": "01bf15bedffe9f39d65c1b6ff9b687ea91f59e0e",
+      "license": "MIT",
+      "notes": "Quantized Q8_0 large-v3 turbo GGML model for whisper.cpp."
+    },
+    {
+      "id": "whisper-large-v3-turbo-q5_0",
+      "name": "Whisper large-v3 turbo Q5_0",
+      "filename": "ggml-large-v3-turbo-q5_0.bin",
+      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin?download=true",
+      "size": "547 MiB",
+      "sha1": "e050f7970618a659205450ad97eb95a18d69c9ee",
+      "license": "MIT",
+      "notes": "Quantized Q5_0 large-v3 turbo GGML model for whisper.cpp."
+    }
+  ]
+}

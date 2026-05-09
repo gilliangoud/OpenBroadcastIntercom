@@ -3,16 +3,19 @@
 This is the first ESP-IDF firmware target for `GOU-59`, aimed at the
 Ai-Thinker ESP32 Audio Kit V2.2 / ESP32-A1S board with the ES8388 codec.
 
-The first bring-up is PCM-only on the ESP32:
+The ESP32 firmware currently includes:
 
 - Wi-Fi station mode.
 - WebSocket control `hello`, startup `config`, `config_update`, `talk`,
-  `button`, and `ping` messages.
-- UDP v2 audio packets with `pcm16`, `pcm24`, or `pcm48`.
+  `button`, `ack_alert`, `direct_call`, capture health, and `ping` messages.
+- UDP v2 audio packets with `pcm16`, `pcm24`, `pcm48`, or optional mono Opus.
 - Mixed audio receive and ES8388 playback through the legacy ESP-IDF I2S driver.
 - ES8388 microphone capture through the legacy ESP-IDF I2S driver and transmit to effective
   regular/button routes.
-- Regular PTT GPIO and two advertised dedicated buttons.
+- Regular PTT GPIO, four advertised A-D dedicated buttons, and a separate
+  reply/alert hold-to-talk button.
+- Optional 1.54 inch 240x240 ST7789 SPI TFT UI rotated 90 degrees for status,
+  alerts, button labels, and unit identity.
 - Wi-Fi power save disabled after connect.
 - PSRAM-preferred playback jitter buffer.
 - Local connecting/reconnecting, connected, and disconnected cues with
@@ -21,8 +24,9 @@ The first bring-up is PCM-only on the ESP32:
 The ES8388 hardware path is fixed at `48 kHz`, `16-bit`, stereo, Philips/
 standard I2S with MCLK. Network codec selection is software conversion only:
 `pcm16` sends/receives 16 kHz packets, `pcm24` sends/receives 24 kHz packets,
-and `pcm48` stays native to the hardware path. Opus is deferred until PCM
-audio, control, GPIO behavior, and CPU headroom are stable on the actual board.
+and `pcm48` stays native to the hardware path. Opus currently uses the default
+24 kHz speech profile on ESP32; keep ESP32 clients on `speech_24_standard`
+until firmware profile switching is implemented and validated on hardware.
 
 The firmware currently uses the legacy ESP-IDF I2S API (`driver/i2s.h`) because
 that is the last known-good path for this board. It still uses the new I2C
@@ -72,6 +76,24 @@ The audio hardware path is deliberately fixed for bring-up:
   core, which protects headset playback from Wi-Fi send stalls.
 - `UDP task stack size`: stack for the network send/receive task. Keep this at
   `8192` or higher while using `pcm48` and control telemetry.
+- The checked-in `sdkconfig.defaults` selects the large single-app partition and
+  enables Opus. The generated local `sdkconfig` stays ignored so lab Wi-Fi,
+  server, and pin settings do not get committed.
+
+Current app-size audit on ESP-IDF 5.4, large single-app partition `0x177000`:
+
+| Opus | ST7789 | App size | Free app partition |
+|---|---|---:|---:|
+| enabled | disabled | `0x11c620` | `0x5a9e0` (24%) |
+| enabled | enabled, sample pins | `0x125310` | `0x51cf0` (22%) |
+| disabled | enabled, sample pins | `0xf6c30` | `0x803d0` (34%) |
+| disabled | disabled | `0xee1a0` | `0x88e60` (37%) |
+
+Runtime heap pressure is reported in `capture_health.memory`, including total
+free/minimum heap, internal free heap, largest internal block, PSRAM free heap,
+and largest PSRAM block. When the ST7789 UI is enabled, its 240x240 RGB565
+framebuffer is `115200` bytes, prefers PSRAM, falls back to general 8-bit heap,
+and reports `display.framebuffer_in_psram` plus `display.framebuffer_bytes`.
 
 The ES8388 init path is a local legacy register sequence. Use
 `output-test` as the clean local test of ES8388/I2S/PA routing; normal startup
@@ -128,7 +150,7 @@ In `menuconfig`, set:
 - `Intercom ESP32 Client -> Client user ID`, the requested numeric alias
 - `Intercom ESP32 Client -> Stable client UID override`, optional fixed lab identity
 - `Intercom ESP32 Client -> Audio diagnostic mode`
-- `Intercom ESP32 Client -> Initial PCM codec`
+- `Intercom ESP32 Client -> Initial audio codec`
 - `Intercom ESP32 Client -> ES8388 ADC input`
 - `Intercom ESP32 Client -> ES8388 mic PGA gain`
 - `Intercom ESP32 Client -> Capture channel`
@@ -139,13 +161,25 @@ In `menuconfig`, set:
 - `Intercom ESP32 Client -> Speaker/headphone output enable polarity`
 - `Intercom ESP32 Client -> Swap I2S LRCK/WS and data out pins`, only if all
   output-test route/polarity profiles stay silent
-- optional PTT and dedicated button GPIOs
+- optional PTT, A-D dedicated button GPIOs, and reply/alert button GPIO
+- optional `Intercom ESP32 Client -> ST7789 display`
+- optional `Intercom ESP32 Client -> Enable Opus codec support`
+- optional `Intercom ESP32 Client -> ESP32 intercom task watchdog`
 - optional `Intercom ESP32 Client -> Local sidetone / self-monitor`
 
 Keep the playback/capture task stack sizes at the defaults or higher when
-testing `pcm24` or `pcm48`. The high-rate codecs use larger 10 ms frames than
-`pcm16`; the firmware keeps the large frame buffers off-stack, but the larger
-stack guard leaves room for I2S and control call frames.
+testing `pcm24`, `pcm48`, or Opus. The high-rate codecs use larger 10 ms frames
+than `pcm16`; the firmware keeps the large frame buffers off-stack, but the
+larger stack guard leaves room for I2S, Opus, and control call frames.
+
+The ST7789 display and battery UI are intentionally hardware-gated:
+
+- Display support is disabled until the screen pins are wired and configured.
+- The TFT top row reports battery as unknown. Real battery measurement is
+  deferred until the custom PCB defines the ADC divider and charge-state
+  signals.
+- Hardware pin defaults are placeholders. Confirm ST7789 SPI pins, A-D buttons,
+  reply/alert GPIO, and future battery ADC before making a deployable image.
 
 The ESP32 sends both a stable `client_uid` and a requested numeric user ID in
 its control `hello`. Leave `Stable client UID override` empty for deployed
@@ -207,8 +241,8 @@ make flash-monitor PORT=/dev/cu.usbserial-XXXX
 The wrapper installs ESP-IDF into `~/.espressif/esp-idf` by default and targets
 the `release/v5.4` branch, which keeps us on the ESP-IDF 5.x APIs used by this
 first firmware. Override with `ESP_IDF_DIR` or `ESP_IDF_REF` if you already have
-a preferred checkout. ESP-IDF downloads the managed
-`espressif/esp_websocket_client` component during the first build.
+a preferred checkout. ESP-IDF downloads the managed `espressif/esp_websocket_client`
+and `78/esp-opus` components during the first build.
 
 Start the Rust server on the same LAN:
 
@@ -216,11 +250,11 @@ Start the Rust server on the same LAN:
 cargo run -p server
 ```
 
-The ESP32 advertises `pcm16`, `pcm24`, and `pcm48`. Start with `pcm16` while
-gain-staging a new board. Once the admin capture meters show normal speech with
-zero clipping and a healthy peak margin, switch the client codec to `pcm48`
-from the admin UI for the current best-quality ESP32 mode. `pcm16` is accepted
-as the low-bandwidth fallback and now uses linear interpolation plus lightweight
+The ESP32 advertises `pcm16`, `pcm24`, `pcm48`, and Opus when Opus is enabled.
+Start with `pcm16` while gain-staging a new board. Once the admin capture
+meters show normal speech with zero clipping and a healthy peak margin, switch
+the client codec to `pcm48` or Opus from the admin UI. `pcm16` is accepted as
+the low-bandwidth fallback and now uses linear interpolation plus lightweight
 FIR decimation instead of sample hold/averaging, but it will still sound more
 constrained than native `pcm48`.
 
@@ -238,8 +272,14 @@ constrained than native `pcm48`.
    fallback testing when bandwidth matters more than full-rate quality.
 6. Wire PTT as active-low to ground, configure the GPIO, set talk mode to `ptt`,
    and verify press-to-talk.
-7. Wire dedicated buttons as active-low to ground and assign actions in the
+7. Wire dedicated A-D buttons as active-low to ground and assign actions in the
    admin UI.
+8. Wire the reply/alert button as active-low to ground. Holding it acks the
+   newest active alert and direct-calls the alert sender; when no alert exists,
+   it replies to the last direct caller.
+9. Enable the ST7789 display only after the screen wiring is confirmed. The
+   full-screen states cover Wi-Fi, server, enrollment/config errors, and missing
+   config; the normal state shows status, alerts/calls, A-D labels, and unit ID.
 
 ## Capture Quality And Gain Staging
 

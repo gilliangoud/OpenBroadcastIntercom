@@ -35,6 +35,7 @@ across presets and templates.
 
 | Channel | Name | Purpose |
 | --- | --- | --- |
+| `0` | open | Default open intercom channel for newly enrolled operators. |
 | `1` | Program | Clean program audio feed into talent IFB. Usually from a bridge input. |
 | `2` | Production PL | Director, producer, technical crew. |
 | `3` | Referee PL | Referee team regular RedLine talkback. |

@@ -542,6 +542,7 @@ impl RuntimeAlert {
         AlertStatus {
             id: self.id,
             sender: self.sender,
+            sender_name: None,
             target: self.target,
             message: self.message.clone(),
             created_at_ms: self.created_at_ms,
@@ -576,6 +577,24 @@ impl RuntimeAlert {
     }
 }
 
+fn session_display_name(sessions: &HashMap<UserId, Session>, user_id: UserId) -> Option<String> {
+    sessions
+        .get(&user_id)
+        .map(|session| session.name.trim())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn alert_status_with_sessions(
+    alert: &RuntimeAlert,
+    sessions: &HashMap<UserId, Session>,
+) -> AlertStatus {
+    let mut status = alert.status();
+    status.sender_name = session_display_name(sessions, alert.sender);
+    status
+}
+
+#[cfg(test)]
 fn alert_statuses_for_user(
     alerts: &[RuntimeAlert],
     user_id: UserId,
@@ -595,18 +614,41 @@ fn alert_statuses_for_user(
     (active, recent)
 }
 
-fn admin_alert_statuses(alerts: &[RuntimeAlert]) -> (Vec<AlertStatus>, Vec<AlertStatus>) {
+fn alert_statuses_for_user_with_sessions(
+    alerts: &[RuntimeAlert],
+    user_id: UserId,
+    sessions: &HashMap<UserId, Session>,
+) -> (Vec<AlertStatus>, Vec<AlertStatus>) {
+    let active = alerts
+        .iter()
+        .filter(|alert| alert.active_for(user_id))
+        .map(|alert| alert_status_with_sessions(alert, sessions))
+        .collect::<Vec<_>>();
+    let recent = alerts
+        .iter()
+        .filter(|alert| alert.relevant_for(user_id) && !alert.active_for(user_id))
+        .rev()
+        .take(20)
+        .map(|alert| alert_status_with_sessions(alert, sessions))
+        .collect::<Vec<_>>();
+    (active, recent)
+}
+
+fn admin_alert_statuses_with_sessions(
+    alerts: &[RuntimeAlert],
+    sessions: &HashMap<UserId, Session>,
+) -> (Vec<AlertStatus>, Vec<AlertStatus>) {
     let active = alerts
         .iter()
         .filter(|alert| alert.active())
-        .map(RuntimeAlert::status)
+        .map(|alert| alert_status_with_sessions(alert, sessions))
         .collect::<Vec<_>>();
     let recent = alerts
         .iter()
         .filter(|alert| !alert.active())
         .rev()
         .take(50)
-        .map(RuntimeAlert::status)
+        .map(|alert| alert_status_with_sessions(alert, sessions))
         .collect::<Vec<_>>();
     (active, recent)
 }
@@ -683,7 +725,9 @@ fn active_direct_call_statuses_for_user(
             if caller == user_id || target == user_id {
                 calls.push(DirectCallStatus {
                     caller,
+                    caller_name: session_display_name(sessions, caller),
                     target,
+                    target_name: session_display_name(sessions, target),
                     active: true,
                     duck: call.duck,
                 });
@@ -699,7 +743,9 @@ fn active_direct_call_statuses_for_user(
                         if caller == user_id || target == user_id {
                             calls.push(DirectCallStatus {
                                 caller,
+                                caller_name: session_display_name(sessions, caller),
                                 target,
+                                target_name: session_display_name(sessions, target),
                                 active: true,
                                 duck: *duck,
                             });
@@ -933,8 +979,8 @@ impl DesiredClientConfig {
             client_uid: None,
             role: ClientRole::Client,
             name: String::new(),
-            listen: Vec::new(),
-            tx: Vec::new(),
+            listen: vec![CHANNEL_OPEN],
+            tx: vec![CHANNEL_OPEN],
             vol: HashMap::new(),
             talker_vol: HashMap::new(),
             codec: Codec::Pcm16,
@@ -952,6 +998,7 @@ impl DesiredClientConfig {
     }
 }
 
+const CHANNEL_OPEN: ChannelId = 0;
 const CHANNEL_PROGRAM: ChannelId = 1;
 const CHANNEL_PRODUCTION_PL: ChannelId = 2;
 const CHANNEL_REFEREE_PL: ChannelId = 3;
@@ -970,6 +1017,7 @@ const USER_PA_BRIDGE: UserId = 91;
 
 fn default_workflow_channels() -> Vec<ChannelConfig> {
     vec![
+        channel_config(CHANNEL_OPEN, "open"),
         channel_config(CHANNEL_PROGRAM, "Program"),
         channel_config(CHANNEL_PRODUCTION_PL, "Production PL"),
         channel_config(CHANNEL_REFEREE_PL, "Referee PL"),
@@ -1118,6 +1166,7 @@ fn producer_template_client() -> ClientTemplateClientConfig {
             TalkButtonConfig {
                 id: "alert-talent".to_string(),
                 label: "Alert Talent".to_string(),
+                color: None,
                 mode: TalkButtonMode::Momentary,
                 actions: vec![TalkButtonAction::Alert {
                     targets: vec![AlertTarget::User(USER_TALENT)],
@@ -1182,6 +1231,7 @@ fn referee_template_client() -> ClientTemplateClientConfig {
             TalkButtonConfig {
                 id: "alert-director".to_string(),
                 label: "Alert Director".to_string(),
+                color: None,
                 mode: TalkButtonMode::Momentary,
                 actions: vec![TalkButtonAction::Alert {
                     targets: vec![AlertTarget::User(USER_DIRECTOR)],
@@ -1230,6 +1280,7 @@ fn transmit_button(
     TalkButtonConfig {
         id: id.to_string(),
         label: label.to_string(),
+        color: None,
         mode: TalkButtonMode::Momentary,
         actions: vec![TalkButtonAction::Transmit {
             channels,
@@ -2548,7 +2599,9 @@ fn admin_router(state: Arc<ServerState>, auth: HttpAuthConfig) -> Router {
         )
         .route(
             "/admin/api/devices/:client_uid",
-            put(patch_device_handler).patch(patch_device_handler),
+            put(patch_device_handler)
+                .patch(patch_device_handler)
+                .delete(delete_device_handler),
         )
         .route(
             "/admin/api/channels/:channel_id",
@@ -2805,6 +2858,32 @@ async fn patch_device_handler(
     Json(body): Json<DevicePatch>,
 ) -> Result<Json<DeviceEnrollment>, AdminApiError> {
     update_device_enrollment(&state, client_uid, body, None).await
+}
+
+async fn delete_device_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(client_uid): AxumPath<String>,
+) -> Result<Json<OkResponse>, AdminApiError> {
+    let client_uid = client_uid.trim().to_string();
+    if client_uid.is_empty() {
+        return Err(AdminApiError::BadRequest(
+            "device UID cannot be empty".to_string(),
+        ));
+    }
+    let admin_snapshot = {
+        let mut admin_state = state.admin_state.write().await;
+        admin_state
+            .devices
+            .retain(|device| device.client_uid != client_uid);
+        for client in &mut admin_state.clients {
+            if client.client_uid.as_deref() == Some(client_uid.as_str()) {
+                client.client_uid = None;
+            }
+        }
+        admin_state.clone()
+    };
+    save_admin_state(&state, &admin_snapshot).await?;
+    Ok(Json(OkResponse { ok: true }))
 }
 
 async fn update_device_enrollment(
@@ -3098,7 +3177,8 @@ async fn admin_send_alert_handler(
             let Some(alert) = alerts.last() else {
                 return Err(AdminApiError::Internal("alert was not created".to_string()));
             };
-            Ok(Json(alert.status()))
+            let sessions = state.sessions.read().await;
+            Ok(Json(alert_status_with_sessions(alert, &sessions)))
         }
         ControlResponse::Error { message } => Err(AdminApiError::BadRequest(message)),
         other => Err(AdminApiError::BadRequest(format!(
@@ -3152,11 +3232,12 @@ async fn upsert_admin_client(
 async fn admin_state_snapshot(state: &ServerState) -> AdminStateResponse {
     let (sessions, metrics) = status_snapshot(state).await;
     let admin_state = state.admin_state.read().await.clone();
+    let sessions_guard = state.sessions.read().await;
     let alerts = state.alerts.read().await;
-    let (active_alerts, recent_alerts) = admin_alert_statuses(&alerts);
+    let (active_alerts, recent_alerts) =
+        admin_alert_statuses_with_sessions(&alerts, &sessions_guard);
     let emergency = state.emergency.read().await;
     let emergency = {
-        let sessions_guard = state.sessions.read().await;
         emergency.as_ref().map(|emergency| {
             emergency.status(emergency_recipients_for_sessions(
                 emergency,
@@ -3548,9 +3629,15 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
                 ),
             });
         }
-        return warnings;
     }
-    if capture.raw_clipped_samples > 0 || capture.software_clipped_samples > 0 {
+    let is_esp32 = capture.codec_config.is_some()
+        || capture.wifi.is_some()
+        || capture.memory.is_some()
+        || capture.task_stack_high_water_bytes.is_some()
+        || capture.display.is_some()
+        || capture.battery.is_some()
+        || (capture.runtime.is_none() && capture.desktop.is_none());
+    if is_esp32 && (capture.raw_clipped_samples > 0 || capture.software_clipped_samples > 0) {
         warnings.push(AdminWarning {
             user_id,
             message: format!(
@@ -3559,7 +3646,7 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.playback_underflows > 0 {
+    if is_esp32 && capture.playback_underflows > 0 {
         warnings.push(AdminWarning {
             user_id,
             message: format!(
@@ -3568,7 +3655,7 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.playback_overflows > 0 {
+    if is_esp32 && capture.playback_overflows > 0 {
         warnings.push(AdminWarning {
             user_id,
             message: format!(
@@ -3577,9 +3664,10 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.playback_i2s_gap_warnings > 0
-        || capture.playback_i2s_slow_warnings > 0
-        || capture.playback_i2s_short_warnings > 0
+    if is_esp32
+        && (capture.playback_i2s_gap_warnings > 0
+            || capture.playback_i2s_slow_warnings > 0
+            || capture.playback_i2s_short_warnings > 0)
     {
         warnings.push(AdminWarning {
             user_id,
@@ -3591,7 +3679,7 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.min_free_heap_bytes > 0 && capture.min_free_heap_bytes < 16 * 1024 {
+    if is_esp32 && capture.min_free_heap_bytes > 0 && capture.min_free_heap_bytes < 16 * 1024 {
         warnings.push(AdminWarning {
             user_id,
             message: format!(
@@ -3600,13 +3688,13 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.selected.peak > 0.92 && capture.raw_clipped_samples == 0 {
+    if is_esp32 && capture.selected.peak > 0.92 && capture.raw_clipped_samples == 0 {
         warnings.push(AdminWarning {
             user_id,
             message: "ESP32 capture is close to clipping; lower ES8388 PGA gain before using software gain".to_string(),
         });
     }
-    if capture.selected.rms < 0.003 && capture.selected.peak < 0.02 {
+    if is_esp32 && capture.selected.rms < 0.003 && capture.selected.peak < 0.02 {
         warnings.push(AdminWarning {
             user_id,
             message:
@@ -3614,13 +3702,17 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
                     .to_string(),
         });
     }
-    if capture.adc_input == "difference" && capture.capture_channel == "average" {
+    if is_esp32 && capture.adc_input == "difference" && capture.capture_channel == "average" {
         warnings.push(AdminWarning {
             user_id,
             message: "ESP32 differential mic is using average capture; this can cancel voice. Use left or right, then compare capture health.".to_string(),
         });
     }
-    if !capture.alc_enabled && capture.selected.rms < 0.02 && capture.selected.peak < 0.12 {
+    if is_esp32
+        && !capture.alc_enabled
+        && capture.selected.rms < 0.02
+        && capture.selected.peak < 0.12
+    {
         warnings.push(AdminWarning {
             user_id,
             message:
@@ -3628,7 +3720,7 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
                     .to_string(),
         });
     }
-    if capture.selected.dc_offset.abs() > 0.08 {
+    if is_esp32 && capture.selected.dc_offset.abs() > 0.08 {
         warnings.push(AdminWarning {
             user_id,
             message: format!(
@@ -3637,7 +3729,8 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             ),
         });
     }
-    if capture.capture_channel == "left"
+    if is_esp32
+        && capture.capture_channel == "left"
         && capture.right.rms > 0.02
         && capture.left.rms < capture.right.rms * 0.35
     {
@@ -3646,7 +3739,8 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             message: "ESP32 right input is much stronger than selected left channel; try capture channel `right` or `average`".to_string(),
         });
     }
-    if capture.capture_channel == "right"
+    if is_esp32
+        && capture.capture_channel == "right"
         && capture.left.rms > 0.02
         && capture.right.rms < capture.left.rms * 0.35
     {
@@ -3654,6 +3748,46 @@ fn capture_health_warnings(user_id: UserId, capture: &CaptureHealthStatus) -> Ve
             user_id,
             message: "ESP32 left input is much stronger than selected right channel; try capture channel `left` or `average`".to_string(),
         });
+    }
+    if let Some(playback) = &capture.playback {
+        if playback.underflows > 0 {
+            warnings.push(AdminWarning {
+                user_id,
+                message: format!(
+                    "Client playback underflowed {} times; increase jitter/prefill or check network jitter",
+                    playback.underflows
+                ),
+            });
+        }
+        if playback.overflows > 0 {
+            warnings.push(AdminWarning {
+                user_id,
+                message: format!(
+                    "Client playback overflowed {} times; reduce jitter buffer delay or check bursty delivery",
+                    playback.overflows
+                ),
+            });
+        }
+    }
+    if let Some(transport) = &capture.client_transport {
+        if transport.malformed_packets > 0 || transport.decode_errors > 0 {
+            warnings.push(AdminWarning {
+                user_id,
+                message: format!(
+                    "Client dropped audio packets: malformed {}, decode errors {}",
+                    transport.malformed_packets, transport.decode_errors
+                ),
+            });
+        }
+        if transport.tx_queue_drops > 0 || transport.tx_send_failures > 0 {
+            warnings.push(AdminWarning {
+                user_id,
+                message: format!(
+                    "Client transmit path dropped audio: queue drops {}, send failures {}",
+                    transport.tx_queue_drops, transport.tx_send_failures
+                ),
+            });
+        }
     }
     warnings
 }
@@ -3946,8 +4080,11 @@ async fn apply_control(state: &ServerState, control: ControlMessage) -> ControlR
             session.advertised_buttons = normalize_button_capabilities(buttons);
             if let Some(desired) = desired.as_ref() {
                 apply_desired_to_session_fields(desired, session);
-            } else if !session.supported_codecs.contains(&session.output_codec) {
-                session.output_codec = Codec::Pcm16;
+            } else {
+                apply_default_operator_channels_to_session(session);
+                if !session.supported_codecs.contains(&session.output_codec) {
+                    session.output_codec = Codec::Pcm16;
+                }
             }
             session.last_seen = Instant::now();
             tracing::info!(
@@ -4546,6 +4683,18 @@ fn apply_desired_to_session_fields(desired: &DesiredClientConfig, session: &mut 
     session.priority_channels = desired.priority_channels.iter().copied().collect();
 }
 
+fn apply_default_operator_channels_to_session(session: &mut Session) {
+    if session.role != ClientRole::Client {
+        return;
+    }
+    if session.listen_channels.is_empty() {
+        session.listen_channels.insert(CHANNEL_OPEN);
+    }
+    if session.tx_channels.is_empty() {
+        session.tx_channels.insert(CHANNEL_OPEN);
+    }
+}
+
 async fn apply_regular_talk_event(
     state: &ServerState,
     user_id: UserId,
@@ -4926,6 +5075,7 @@ async fn create_runtime_alert(
         })
         .collect::<Vec<_>>();
     let alert = {
+        let sessions = state.sessions.read().await;
         let mut alerts = state.alerts.write().await;
         let alert = RuntimeAlert {
             id: alert_id,
@@ -4937,7 +5087,7 @@ async fn create_runtime_alert(
             cancelled: false,
             cancelled_at_ms: None,
         };
-        let status = alert.status();
+        let status = alert_status_with_sessions(&alert, &sessions);
         alerts.push(alert);
         trim_alert_history(&mut alerts);
         status
@@ -5403,6 +5553,7 @@ async fn clear_active_buttons(state: &ServerState, user_id: UserId) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let direct_call_targets = targets.clone();
     let active_buttons = sessions
         .get(&user_id)
         .map(|session| {
@@ -5431,6 +5582,9 @@ async fn clear_active_buttons(state: &ServerState, user_id: UserId) {
             }
         }
     }
+    for target_user_id in &direct_call_targets {
+        close_direct_call_history(&mut sessions, user_id, *target_user_id, now);
+    }
     if let Some(session) = sessions.get_mut(&user_id) {
         session.active_buttons.clear();
         session.regular_talk_active = false;
@@ -5443,6 +5597,26 @@ async fn clear_active_buttons(state: &ServerState, user_id: UserId) {
         push_config_update(state, target).await;
     }
     push_config_update(state, user_id).await;
+}
+
+fn close_direct_call_history(
+    sessions: &mut HashMap<UserId, Session>,
+    user_id: UserId,
+    target_user_id: UserId,
+    now: Instant,
+) {
+    for session_id in [user_id, target_user_id] {
+        if let Some(session) = sessions.get_mut(&session_id) {
+            if let Some(entry) = session.direct_call_history.iter_mut().rev().find(|entry| {
+                entry.caller == user_id
+                    && entry.target == target_user_id
+                    && entry.source_button.is_none()
+                    && entry.ended.is_none()
+            }) {
+                entry.ended = Some(now);
+            }
+        }
+    }
 }
 
 async fn clear_emergency_for_source(state: &ServerState, user_id: UserId) {
@@ -5477,9 +5651,18 @@ fn normalize_button_capabilities(mut buttons: Vec<ButtonCapability>) -> Vec<Butt
             button.label = button.label.trim().to_string();
         }
     }
-    buttons.sort_by(|left, right| left.id.cmp(&right.id));
+    buttons.sort_by(|left, right| compare_button_ids(&left.id, &right.id));
     buttons.dedup_by(|left, right| left.id == right.id);
     buttons
+}
+
+fn compare_button_ids(left: &str, right: &str) -> std::cmp::Ordering {
+    match (left.parse::<u16>(), right.parse::<u16>()) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+        (Err(_), Err(_)) => left.cmp(right),
+    }
 }
 
 fn normalize_talker_volumes(
@@ -5506,11 +5689,29 @@ fn normalize_button_configs(mut buttons: Vec<TalkButtonConfig>) -> Vec<TalkButto
         } else {
             button.label = button.label.trim().to_string();
         }
+        button.color = normalize_button_color(button.color.take());
         button.actions = normalize_button_actions(std::mem::take(&mut button.actions));
     }
-    buttons.sort_by(|left, right| left.id.cmp(&right.id));
+    buttons.sort_by(|left, right| compare_button_ids(&left.id, &right.id));
     buttons.dedup_by(|left, right| left.id == right.id);
     buttons
+}
+
+fn normalize_button_color(color: Option<String>) -> Option<String> {
+    let color = color?.trim().to_string();
+    if is_hex_button_color(&color) {
+        Some(color)
+    } else {
+        None
+    }
+}
+
+fn is_hex_button_color(color: &str) -> bool {
+    let bytes = color.as_bytes();
+    if bytes.first() != Some(&b'#') || (bytes.len() != 4 && bytes.len() != 7) {
+        return false;
+    }
+    bytes[1..].iter().all(u8::is_ascii_hexdigit)
 }
 
 fn sorted_buttons(buttons: &[TalkButtonConfig]) -> Vec<TalkButtonConfig> {
@@ -5569,7 +5770,6 @@ fn normalize_optional_message(message: Option<String>) -> Option<String> {
 }
 
 fn sorted_unique_channels(mut channels: Vec<ChannelId>) -> Vec<ChannelId> {
-    channels.retain(|channel| *channel > 0);
     channels.sort_unstable();
     channels.dedup();
     channels
@@ -5585,7 +5785,7 @@ fn sorted_unique_users(mut users: Vec<UserId>) -> Vec<UserId> {
 fn sorted_unique_alert_targets(mut targets: Vec<AlertTarget>) -> Vec<AlertTarget> {
     targets.retain(|target| match target {
         AlertTarget::User(user_id) => *user_id > 0,
-        AlertTarget::Channel(channel_id) => *channel_id > 0,
+        AlertTarget::Channel(_) => true,
     });
     targets.sort_by_key(|target| match target {
         AlertTarget::User(user_id) => (0, *user_id),
@@ -5668,6 +5868,7 @@ fn normalize_admin_state(state: &mut PersistedAdminState) {
     if state.channels.is_empty() {
         state.channels = default_workflow_channels();
     }
+    ensure_open_channel(&mut state.channels);
     if state.presets.is_empty() {
         state.presets = default_workflow_presets();
     }
@@ -5698,12 +5899,24 @@ fn normalize_admin_state(state: &mut PersistedAdminState) {
 }
 
 fn normalize_channels(channels: &mut Vec<ChannelConfig>) {
-    channels.retain(|channel| channel.id > 0);
     for channel in channels.iter_mut() {
         channel.name = channel.name.trim().to_string();
     }
     channels.sort_by_key(|channel| channel.id);
     channels.dedup_by(|left, right| left.id == right.id);
+}
+
+fn ensure_open_channel(channels: &mut Vec<ChannelConfig>) {
+    if let Some(channel) = channels
+        .iter_mut()
+        .find(|channel| channel.id == CHANNEL_OPEN)
+    {
+        if channel.name.trim().is_empty() {
+            channel.name = "open".to_string();
+        }
+    } else {
+        channels.push(channel_config(CHANNEL_OPEN, "open"));
+    }
 }
 
 fn normalize_device_enrollments(devices: &mut Vec<DeviceEnrollment>) {
@@ -6096,7 +6309,8 @@ async fn config_event_snapshot(state: &ServerState, user_id: UserId) -> Option<C
     let sessions = state.sessions.read().await;
     let session = sessions.get(&user_id)?;
     let alerts = state.alerts.read().await;
-    let (active_alerts, recent_alerts) = alert_statuses_for_user(&alerts, user_id);
+    let (active_alerts, recent_alerts) =
+        alert_statuses_for_user_with_sessions(&alerts, user_id, &sessions);
     let emergency = emergency_status_for_user(emergency.as_ref(), &sessions, user_id);
     Some(session.control_event(
         user_id,
@@ -6934,7 +7148,8 @@ async fn status_snapshot(state: &ServerState) -> (Vec<SessionStatus>, StatusMetr
             active_buttons.sort();
             let active_direct_calls = active_direct_call_statuses_for_user(user_id, &sessions);
             let direct_call_history = direct_call_history_entries(&session.direct_call_history);
-            let (active_alerts, recent_alerts) = alert_statuses_for_user(&alerts, user_id);
+            let (active_alerts, recent_alerts) =
+                alert_statuses_for_user_with_sessions(&alerts, user_id, &sessions);
             let emergency = emergency_status_for_user(emergency.as_ref(), &sessions, user_id);
             let mut priority_channels = session
                 .priority_channels
@@ -7043,13 +7258,23 @@ async fn channel_rosters_for_user(
     user_id: UserId,
 ) -> Vec<ChannelPresenceRoster> {
     let now = Instant::now();
+    let channel_names = state
+        .admin_state
+        .read()
+        .await
+        .channels
+        .iter()
+        .map(|channel| (channel.id, channel.name.clone()))
+        .collect::<HashMap<_, _>>();
     let sessions = state.sessions.read().await;
     let health = state.health.read().await;
     let Some(viewer) = sessions.get(&user_id) else {
         return Vec::new();
     };
 
-    let mut visible_channels = configured_presence_channels(viewer);
+    let configured_channels = channel_names.keys().copied().collect::<HashSet<_>>();
+    let mut visible_channels = configured_channels.clone();
+    visible_channels.extend(configured_presence_channels(viewer));
     visible_channels.extend(viewer.effective_tx_channels());
     let mut rosters = visible_channels
         .into_iter()
@@ -7057,6 +7282,9 @@ async fn channel_rosters_for_user(
             let mut members = sessions
                 .iter()
                 .filter_map(|(&member_id, session)| {
+                    if member_id == 0 {
+                        return None;
+                    }
                     let mut member_channels = configured_presence_channels(session);
                     member_channels.extend(session.effective_tx_channels());
                     if !member_channels.contains(&channel_id) {
@@ -7077,11 +7305,15 @@ async fn channel_rosters_for_user(
                 })
                 .collect::<Vec<_>>();
             members.sort_by_key(|member| member.user_id);
-            if members.is_empty() {
+            if members.is_empty() && !configured_channels.contains(&channel_id) {
                 None
             } else {
                 Some(ChannelPresenceRoster {
                     channel_id,
+                    name: channel_names
+                        .get(&channel_id)
+                        .map(|name| name.trim().to_string())
+                        .filter(|name| !name.is_empty()),
                     members,
                 })
             }
@@ -7094,6 +7326,8 @@ async fn channel_rosters_for_user(
 fn configured_presence_channels(session: &Session) -> HashSet<ChannelId> {
     let mut channels = session.listen_channels.clone();
     channels.extend(session.tx_channels.iter().copied());
+    channels.extend(session.ifb.program.iter().copied());
+    channels.extend(session.ifb.interrupt.iter().copied());
     for button in &session.buttons {
         for action in &button.actions {
             if let TalkButtonAction::Transmit { channels: tx, .. } = action {
@@ -7126,6 +7360,10 @@ async fn register_audio_source(
 }
 
 async fn audio_user_is_enrolled(state: &ServerState, user_id: UserId) -> bool {
+    if user_id == 0 {
+        return false;
+    }
+
     {
         let sessions = state.sessions.read().await;
         if let Some(session) = sessions.get(&user_id) {
@@ -10541,11 +10779,16 @@ mod tests {
         let mut unrelated = Session::new();
         unrelated.addr = Some("127.0.0.1:10003".parse().unwrap());
         unrelated.listen_channels = [9].into();
-        state
-            .sessions
-            .write()
-            .await
-            .extend([(1, listener), (2, talker), (3, unrelated)]);
+        let mut stale_zero = Session::new();
+        stale_zero.addr = Some("127.0.0.1:10004".parse().unwrap());
+        stale_zero.listen_channels = [1].into();
+        stale_zero.tx_channels = [1].into();
+        state.sessions.write().await.extend([
+            (0, stale_zero),
+            (1, listener),
+            (2, talker),
+            (3, unrelated),
+        ]);
         record_input_health(
             &state,
             2,
@@ -10555,16 +10798,27 @@ mod tests {
         .await;
 
         let rosters = channel_rosters_for_user(&state, 1).await;
-        assert_eq!(rosters.len(), 1);
-        assert_eq!(rosters[0].channel_id, 1);
-        assert!(rosters[0]
+        assert_eq!(rosters.len(), default_workflow_channels().len());
+        assert!(rosters.iter().any(|roster| {
+            roster.channel_id == CHANNEL_OPEN
+                && roster.name.as_deref() == Some("open")
+                && roster.members.is_empty()
+        }));
+        assert!(!rosters.iter().any(|roster| roster.channel_id == 9));
+        let program = rosters
+            .iter()
+            .find(|roster| roster.channel_id == CHANNEL_PROGRAM)
+            .unwrap();
+        assert_eq!(program.name.as_deref(), Some("Program"));
+        assert!(program
             .members
             .iter()
             .any(|member| member.user_id == 1 && member.present));
-        assert!(rosters[0].members.iter().any(|member| {
+        assert!(program.members.iter().any(|member| {
             member.user_id == 2 && member.name == "Director" && member.transmitting
         }));
-        assert!(!rosters[0].members.iter().any(|member| member.user_id == 3));
+        assert!(!program.members.iter().any(|member| member.user_id == 0));
+        assert!(!program.members.iter().any(|member| member.user_id == 3));
     }
 
     #[tokio::test]
@@ -11003,7 +11257,7 @@ mod tests {
         let bridge = sessions[0].bridge.as_ref().unwrap();
         assert_eq!(bridge.mode, common::BridgeMode::Output);
         assert_eq!(bridge.output_device.as_deref(), Some("USB Audio"));
-        assert_eq!(bridge.tx, vec![5]);
+        assert_eq!(bridge.tx, vec![0, 5]);
         assert_eq!(bridge.listen, vec![10, 30]);
         assert_eq!(bridge.note, "PA output");
     }
@@ -11072,8 +11326,19 @@ mod tests {
             dc_offset: selected_dc_offset,
         };
         CaptureHealthStatus {
+            runtime: None,
+            audio: None,
+            playback: None,
+            client_transport: None,
             codec_config: None,
             desktop: None,
+            uptime_ms: 0,
+            wifi: None,
+            transport: None,
+            memory: None,
+            task_stack_high_water_bytes: None,
+            display: None,
+            battery: None,
             playback_queue_depth: 0,
             playback_underflows: 0,
             playback_overflows: 0,
@@ -11137,6 +11402,18 @@ mod tests {
         assert!(!ADMIN_LOGO_PNG.is_empty());
         assert!(ADMIN_JS.contains("function renderDashboardPage()"));
         assert!(ADMIN_JS.contains("function renderClientsPage()"));
+        assert!(ADMIN_JS.contains("function clientCards()"));
+        assert!(ADMIN_JS.contains("client-card-list"));
+        assert!(ADMIN_JS.contains("function clientEditorName("));
+        assert!(ADMIN_JS.contains("Stable Device UID<span class=\"readonly-value\""));
+        assert!(ADMIN_JS.contains("id=\"client-uid\" type=\"hidden\""));
+        assert!(!ADMIN_JS.contains("Stable Device UID<input id=\"client-uid\" type=\"text\""));
+        assert!(ADMIN_JS.contains("data-delete-device"));
+        assert!(ADMIN_JS.contains("async function deleteDevice("));
+        assert!(ADMIN_JS.contains("method: 'DELETE'"));
+        assert!(ADMIN_CSS.contains(".client-card-list"));
+        assert!(ADMIN_CSS.contains(".readonly-value"));
+        assert!(!ADMIN_JS.contains("<th>User</th><th>UID</th><th>Role"));
         assert!(ADMIN_JS.contains("function renderRoutingPage()"));
         assert!(ADMIN_JS.contains("function renderPresetsPage()"));
         assert!(ADMIN_JS.contains("function renderCallsPage()"));
@@ -11151,6 +11428,7 @@ mod tests {
         assert!(ADMIN_JS.contains("data-editor-vol"));
         assert!(ADMIN_JS.contains("data-ifb-program"));
         assert!(ADMIN_JS.contains("data-button-tx-users"));
+        assert!(ADMIN_JS.contains("data-button-color"));
         assert!(ADMIN_JS.contains("data-button-alert-id"));
         assert!(ADMIN_JS.contains("function clampPanUi"));
         assert!(ADMIN_JS.contains("ArrowLeft"));
@@ -11246,6 +11524,7 @@ mod tests {
                 TalkButtonConfig {
                     id: "director".to_string(),
                     label: "Director".to_string(),
+                    color: None,
                     mode: TalkButtonMode::Momentary,
                     actions: vec![TalkButtonAction::Transmit {
                         channels: vec![2, 3],
@@ -11256,6 +11535,7 @@ mod tests {
                 TalkButtonConfig {
                     id: "pa".to_string(),
                     label: "PA".to_string(),
+                    color: None,
                     mode: TalkButtonMode::Latching,
                     actions: vec![TalkButtonAction::Transmit {
                         channels: vec![3, 4],
@@ -11325,6 +11605,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn normalize_button_configs_keeps_only_safe_hex_colors() {
+        let buttons = normalize_button_configs(vec![
+            TalkButtonConfig {
+                id: " 10 ".to_string(),
+                label: " ".to_string(),
+                color: Some(" #f0a ".to_string()),
+                mode: TalkButtonMode::Momentary,
+                actions: Vec::new(),
+            },
+            TalkButtonConfig {
+                id: "2".to_string(),
+                label: "Two".to_string(),
+                color: Some("url(javascript:bad)".to_string()),
+                mode: TalkButtonMode::Momentary,
+                actions: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(buttons[0].id, "2");
+        assert_eq!(buttons[0].color, None);
+        assert_eq!(buttons[1].id, "10");
+        assert_eq!(buttons[1].label, "10");
+        assert_eq!(buttons[1].color.as_deref(), Some("#f0a"));
+    }
+
     #[tokio::test]
     async fn clear_active_buttons_removes_stuck_routes() {
         let state = ServerState::default();
@@ -11332,6 +11638,7 @@ mod tests {
         session.buttons = vec![TalkButtonConfig {
             id: "pa".to_string(),
             label: "PA".to_string(),
+            color: None,
             mode: TalkButtonMode::Latching,
             actions: vec![TalkButtonAction::Transmit {
                 channels: vec![9],
@@ -11340,18 +11647,38 @@ mod tests {
             }],
         }];
         session.active_buttons.insert("pa".to_string());
+        session
+            .active_direct_calls
+            .insert(2, ActiveDirectCall { duck: false });
+        session.direct_call_history.push(DirectCallHistory {
+            caller: 1,
+            target: 2,
+            started: Instant::now(),
+            ended: None,
+            duck: false,
+            source_button: None,
+        });
+        let mut target = Session::new();
+        target.direct_call_history.push(DirectCallHistory {
+            caller: 1,
+            target: 2,
+            started: Instant::now(),
+            ended: None,
+            duck: false,
+            source_button: None,
+        });
         state.sessions.write().await.insert(1, session);
+        state.sessions.write().await.insert(2, target);
 
         clear_active_buttons(&state, 1).await;
 
-        assert!(state
-            .sessions
-            .read()
-            .await
-            .get(&1)
-            .unwrap()
-            .active_buttons
-            .is_empty());
+        let sessions = state.sessions.read().await;
+        let caller = sessions.get(&1).unwrap();
+        let target = sessions.get(&2).unwrap();
+        assert!(caller.active_buttons.is_empty());
+        assert!(caller.active_direct_calls.is_empty());
+        assert!(caller.direct_call_history.last().unwrap().ended.is_some());
+        assert!(target.direct_call_history.last().unwrap().ended.is_some());
     }
 
     #[tokio::test]
@@ -11568,6 +11895,7 @@ mod tests {
             buttons: vec![TalkButtonConfig {
                 id: "director".to_string(),
                 label: "Director".to_string(),
+                color: None,
                 mode: TalkButtonMode::Momentary,
                 actions: vec![
                     TalkButtonAction::Transmit {
@@ -11643,6 +11971,9 @@ mod tests {
             assert!(targets.contains(&AudioTarget::Channel(5)));
             assert!(targets.contains(&AudioTarget::Direct(2)));
             assert_eq!(sessions.get(&2).unwrap().last_direct_caller, Some(1));
+            let active_calls = active_direct_call_statuses_for_user(2, &sessions);
+            assert_eq!(active_calls[0].caller_name.as_deref(), Some("Ref"));
+            assert_eq!(active_calls[0].target_name.as_deref(), Some("Director"));
         }
         {
             let desired = desired_client(&state, 2).await.unwrap();
@@ -11652,8 +11983,10 @@ mod tests {
         }
         {
             let alerts = state.alerts.read().await;
-            let (active, _) = alert_statuses_for_user(&alerts, 2);
+            let sessions = state.sessions.read().await;
+            let (active, _) = alert_statuses_for_user_with_sessions(&alerts, 2, &sessions);
             assert_eq!(active.len(), 1);
+            assert_eq!(active[0].sender_name.as_deref(), Some("Ref"));
             assert_eq!(active[0].message.as_deref(), Some("Director calling"));
         }
 
@@ -11845,6 +12178,7 @@ mod tests {
                     buttons: vec![TalkButtonConfig {
                         id: "director".to_string(),
                         label: "Director".to_string(),
+                        color: None,
                         mode: TalkButtonMode::Momentary,
                         actions: vec![TalkButtonAction::Transmit {
                             channels: vec![9],
@@ -11911,6 +12245,7 @@ mod tests {
                 buttons: vec![TalkButtonConfig {
                     id: "director".to_string(),
                     label: "Director".to_string(),
+                    color: None,
                     mode: TalkButtonMode::Momentary,
                     actions: vec![TalkButtonAction::Transmit {
                         channels: vec![2],
@@ -12000,6 +12335,7 @@ mod tests {
         assert_eq!(
             channels,
             vec![
+                (0, "open"),
                 (1, "Program"),
                 (2, "Production PL"),
                 (3, "Referee PL"),
@@ -12061,6 +12397,47 @@ mod tests {
     }
 
     #[test]
+    fn new_desired_client_defaults_to_open_channel() {
+        let desired = DesiredClientConfig::new(42);
+
+        assert_eq!(desired.listen, vec![CHANNEL_OPEN]);
+        assert_eq!(desired.tx, vec![CHANNEL_OPEN]);
+    }
+
+    #[test]
+    fn live_client_without_desired_config_defaults_to_open_channel() {
+        let mut session = Session::new();
+        session.role = ClientRole::Client;
+
+        apply_default_operator_channels_to_session(&mut session);
+
+        assert_eq!(session.listen_channels, [CHANNEL_OPEN].into());
+        assert_eq!(session.tx_channels, [CHANNEL_OPEN].into());
+    }
+
+    #[test]
+    fn normalize_admin_state_preserves_open_channel_zero() {
+        let mut state = PersistedAdminState {
+            channels: vec![channel_config(CHANNEL_PROGRAM, "Program")],
+            devices: Vec::new(),
+            clients: Vec::new(),
+            presets: Vec::new(),
+            templates: Vec::new(),
+        };
+
+        normalize_admin_state(&mut state);
+
+        assert_eq!(
+            state
+                .channels
+                .iter()
+                .map(|channel| (channel.id, channel.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(CHANNEL_OPEN, "open"), (CHANNEL_PROGRAM, "Program"),]
+        );
+    }
+
+    #[test]
     fn workflow_validation_warnings_report_common_ifb_and_pa_mistakes() {
         let mut pa_regular_tx = DesiredClientConfig::new(1);
         pa_regular_tx.name = "Ref".to_string();
@@ -12068,6 +12445,7 @@ mod tests {
 
         let mut bad_talent = DesiredClientConfig::new(2);
         bad_talent.name = "Talent".to_string();
+        bad_talent.tx = Vec::new();
         bad_talent.talk_mode = TalkMode::Muted;
         bad_talent.ifb = IfbConfig {
             enabled: true,
@@ -12140,10 +12518,16 @@ mod tests {
     async fn admin_state_saves_and_loads_json() {
         let path = temp_state_path("roundtrip");
         let state = PersistedAdminState {
-            channels: vec![ChannelConfig {
-                id: 2,
-                name: "Program".to_string(),
-            }],
+            channels: vec![
+                ChannelConfig {
+                    id: 0,
+                    name: "open".to_string(),
+                },
+                ChannelConfig {
+                    id: 2,
+                    name: "Program".to_string(),
+                },
+            ],
             devices: Vec::new(),
             clients: vec![DesiredClientConfig {
                 user_id: 7,
@@ -12162,6 +12546,7 @@ mod tests {
                 buttons: vec![TalkButtonConfig {
                     id: "director".to_string(),
                     label: "Director".to_string(),
+                    color: None,
                     mode: TalkButtonMode::Momentary,
                     actions: vec![TalkButtonAction::Transmit {
                         channels: vec![5],
@@ -12328,6 +12713,17 @@ mod tests {
         assert!(err.contains("preconfigured-only"));
         assert!(state.admin_state.read().await.devices.is_empty());
         assert!(!audio_user_is_enrolled(&state, 20).await);
+    }
+
+    #[tokio::test]
+    async fn audio_user_zero_is_never_enrolled_by_udp_path() {
+        let state = ServerState::new_with_admin_state(
+            PersistedAdminState::default(),
+            None,
+            EnrollmentPolicy::Auto,
+        );
+
+        assert!(!audio_user_is_enrolled(&state, 0).await);
     }
 
     #[tokio::test]
