@@ -12,7 +12,7 @@ env:
 
 concurrency:
   group: release-main
-  cancel-in-progress: false
+  cancel-in-progress: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
 
 jobs:
   checks:
