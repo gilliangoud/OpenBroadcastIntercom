@@ -1883,6 +1883,7 @@ struct ClientTelemetryCountersInner {
     decode_errors: AtomicU64,
     codec_drops: AtomicU64,
     payload_decode_errors: AtomicU64,
+    packet_encode_errors: AtomicU64,
     tx_packets: AtomicU64,
     tx_send_failures: AtomicU64,
     tx_queue_drops: AtomicU64,
@@ -1911,6 +1912,12 @@ impl ClientTelemetryCounters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_packet_encode_error(&self) {
+        self.inner
+            .packet_encode_errors
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_tx_packet(&self) {
         self.inner.tx_packets.fetch_add(1, Ordering::Relaxed);
     }
@@ -1930,6 +1937,7 @@ impl ClientTelemetryCounters {
             decode_errors: self.inner.decode_errors.load(Ordering::Relaxed),
             codec_drops: self.inner.codec_drops.load(Ordering::Relaxed),
             payload_decode_errors: self.inner.payload_decode_errors.load(Ordering::Relaxed),
+            packet_encode_errors: self.inner.packet_encode_errors.load(Ordering::Relaxed),
             tx_packets: self.inner.tx_packets.load(Ordering::Relaxed),
             tx_send_failures: self.inner.tx_send_failures.load(Ordering::Relaxed),
             tx_queue_drops: self.inner.tx_queue_drops.load(Ordering::Relaxed),
@@ -2144,6 +2152,8 @@ mod tests {
         counters.record_udp_rx_packet();
         counters.record_malformed_packet();
         counters.record_decode_error();
+        counters.record_payload_decode_error();
+        counters.record_packet_encode_error();
         counters.record_tx_packet();
         counters.record_tx_send_failure();
         counters.record_tx_queue_drop();
@@ -2171,6 +2181,8 @@ mod tests {
         assert_eq!(transport.udp_rx_packets, 1);
         assert_eq!(transport.malformed_packets, 1);
         assert_eq!(transport.decode_errors, 1);
+        assert_eq!(transport.payload_decode_errors, 1);
+        assert_eq!(transport.packet_encode_errors, 1);
         assert_eq!(transport.tx_packets, 1);
         assert_eq!(transport.tx_send_failures, 1);
         assert_eq!(transport.tx_queue_drops, 1);

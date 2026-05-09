@@ -797,7 +797,7 @@ pub async fn run_until_shutdown_with_local_api(
                     payload: payload.clone(),
                 };
                 if let Err(err) = packet.encode(&mut encoded) {
-                    send_telemetry.record_payload_decode_error();
+                    send_telemetry.record_packet_encode_error();
                     tracing::warn!(%err, "failed to encode audio packet");
                     continue;
                 }

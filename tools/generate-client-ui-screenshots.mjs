@@ -12,11 +12,12 @@ import {
   writeFile
 } from 'node:fs/promises';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
-const tmp = path.join('/private/tmp', `intercom-client-ui-shots-${process.pid}`);
+const tmp = path.join(tmpdir(), `intercom-client-ui-shots-${process.pid}`);
 const outDir = path.join(root, 'docs/assets/client-ui');
 
 const chromeCandidates = [
@@ -38,11 +39,24 @@ async function exists(file) {
   }
 }
 
+function isFilePath(candidate) {
+  return path.isAbsolute(candidate) || candidate.includes('/') || candidate.includes('\\');
+}
+
+async function canRun(candidate) {
+  return new Promise(resolve => {
+    const child = spawn(candidate, ['--version'], { stdio: 'ignore' });
+    child.on('error', () => resolve(false));
+    child.on('exit', code => resolve(code === 0));
+  });
+}
+
 async function findChrome() {
   for (const candidate of chromeCandidates) {
-    if (candidate.includes(path.sep)) {
-      if (await exists(candidate)) return candidate;
-    } else {
+    if (isFilePath(candidate) && !(await exists(candidate))) {
+      continue;
+    }
+    if (await canRun(candidate)) {
       return candidate;
     }
   }
@@ -246,10 +260,10 @@ const controlStates = {
 
 const mobileSettings = {
   app_title: 'Intercom Suite',
-  server_host: '192.168.12.84',
-  server: '192.168.12.84:40000',
-  control: 'ws://192.168.12.84:40001',
-  admin: 'http://192.168.12.84:40002',
+  server_host: '192.0.2.84',
+  server: '192.0.2.84:40000',
+  control: 'ws://192.0.2.84:40001',
+  admin: 'http://192.0.2.84:40002',
   advanced_endpoints: false,
   user_id: null,
   codec: 'opus',
@@ -274,10 +288,10 @@ const mobileSettings = {
     {
       id: 'studio',
       name: 'Studio Intercom',
-      server_host: '192.168.12.84',
-      server: '192.168.12.84:40000',
-      control: 'ws://192.168.12.84:40001',
-      admin: 'http://192.168.12.84:40002',
+      server_host: '192.0.2.84',
+      server: '192.0.2.84:40000',
+      control: 'ws://192.0.2.84:40001',
+      admin: 'http://192.0.2.84:40002',
       auth: 'none',
       discovered: true,
       last_connected_ms: 1710000000000
@@ -285,10 +299,10 @@ const mobileSettings = {
     {
       id: 'truck',
       name: 'Production Truck',
-      server_host: '192.168.12.120',
-      server: '192.168.12.120:40000',
-      control: 'ws://192.168.12.120:40001',
-      admin: 'http://192.168.12.120:40002',
+      server_host: '192.0.2.120',
+      server: '192.0.2.120:40000',
+      control: 'ws://192.0.2.120:40001',
+      admin: 'http://192.0.2.120:40002',
       auth: 'required',
       discovered: false,
       last_connected_ms: null
@@ -299,10 +313,10 @@ const mobileSettings = {
 const bridgeState = {
   config: {
     app_title: 'Intercom Bridge App',
-    server_host: '192.168.12.84',
-    server: '192.168.12.84:40000',
-    control: 'ws://192.168.12.84:40001',
-    admin: 'http://192.168.12.84:40002/admin/api/state',
+    server_host: '192.0.2.84',
+    server: '192.0.2.84:40000',
+    control: 'ws://192.0.2.84:40001',
+    admin: 'http://192.0.2.84:40002/admin/api/state',
     advanced_endpoints: false,
     bridge_bin: null,
     routes: [

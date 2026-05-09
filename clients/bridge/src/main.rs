@@ -558,7 +558,7 @@ async fn run_capture_sender(
                 payload: payload.clone(),
             };
             if let Err(err) = packet.encode(&mut encoded) {
-                telemetry.record_payload_decode_error();
+                telemetry.record_packet_encode_error();
                 return Err(err.into());
             }
             match socket.send(&encoded).await {

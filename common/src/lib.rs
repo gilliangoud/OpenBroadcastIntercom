@@ -1002,6 +1002,8 @@ pub struct ClientTelemetryTransportStatus {
     #[serde(default)]
     pub payload_decode_errors: u64,
     #[serde(default)]
+    pub packet_encode_errors: u64,
+    #[serde(default)]
     pub tx_packets: u64,
     #[serde(default)]
     pub tx_send_failures: u64,
@@ -2387,9 +2389,10 @@ mod tests {
                 decode_errors: 6,
                 codec_drops: 7,
                 payload_decode_errors: 8,
-                tx_packets: 9,
-                tx_send_failures: 10,
-                tx_queue_drops: 11,
+                packet_encode_errors: 9,
+                tx_packets: 10,
+                tx_send_failures: 11,
+                tx_queue_drops: 12,
             }),
             adc_input: "pi".to_string(),
             capture_channel: "mono".to_string(),

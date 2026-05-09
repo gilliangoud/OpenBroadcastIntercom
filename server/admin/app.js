@@ -368,7 +368,7 @@ function healthText(s) {
   const telemetry = s.capture?.client_transport || {};
   const playback = s.capture?.playback || {};
   if (telemetry.malformed_packets || telemetry.decode_errors) parts.push(`rx drops ${telemetry.malformed_packets || 0}/${telemetry.decode_errors || 0}`);
-  if (telemetry.tx_queue_drops || telemetry.tx_send_failures) parts.push(`tx drops ${telemetry.tx_queue_drops || 0}/${telemetry.tx_send_failures || 0}`);
+  if (telemetry.packet_encode_errors || telemetry.tx_queue_drops || telemetry.tx_send_failures) parts.push(`tx drops ${telemetry.packet_encode_errors || 0}/${telemetry.tx_queue_drops || 0}/${telemetry.tx_send_failures || 0}`);
   if (playback.underflows || playback.overflows) parts.push(`playback U/O ${playback.underflows || 0}/${playback.overflows || 0}`);
   if (s.capture?.desktop?.post_gain_clipped_samples) parts.push(`desktop clip ${s.capture.desktop.post_gain_clipped_samples}`);
   if (s.capture?.desktop?.post_gain) parts.push(`mic ${dbfsText(s.capture.desktop.post_gain.rms)} rms`);
@@ -1040,7 +1040,7 @@ function captureHealthHtml(live) {
     <div class="status-line"><span>Kind ${esc(runtime.client_kind || live.role || 'client')}</span><span>Phase ${esc(runtime.phase || 'running')}</span><span>Uptime ${Math.round((capture.uptime_ms || 0) / 1000)}s</span>${runtime.last_error ? `<span>Error ${esc(runtime.last_error)}</span>` : ''}</div>
     <div class="status-line"><span>Audio ${esc(audio.backend || capture.adc_input || '-')}</span><span>Input ${esc(audio.input_device || '-')}</span><span>Output ${esc(audio.output_device || '-')}</span><span>Format ${esc(audio.sample_format || '-')}</span><span>Rate ${esc(audio.sample_rate_hz || '-')} Hz</span><span>Channels ${esc(audio.channels ?? '-')}</span><span>Mode ${esc(audio.channel_mode || capture.capture_channel || '-')}</span><span>Mic gain ${audio.mic_gain == null ? '-' : Number(audio.mic_gain).toFixed(2)}</span></div>
     <div class="status-line"><span>Playback ${playback.available_samples || playback.queue_depth || capture.playback_queue_depth || 0}/${playback.capacity_samples || '-'}</span><span>Prebuffer ${playback.prebuffer_samples ?? '-'}</span><span>Channels ${playback.channels ?? '-'}</span><span>Started ${playback.started ? 'yes' : 'no'}</span><span>Underflows ${playback.underflows || capture.playback_underflows || 0}</span><span>Overflows ${playback.overflows || capture.playback_overflows || 0}</span><span>Dropped samples ${playback.dropped_samples || 0}</span></div>
-    <div class="status-line"><span>RX ${clientTransport.udp_rx_packets || 0}</span><span>Malformed ${clientTransport.malformed_packets || 0}</span><span>Decode ${clientTransport.decode_errors || 0}</span><span>Codec drops ${clientTransport.codec_drops || 0}</span><span>Payload ${clientTransport.payload_decode_errors || 0}</span><span>TX ${clientTransport.tx_packets || capture.tx_packets_sent || 0}</span><span>TX failures ${clientTransport.tx_send_failures || capture.tx_send_failures || 0}</span><span>Queue drops ${clientTransport.tx_queue_drops || 0}</span></div>
+    <div class="status-line"><span>RX ${clientTransport.udp_rx_packets || 0}</span><span>Malformed ${clientTransport.malformed_packets || 0}</span><span>Decode ${clientTransport.decode_errors || 0}</span><span>Codec drops ${clientTransport.codec_drops || 0}</span><span>Payload ${clientTransport.payload_decode_errors || 0}</span><span>Packet encode ${clientTransport.packet_encode_errors || 0}</span><span>TX ${clientTransport.tx_packets || capture.tx_packets_sent || 0}</span><span>TX failures ${clientTransport.tx_send_failures || capture.tx_send_failures || 0}</span><span>Queue drops ${clientTransport.tx_queue_drops || 0}</span></div>
     ${platformRows.join('')}
     <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Level</th><th>RMS</th><th>Peak</th><th>DC</th></tr></thead><tbody>${row('Input', audio.input)}${row('Pre gain', audio.pre_gain)}${row('Post gain', audio.post_gain)}${row('Left', capture.left)}${row('Right', capture.right)}${row('Selected', capture.selected)}</tbody></table></div>`;
 }
@@ -1090,6 +1090,7 @@ function clientTransportTelemetry(capture) {
     decode_errors: esp32.opus_decode_failures || 0,
     codec_drops: esp32.udp_codec_drops || 0,
     payload_decode_errors: esp32.udp_payload_decode_errors || 0,
+    packet_encode_errors: 0,
     tx_packets: capture.tx_packets_sent || 0,
     tx_send_failures: capture.tx_send_failures || esp32.udp_tx_send_failures || 0,
     tx_queue_drops: esp32.audio_tx_queue_drops || 0,

@@ -15,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "intercom-models" / "manifest.json"
+DEFAULT_TIMEOUT_SECONDS = 60.0
 
 
 def load_manifest() -> dict:
@@ -33,7 +34,7 @@ def model_destination(model_dir: Path, model: dict) -> Path:
     return model_dir / model["filename"]
 
 
-def download_model(model_dir: Path, model: dict, force: bool) -> None:
+def download_model(model_dir: Path, model: dict, force: bool, timeout: float) -> None:
     destination = model_destination(model_dir, model)
     expected_sha1 = model["sha1"]
 
@@ -57,7 +58,7 @@ def download_model(model_dir: Path, model: dict, force: bool) -> None:
     with tempfile.NamedTemporaryFile(prefix=f".{model['filename']}.", dir=model_dir, delete=False) as temp:
         temp_path = Path(temp.name)
         try:
-            with urllib.request.urlopen(request) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 shutil.copyfileobj(response, temp, length=1024 * 1024)
         except Exception:
             temp_path.unlink(missing_ok=True)
@@ -93,6 +94,12 @@ def main() -> None:
         help="destination directory for downloaded models",
     )
     parser.add_argument("--force", action="store_true", help="replace an existing local file")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT_SECONDS,
+        help=f"network timeout in seconds per request (default: {DEFAULT_TIMEOUT_SECONDS:g})",
+    )
     args = parser.parse_args()
 
     if args.list:
@@ -113,7 +120,7 @@ def main() -> None:
 
     model_dir = Path(args.model_dir).expanduser()
     for model in selected:
-        download_model(model_dir, model, args.force)
+        download_model(model_dir, model, args.force, args.timeout)
 
 
 if __name__ == "__main__":

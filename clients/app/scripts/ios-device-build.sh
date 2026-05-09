@@ -98,7 +98,14 @@ run_tauri_ios_build() {
 }
 
 find_built_app() {
-  find "$APP_DIR/gen/apple/build" -path '*/.stale/*' -prune -o -type d -name '*.app' -print |
+  local build_dir="$APP_DIR/gen/apple/build"
+  if [ ! -d "$build_dir" ]; then
+    return 0
+  fi
+
+  {
+    find "$build_dir" -path '*/.stale/*' -prune -o -type d -name '*.app' -print 2>/dev/null || true
+  } |
     sort |
     tail -n 1
 }
