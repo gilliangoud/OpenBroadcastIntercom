@@ -1,60 +1,46 @@
 #!/usr/bin/env python3
-"""Run a RedLine benchmark corpus through mlx-whisper.
-
-This optional adapter is meant for Apple Silicon macOS machines. It imports
-MLX lazily so normal CI and non-Metal environments can still import the rest of
-the benchmark tooling.
-"""
+"""Run a RedLine benchmark corpus through Hugging Face Transformers Whisper models."""
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 import time
-import wave
 from pathlib import Path
 from typing import Any
 
 import rolling_transcription_replay as replay
 
 
-def load_corpus(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or not isinstance(data.get("segments"), list):
-        raise SystemExit(f"{path} is not a benchmark corpus")
-    return data
-
-
-def wav_duration_ms(path: Path) -> float:
-    with wave.open(str(path), "rb") as handle:
-        return handle.getnframes() / handle.getframerate() * 1000.0
-
-
-class MlxWhisperBackend:
-    def __init__(self, args: argparse.Namespace, mlx_whisper: Any):
+class TransformersWhisperBackend:
+    def __init__(self, args: argparse.Namespace, pipe: Any, torch: Any):
         self.args = args
-        self.mlx_whisper = mlx_whisper
+        self.pipe = pipe
+        self.torch = torch
         self.started_load = time.perf_counter()
         self.first_transcription = True
         self.model_load_ms: float | None = None
-        self.last_language: Any | None = None
 
     def transcribe_file(self, path: Path) -> str:
-        result = self.mlx_whisper.transcribe(
+        generate_kwargs: dict[str, Any] = {}
+        if self.args.language:
+            generate_kwargs["language"] = self.args.language
+        if self.args.task:
+            generate_kwargs["task"] = self.args.task
+
+        result = self.pipe(
             str(path),
-            path_or_hf_repo=self.args.model,
-            verbose=False,
-            language=self.args.language,
-            initial_prompt=self.args.prompt,
-            condition_on_previous_text=self.args.condition_on_previous_text,
-            fp16=not self.args.fp32,
+            generate_kwargs=generate_kwargs or None,
+            return_timestamps=False,
         )
         if self.first_transcription:
             self.model_load_ms = (time.perf_counter() - self.started_load) * 1000.0
             self.first_transcription = False
-        self.last_language = result.get("language")
-        return str(result.get("text", "")).strip()
+        if isinstance(result, dict):
+            return str(result.get("text", "")).strip()
+        return str(result).strip()
 
     def transcribe_timed(self, path: Path) -> tuple[str, float]:
         started = time.perf_counter()
@@ -62,20 +48,59 @@ class MlxWhisperBackend:
         return text, (time.perf_counter() - started) * 1000.0
 
 
-def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
+def build_pipeline(args: argparse.Namespace) -> tuple[Any, Any, str, str]:
     try:
-        import mlx_whisper
+        import torch
+        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
     except Exception as exc:
         raise SystemExit(
-            "mlx-whisper is not available or cannot access Metal. "
-            "Install it in a local venv and run from a non-sandboxed Apple Silicon session. "
+            "Transformers Whisper dependencies are not available. "
             f"Python: {sys.executable}. Import error: {exc!r}"
         ) from exc
 
-    corpus = load_corpus(args.corpus)
+    if args.device == "auto":
+        if torch.backends.mps.is_available():
+            device = "mps"
+        elif torch.cuda.is_available():
+            device = "cuda:0"
+        else:
+            device = "cpu"
+    else:
+        device = args.device
+
+    if args.dtype == "auto":
+        dtype = torch.float16 if device.startswith(("cuda", "mps")) else torch.float32
+    elif args.dtype == "float16":
+        dtype = torch.float16
+    else:
+        dtype = torch.float32
+
+    processor = AutoProcessor.from_pretrained(args.model)
+    load_kwargs: dict[str, Any] = {
+        "torch_dtype": dtype,
+        "use_safetensors": True,
+    }
+    if importlib.util.find_spec("accelerate"):
+        load_kwargs["low_cpu_mem_usage"] = True
+    model = AutoModelForSpeechSeq2Seq.from_pretrained(args.model, **load_kwargs)
+    model.to(device)
+    pipe = pipeline(
+        "automatic-speech-recognition",
+        model=model,
+        tokenizer=processor.tokenizer,
+        feature_extractor=processor.feature_extractor,
+        torch_dtype=dtype,
+        device=device,
+    )
+    return pipe, torch, device, str(dtype).replace("torch.", "")
+
+
+def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
+    corpus = replay.load_corpus(args.corpus)
     corpus_dir = args.corpus.resolve().parent
+    pipe, torch, device, dtype = build_pipeline(args)
+    backend = TransformersWhisperBackend(args, pipe, torch)
     predictions: dict[str, dict[str, Any]] = {}
-    backend = MlxWhisperBackend(args, mlx_whisper)
 
     for segment in corpus["segments"]:
         segment_id = segment["id"]
@@ -90,13 +115,12 @@ def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
                 backend,
                 audio_path,
                 config=replay.config_from_args(args),
-                temp_prefix="redline-mlx-rolling-",
+                temp_prefix="redline-transformers-whisper-rolling-",
             )
         predictions[segment_id] = {
             "text": text,
             "latency_ms": latency_ms,
-            "audio_duration_ms": wav_duration_ms(audio_path),
-            "language": backend.last_language,
+            "audio_duration_ms": replay.wav_duration_ms(audio_path),
             "chunks": chunks,
         }
         if partials:
@@ -106,12 +130,12 @@ def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
 
     return {
         "model_id": args.model_id,
-        "runtime": "mlx-whisper",
+        "runtime": "transformers-whisper",
         "backend": {
-            "mlx": True,
-            "metal": True,
+            "device": device,
+            "dtype": dtype,
+            "mps": device == "mps",
             "target_os": sys.platform,
-            "target_arch": "arm64",
         },
         "model": args.model,
         "model_load_ms": backend.model_load_ms,
@@ -122,7 +146,7 @@ def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
             else None
         ),
         "language": args.language,
-        "condition_on_previous_text": args.condition_on_previous_text,
+        "task": args.task,
         "segments": predictions,
     }
 
@@ -130,18 +154,14 @@ def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", required=True, type=Path)
-    parser.add_argument("--model", required=True, help="MLX model path or Hugging Face repo")
+    parser.add_argument("--model", required=True, help="Transformers model id or local path")
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--mode", choices=["offline", "rolling-buffer"], default="offline")
+    parser.add_argument("--device", default="auto", help="auto, cpu, mps, cuda:0, ...")
+    parser.add_argument("--dtype", choices=["auto", "float16", "float32"], default="auto")
     parser.add_argument("--language", default="en")
-    parser.add_argument("--prompt")
-    parser.add_argument(
-        "--condition-on-previous-text",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    parser.add_argument("--fp32", action="store_true")
+    parser.add_argument("--task", default="transcribe")
     replay.add_rolling_replay_args(parser)
     return parser
 

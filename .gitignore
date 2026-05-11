@@ -46,6 +46,8 @@ __pycache__/
 # Curated model assets are local downloads or generated packages.
 /intercom-models/*.bin
 /intercom-models/*.gguf
+/intercom-models/distil-large-v3-ggml/
+/intercom-models/distil-large-v3.5-ggml/
 /deepfilternet-coreml-models/
 
 # Private signing material must never be committed.

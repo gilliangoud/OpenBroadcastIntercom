@@ -2,6 +2,7 @@ import json
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import wave
 from pathlib import Path
@@ -14,6 +15,7 @@ import run_parakeet_benchmarks as parakeet_suite
 import run_whisperkit_benchmarks as whisperkit_suite
 import moonshine_benchmark
 import parakeet_benchmark
+import rolling_transcription_replay as replay
 import transcription_benchmark as tb
 import whisperkit_benchmark
 
@@ -284,7 +286,7 @@ class TranscriptionBenchmarkTests(unittest.TestCase):
         )
 
     def test_moonshine_stitches_repeated_rolling_windows(self):
-        text = moonshine_benchmark.stitch_by_word_overlap(
+        text = replay.stitch_by_word_overlap(
             "ref one check",
             "check clock stopped",
         )
@@ -294,7 +296,7 @@ class TranscriptionBenchmarkTests(unittest.TestCase):
     def test_moonshine_rolling_replay_emits_live_metrics(self):
         class FakeBackend:
             def transcribe_file(self, path: Path) -> str:
-                duration = moonshine_benchmark.wav_duration_ms(path)
+                duration = replay.wav_duration_ms(path)
                 if duration >= 1400:
                     return "ref one check clock stopped"
                 return "ref one check"
@@ -304,22 +306,24 @@ class TranscriptionBenchmarkTests(unittest.TestCase):
             wav = root / "speech.wav"
             write_speech_wav(wav, samples=32_000)
 
-            text, latency_ms, jobs, partials, metrics = moonshine_benchmark.transcribe_rolling_buffer(
+            text, latency_ms, jobs, partials, metrics = replay.transcribe_rolling_buffer(
                 FakeBackend(),
                 wav,
-                window_ms=2000,
-                step_ms=500,
-                commit_lag_ms=0,
-                min_stable_passes=2,
-                final_pass_on_release=True,
-                final_pass_scope="utterance",
-                max_overlap_words=8,
-                vad_rms_threshold=0.01,
-                vad_hangover_ms=200,
-                vad_min_speech_ms=40,
-                stale_job_ms=30_000,
-                queue_limit=8,
-                frame_ms=20,
+                config=replay.RollingReplayConfig(
+                    window_ms=2000,
+                    step_ms=500,
+                    commit_lag_ms=0,
+                    min_stable_passes=2,
+                    final_pass_on_release=True,
+                    final_pass_scope="utterance",
+                    max_overlap_words=8,
+                    vad_rms_threshold=0.01,
+                    vad_hangover_ms=200,
+                    vad_min_speech_ms=40,
+                    stale_job_ms=30_000,
+                    queue_limit=8,
+                    frame_ms=20,
+                ),
             )
 
         self.assertEqual(text, "ref one check clock stopped")
@@ -329,6 +333,43 @@ class TranscriptionBenchmarkTests(unittest.TestCase):
         self.assertEqual(metrics["mode"], "rolling-buffer")
         self.assertEqual(metrics["stale_jobs"], 0)
         self.assertIsNotNone(metrics["first_token_latency_ms"])
+
+    def test_rolling_replay_drops_busy_partials(self):
+        class SlowBackend:
+            def transcribe_file(self, path: Path) -> str:
+                time.sleep(0.02)
+                return "ref one check"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wav = root / "speech.wav"
+            write_speech_wav(wav, samples=8000)
+
+            _text, _latency_ms, jobs, _partials, metrics = replay.transcribe_rolling_buffer(
+                SlowBackend(),
+                wav,
+                config=replay.RollingReplayConfig(
+                    window_ms=100,
+                    step_ms=5,
+                    commit_lag_ms=0,
+                    min_stable_passes=1,
+                    final_pass_on_release=False,
+                    final_pass_scope="utterance",
+                    max_overlap_words=8,
+                    vad_rms_threshold=0.01,
+                    vad_hangover_ms=20,
+                    vad_min_speech_ms=10,
+                    stale_job_ms=30_000,
+                    queue_limit=8,
+                    frame_ms=5,
+                    drop_busy_partials=True,
+                ),
+            )
+
+        self.assertGreater(metrics["dropped_jobs"], 0)
+        self.assertTrue(
+            any(job.get("drop_reason") == "busy" for job in jobs if job.get("dropped"))
+        )
 
     def test_score_corpus_includes_live_replay_metrics(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -20,6 +20,8 @@ import wave
 from pathlib import Path
 from typing import Any
 
+import rolling_transcription_replay as replay
+
 
 def load_corpus(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -176,32 +178,67 @@ def run_segment(args: argparse.Namespace, audio_path: Path) -> tuple[str, float]
         stderr = completed.stderr.strip()
         stdout = completed.stdout.strip()
         raise RuntimeError(stderr or stdout or f"WhisperKit exited {completed.returncode}")
-    return (
-        extract_transcript(completed.stdout, completed.stderr, text_regex=args.text_regex),
-        latency_ms,
-    )
+    try:
+        text = extract_transcript(completed.stdout, completed.stderr, text_regex=args.text_regex)
+    except RuntimeError as exc:
+        if args.mode == "rolling-buffer" and "could not extract transcript" in str(exc):
+            text = ""
+        else:
+            raise
+    return text, latency_ms
+
+
+class WhisperKitBackend:
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.started_load = time.perf_counter()
+        self.first_transcription = True
+        self.model_load_ms: float | None = None
+
+    def transcribe_file(self, path: Path) -> str:
+        text, _latency_ms = run_segment(self.args, path)
+        if self.first_transcription:
+            self.model_load_ms = (time.perf_counter() - self.started_load) * 1000.0
+            self.first_transcription = False
+        return text
+
+    def transcribe_timed(self, path: Path) -> tuple[str, float]:
+        started = time.perf_counter()
+        text = self.transcribe_file(path)
+        return text, (time.perf_counter() - started) * 1000.0
 
 
 def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
     corpus = load_corpus(args.corpus)
     corpus_dir = args.corpus.resolve().parent
     predictions: dict[str, dict[str, Any]] = {}
-    started_load = time.perf_counter()
-    first_segment = True
-    model_load_ms: float | None = None
+    backend = WhisperKitBackend(args)
 
     for segment in corpus["segments"]:
         segment_id = segment["id"]
         audio_path = (corpus_dir / segment["audio"]).resolve()
-        text, latency_ms = run_segment(args, audio_path)
-        if first_segment:
-            model_load_ms = (time.perf_counter() - started_load) * 1000.0
-            first_segment = False
+        if args.mode == "offline":
+            text, latency_ms = backend.transcribe_timed(audio_path)
+            chunks: list[dict[str, Any]] = []
+            partials: list[dict[str, Any]] = []
+            live_metrics: dict[str, Any] | None = None
+        else:
+            text, latency_ms, chunks, partials, live_metrics = replay.transcribe_rolling_buffer(
+                backend,
+                audio_path,
+                config=replay.config_from_args(args),
+                temp_prefix="redline-whisperkit-rolling-",
+            )
         predictions[segment_id] = {
             "text": text,
             "latency_ms": latency_ms,
             "audio_duration_ms": wav_duration_ms(audio_path),
+            "chunks": chunks,
         }
+        if partials:
+            predictions[segment_id]["partials"] = partials
+        if live_metrics is not None:
+            predictions[segment_id]["live_metrics"] = live_metrics
 
     return {
         "model_id": args.model_id,
@@ -209,12 +246,19 @@ def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
         "backend": {
             "coreml": True,
             "ane_or_gpu": True,
+            "cli_per_window": args.mode == "rolling-buffer",
             "target_os": sys.platform,
         },
         "model": args.model,
         "model_prefix": args.model_prefix,
         "model_path": str(args.model_path) if args.model_path else None,
-        "model_load_ms": model_load_ms,
+        "model_load_ms": backend.model_load_ms,
+        "mode": args.mode,
+        "rolling_buffer": (
+            replay.config_from_args(args).public_dict()
+            if args.mode == "rolling-buffer"
+            else None
+        ),
         "language": args.language,
         "prompt": args.prompt,
         "compute_units": {
@@ -231,6 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--cli", default="whisperkit-cli")
+    parser.add_argument("--mode", choices=["offline", "rolling-buffer"], default="offline")
     parser.add_argument("--model")
     parser.add_argument("--model-prefix")
     parser.add_argument("--model-path", type=Path)
@@ -242,6 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--text-regex")
     parser.add_argument("--command-template")
     parser.add_argument("--segment-timeout", type=float, default=900.0)
+    replay.add_rolling_replay_args(parser)
     return parser
 
 

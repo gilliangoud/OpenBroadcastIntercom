@@ -373,6 +373,8 @@ recommendation.
 | Whisper large-v3-turbo | Metal | reliable | none | 3.90% | 0.28% | 2215.7 ms | 0.3x | 2224.8 ms | 1781.0 MB | 1730.0 ms |
 | Whisper large-v3-turbo Q8_0 | Metal | reliable | none | 3.90% | 0.28% | 2175.2 ms | 0.3x | 567.9 ms | 1036.1 MB | 810.0 ms |
 | Whisper large-v3-turbo Q5_0 | Metal | reliable | none | 3.90% | 0.28% | 2501.4 ms | 0.3x | 332.0 ms | 724.4 MB | 640.0 ms |
+| Distil-Whisper large-v3 GGML | Metal | reliable | none | 1.30% | 0.28% | 2327.3 ms | 0.3x | unavailable | 1680.9 MB | 1180.0 ms |
+| Distil-Whisper large-v3.5 GGML | Metal | reliable | none | 1.30% | 0.28% | 2533.9 ms | 0.3x | unavailable | 1678.0 MB | 2460.0 ms |
 
 Metal failed inside the restricted Codex sandbox with
 `ggml_metal_buffer_init: error: failed to allocate buffer, size = 7.33 MiB`, but
@@ -395,11 +397,10 @@ Mode comparison on the same Metal smoke corpus:
 | Whisper large-v3-turbo Q5_0 | balanced | 3.90% | 2372.2 ms | 0.324x | 740.2 MB | 339.8 ms |
 | Whisper large-v3-turbo Q5_0 | fast | 3.90% | 2372.1 ms | 0.329x | 734.0 MB | 342.0 ms |
 
-On this smoke corpus, all modes and model variants produced the same WER/CER.
-Q8_0 is currently the best macOS Metal default candidate because it is nearly
-as fast as the full model, loads much faster, and uses roughly 745 MB less peak
-RSS. Q5_0 remains the low-memory candidate, but it was slower than Q8_0 under
-Metal despite using less memory.
+On this early smoke corpus, the original large-v3-turbo modes and quantizations
+produced the same WER/CER. Later retesting with Distil-Whisper large-v3 GGML
+found better final accuracy and live latency, so Q5_0 is now treated as the
+low-memory fallback rather than the default.
 
 MLX comparison on the same smoke corpus, using `mlx-whisper` in a local Python
 3.12 venv with `HF_HOME=artifacts/transcription-benchmarks/hf-cache`. These are
@@ -486,9 +487,10 @@ ultimately want for an on-device/server runtime:
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | moonshine tiny | transformers | offline | 1.30% | 0.85% | 811.9 ms | 0.1x | 7062.4 ms | 9.94 s | 506.1 MB | 5570.0 ms |
 | moonshine tiny | transformers | chunked 2000 ms | 24.68% | 12.18% | 692.6 ms | 0.1x | 5746.8 ms | 8.29 s | 523.2 MB | 4930.0 ms |
-| moonshine tiny | transformers | rolling-buffer 8000/1000 ms | 5.19% | 1.13% | 2723.4 ms | 0.3x | 7152.1 ms | 16.10 s | 591.2 MB | 11170.0 ms |
+| moonshine tiny | transformers | rolling-buffer 8000/1000 ms | 5.19% | 1.13% | 2662.2 ms | 0.3x | 6439.7 ms | 15.00 s | 679.5 MB | 10620.0 ms |
 | moonshine base | transformers | offline | 3.90% | 0.57% | 683.5 ms | 0.1x | 6082.0 ms | 8.59 s | 586.9 MB | 5290.0 ms |
 | moonshine base | transformers | chunked 2000 ms | 28.57% | 18.41% | 713.5 ms | 0.1x | 5695.7 ms | 8.25 s | 523.2 MB | 5090.0 ms |
+| moonshine base | transformers | rolling-buffer 8000/1000 ms | 3.90% | 0.57% | 3226.9 ms | 0.3x | 6674.2 ms | 16.94 s | 681.4 MB | 12390.0 ms |
 
 Moonshine is worth keeping in the candidate set because offline tiny was both
 fast and accurate on this clean fixture. The naive chunked mode is much worse,
@@ -504,6 +506,83 @@ partial WER, 3169.4 ms average first-token latency, 558.4 ms finalization
 latency, 266.4 ms average emission lag, and no stale or dropped jobs. That is
 the right benchmark shape for RedLine UX decisions: final accuracy, partial
 quality over time, and scheduler pressure are now visible separately.
+
+## Focused Rolling-Buffer Sweep
+
+Local run: clean Hugging Face LibriSpeech `test_wavs`, `rolling-buffer` mode,
+`window_ms=8000`, `step_ms=1000`, `commit_lag_ms=1500`,
+`min_stable_passes=2`, final pass on VAD endpoint/talk release, no cleanup.
+These results validate the replay harness across runtimes; they are still not
+RedLine product defaults until noisy PTT captures are measured.
+
+| Runtime/model | Backend | Final WER | CER | Avg partial WER | First token | Finalize | Emission lag | Stale/drop | Wall time | Peak RSS | CPU time | Notes |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Whisper large-v3-turbo Q8_0 | whisper-rs Metal | 3.90% | 0.28% | 51.13% | 11240.9 ms | 13498.5 ms | 8716.5 ms | 0/4 | 66.54 s | 1010.5 MB | 3.42 s | In-process Rust path; dropped windows show Q8 is too slow for 1 s steps here. |
+| Whisper large-v3-turbo Q5_0 | whisper-rs Metal | 3.90% | 0.28% | 49.90% | 7372.8 ms | 8404.6 ms | 4425.0 ms | 0/0 | 50.00 s | 725.1 MB | 2.59 s | Best whisper-rs live profile in this focused pass. |
+| MLX distil-whisper large-v3 | MLX/Metal | 3.90% | 0.28% | 42.95% | 5844.0 ms | 5840.2 ms | 3750.4 ms | 0/0 | 44.99 s | 831.5 MB | 7.27 s | Faster live timing than whisper-rs, but rolling lost the offline 1.30% WER result. |
+| MLX distil-whisper large-v3, warm coalesced | MLX/Metal | 3.90% | 0.28% | 44.80% | 5207.4 ms | 2563.7 ms | 1872.3 ms | 0/5 | 34.11 s | 1692.7 MB | 5.83 s | Rerun with obsolete partials dropped from the shared replay helper; faster than the original queued replay but still slower than tuned whisper-rs on this corpus. |
+| MLX whisper large-v3-turbo q4 | MLX/Metal | 3.90% | 0.28% | 43.90% | 6151.4 ms | 8334.0 ms | 4837.0 ms | 0/0 | 51.38 s | 775.9 MB | 5.99 s | Good low-memory MLX profile; same final WER as Q5/Q8. |
+| MLX whisper medium 8-bit | MLX/Metal | 2.60% | 0.00% | 52.67% | 15957.1 ms | 12265.1 ms | 10755.7 ms | 0/5 | 63.36 s | 1288.9 MB | 24.73 s | Better final text, but poor live timing and dropped windows. |
+| Distil-Whisper large-v3 GGML, queued baseline | whisper-rs Metal | 3.90% | 0.28% | 43.76% | 7669.0 ms | 12923.4 ms | 7531.0 ms | 0/2 | 64.08 s | 1713.4 MB | 2.66 s | Same model family as the MLX distil-large-v3 test; good offline, but the original rolling path over-queued partials. |
+| Distil-Whisper large-v3 GGML, tuned live | whisper-rs Metal | 3.90% | 0.28% | 58.07% | 3487.9 ms | 2360.8 ms | 668.6 ms | 0/0 | 20.14 s | 1693.8 MB | 2.76 s | Persistent partial/final states, obsolete partial coalescing, and partial-only caps (`max_tokens=32`, `audio_ctx=256`). This is now the representative whisper-rs live profile for this model. |
+| Distil-Whisper large-v3.5 GGML | whisper-rs Metal | 3.90% | 0.28% | 42.94% | 7931.4 ms | 13485.4 ms | 7952.5 ms | 0/2 | 65.59 s | 1718.7 MB | 2.46 s | Better offline WER, but rolling falls back to the same final WER as turbo and uses much more memory than Q5/Q8. |
+| Distil-Whisper large-v3.5 | Transformers MPS | 3.90% | 0.28% | 42.88% | 12024.8 ms | 18842.7 ms | 11704.5 ms | 0/3 | 167.29 s | 2439.0 MB | 51.36 s | Actual Distil-Whisper turbo-adjacent checkpoint; too slow in this Transformers/MPS rolling path. |
+| WhisperKit distil-large-v3 | Core ML CLI | 3.90% | 0.28% | 48.67% | 13303.8 ms | 27255.1 ms | 15438.5 ms | 3/2 | 106.21 s | 116.3 MB | 24.27 s | CLI-per-window overhead; not representative of an optimized in-process Core ML adapter. |
+| Parakeet TDT 0.6B V2 | NeMo MPS | 1.30% | 0.85% | 40.95% | 3745.1 ms | 895.5 ms | 717.7 ms | 0/0 | 36.96 s | 4861.2 MB | 30.02 s | Best live timing and WER here, but memory is too high for many concurrent talkers. |
+| Moonshine tiny | Transformers | 5.19% | 1.13% | 45.99% | 3158.0 ms | 550.1 ms | 256.5 ms | 0/0 | 15.00 s | 679.5 MB | 10.62 s | Rolling greatly improves over fixed 2 s chunks, but final WER trails offline tiny. |
+| Moonshine base | Transformers | 3.90% | 0.57% | 48.11% | 3194.7 ms | 657.2 ms | 307.9 ms | 0/0 | 16.94 s | 681.4 MB | 12.39 s | Rolling recovers from fixed chunks and matches base offline WER on this corpus. |
+
+Rolling-buffer replay fixed the clearest live-transcription problem: Moonshine
+fixed 2 s chunks were 24.68% WER for tiny and 28.57% WER for base, while the
+rolling buffer brought those to 5.19% and 3.90%. That confirms fixed chunks are
+the wrong live strategy for RedLine.
+
+The stronger Whisper-family models did not get a final-accuracy benefit from
+rolling on clean read speech; they mostly paid repeated-window cost to produce
+partials. The useful signal is live behavior. The tuned whisper-rs Distil
+large-v3 path now beats the warmed MLX run on average latency, first token,
+finalization, and emission lag while keeping the same final WER/CER. The tradeoff
+is worse prefix-scored partial WER and higher flicker, which is expected because
+the partial pass intentionally uses a shorter audio context and capped token
+budget. Q8_0, MLX medium 8-bit, untuned Distil GGML/Metal, Distil-Whisper
+large-v3.5 on Transformers/MPS, and WhisperKit CLI still show scheduler
+pressure. Parakeet had the best WER/latency balance in the broader sweep but a
+4.9 GB process, so it needs a true streaming adapter and multi-talker memory test
+before it can be recommended.
+
+### Whisper-rs Retune
+
+After tuning the Rust rolling replay path, all locally installed whisper-rs
+GGML models were rerun with the same clean LibriSpeech corpus. Rolling-live
+settings were `window_ms=8000`, `step_ms=1000`, `commit_lag_ms=1500`,
+`min_stable_passes=2`, final pass on endpoint, partial `max_tokens=32`,
+partial `audio_ctx=256`, and obsolete partial coalescing enabled.
+
+| Model | Rolling WER | Partial WER | First token | Finalize | Emission lag | Avg compute | Stale/drop | Wall | RSS | CPU | Load |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Whisper large-v3-turbo | 3.90% | 52.28% | 3454.1 ms | 1918.4 ms | 752.9 ms | 7036.9 ms | 0/0 | 23.80 s | 1832.1 MB | 5.11 s | 1770.9 ms |
+| Whisper large-v3-turbo Q8_0 | 3.90% | 54.38% | 3561.7 ms | 2290.2 ms | 901.4 ms | 8006.0 ms | 0/0 | 24.79 s | 1091.7 MB | 4.06 s | 475.9 ms |
+| Whisper large-v3-turbo Q5_0 | 3.90% | 50.04% | 3544.5 ms | 2011.7 ms | 694.9 ms | 6426.2 ms | 0/0 | 20.25 s | 793.7 MB | 3.56 s | 352.4 ms |
+| Distil-Whisper large-v3 GGML | 3.90% | 58.07% | 3229.2 ms | 1118.7 ms | 313.6 ms | 2824.5 ms | 0/0 | 10.17 s | 1732.7 MB | 2.20 s | 1265.1 ms |
+| Distil-Whisper large-v3.5 GGML | 3.90% | 53.82% | 3370.8 ms | 1911.2 ms | 484.3 ms | 4020.0 ms | 0/0 | 13.70 s | 1709.5 MB | 2.09 s | 876.5 ms |
+
+The same models were also rerun in offline reliable mode to separate final
+transcript quality from rolling-partial behavior.
+
+| Model | Offline WER | CER | Avg latency | RTF | Wall | RSS | CPU | Load |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Whisper large-v3-turbo | 3.90% | 0.28% | 2230.8 ms | 0.30x | 8.70 s | 1785.5 MB | 1.59 s | 1811.5 ms |
+| Whisper large-v3-turbo Q8_0 | 3.90% | 0.28% | 2130.1 ms | 0.29x | 7.18 s | 1055.6 MB | 0.77 s | 483.6 ms |
+| Whisper large-v3-turbo Q5_0 | 3.90% | 0.28% | 2238.4 ms | 0.30x | 7.17 s | 724.0 MB | 0.64 s | 343.9 ms |
+| Distil-Whisper large-v3 GGML | 1.30% | 0.28% | 1967.2 ms | 0.27x | 7.15 s | 1674.3 MB | 1.32 s | 1183.5 ms |
+| Distil-Whisper large-v3.5 GGML | 1.30% | 0.28% | 2072.5 ms | 0.28x | 7.15 s | 1674.1 MB | 1.06 s | 844.4 ms |
+
+Current recommendation from the available whisper-rs models: use
+Distil-Whisper large-v3 GGML as the accuracy-first live/default candidate when
+memory allows. It has the best rolling latency and the best offline WER in this
+local sweep. Keep Whisper large-v3-turbo Q5_0 as the low-memory option: it is
+less accurate on this corpus, but it uses under half the memory of the Distil
+models and has the fastest load time.
 
 ## Acceptance Notes
 

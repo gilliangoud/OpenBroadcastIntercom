@@ -26,6 +26,7 @@ Transcription catalog recommendations should be backed by
 | --- | --- | --- | ---: | --- |
 | Whisper large-v3-turbo | transcription | `ggml-large-v3-turbo.bin` | 1.5 GiB | `1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69` |
 | Whisper large-v3-turbo Q8_0 | transcription | `ggml-large-v3-turbo-q8_0.bin` | 834 MiB | `317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1` |
+| Distil-Whisper large-v3 GGML | transcription | `ggml-distil-large-v3.bin` | 1.4 GiB | `2883a11b90fb10ed592d826edeaee7d2929bf1ab985109fe9e1e7b4d2b69a298` |
 | Whisper large-v3-turbo Q5_0 | transcription | `ggml-large-v3-turbo-q5_0.bin` | 547 MiB | `394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2` |
 | DeepFilterNet3 ONNX | deepfilternet_onnx | `DeepFilterNet3_onnx.tar.gz` | 7.98 MiB | `c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616` |
 | DeepFilterNet3 low-latency ONNX | deepfilternet_onnx | `DeepFilterNet3_ll_onnx.tar.gz` | 36.4 MiB | `5998e58e8ba0e09bb76986ef97b84afa065a571ef282d4a1222f341e3251cf3a` |

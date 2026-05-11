@@ -7285,7 +7285,7 @@ fn whisper_model_quality(model: Option<&Path>) -> (String, Option<String>) {
         return (
             "missing".to_string(),
             Some(
-                "Install a recommended large-v3-turbo Q5/Q8 model for reliable transcription"
+                "Install the recommended Distil-Whisper large-v3 GGML model for reliable transcription"
                     .to_string(),
             ),
         );
@@ -7295,6 +7295,9 @@ fn whisper_model_quality(model: Option<&Path>) -> (String, Option<String>) {
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    if name.contains("distil") && name.contains("large-v3") {
+        return ("accuracy_first".to_string(), None);
+    }
     if name.contains("large-v3-turbo") {
         return ("accuracy_first".to_string(), None);
     }
@@ -7302,14 +7305,14 @@ fn whisper_model_quality(model: Option<&Path>) -> (String, Option<String>) {
         return (
             "low_accuracy".to_string(),
             Some(
-                "Tiny/base/small Whisper models are fast but often inaccurate for intercom audio; use large-v3-turbo Q5/Q8 for reliable mode"
+                "Tiny/base/small Whisper models are fast but often inaccurate for intercom audio; use Distil-Whisper large-v3 GGML for reliable mode"
                     .to_string(),
             ),
         );
     }
     (
         "unknown".to_string(),
-        Some("Reliable mode is tuned for large-v3-turbo Q5/Q8 models".to_string()),
+        Some("Reliable mode is tuned for Distil-Whisper large-v3 GGML and large-v3-turbo Q5/Q8 fallback models".to_string()),
     )
 }
 
@@ -14291,6 +14294,13 @@ mod tests {
             .models
             .iter()
             .any(|model| model.category == "transcription" && model.recommended));
+        let transcription_defaults = manifest
+            .models
+            .iter()
+            .filter(|model| model.category == "transcription" && model.is_default)
+            .collect::<Vec<_>>();
+        assert_eq!(transcription_defaults.len(), 1);
+        assert_eq!(transcription_defaults[0].id, "distil-large-v3-ggml");
         assert!(manifest
             .models
             .iter()

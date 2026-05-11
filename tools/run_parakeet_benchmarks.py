@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import transcription_benchmark as tb
+import rolling_transcription_replay as replay
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -127,6 +128,7 @@ def enrich_score(
         "model": predictions.get("model"),
         "model_load_ms": predictions.get("model_load_ms"),
         "mode": predictions.get("mode"),
+        "rolling_buffer": predictions.get("rolling_buffer"),
         "batch_size": predictions.get("batch_size"),
         "streaming_context": predictions.get("streaming_context"),
     }
@@ -141,8 +143,8 @@ def render_summary(results: list[dict[str, Any]]) -> str:
     lines = [
         "# Parakeet/Nemotron Benchmark Summary",
         "",
-        "| Model | Repo | Device | WER | CER | Avg latency | Realtime | Load | Wall time | Max RSS | CPU time | Notes |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Model | Repo | Device | Mode | WER | CER | Avg latency | Realtime | First token | Finalize | Partials | Stale/drop | Load | Wall time | Max RSS | CPU time | Notes |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for result in results:
         model = result.get("model", {})
@@ -162,6 +164,10 @@ def render_summary(results: list[dict[str, Any]]) -> str:
                         "-",
                         "-",
                         "-",
+                        "-",
+                        "-",
+                        "-",
+                        "-",
                         tb.markdown_escape(result["error"]),
                     ]
                 )
@@ -171,9 +177,13 @@ def render_summary(results: list[dict[str, Any]]) -> str:
         summary = result["summary"]
         profile = result.get("macos_profile", {})
         adapter = result.get("adapter", {})
+        live_summary = summary.get("live") or {}
         backend = adapter.get("backend") or {}
         rss_kb = profile.get("max_rss_kb")
         rss_mb = rss_kb / 1024.0 if isinstance(rss_kb, int) else None
+        stale_drop = "-"
+        if live_summary:
+            stale_drop = f"{live_summary.get('stale_jobs', 0)}/{live_summary.get('dropped_jobs', 0)}"
         lines.append(
             "| "
             + " | ".join(
@@ -181,10 +191,15 @@ def render_summary(results: list[dict[str, Any]]) -> str:
                     tb.markdown_escape(model.get("id")),
                     tb.markdown_escape(model.get("repo")),
                     tb.markdown_escape(backend.get("device")),
+                    tb.markdown_escape(adapter.get("mode")),
                     tb.percent(summary["wer"]),
                     tb.percent(summary["cer"]),
                     markdown_number(summary["average_latency_ms"], " ms"),
                     markdown_number(summary["average_realtime_factor"], "x"),
+                    markdown_number(live_summary.get("average_first_token_latency_ms"), " ms"),
+                    markdown_number(live_summary.get("average_finalization_latency_ms"), " ms"),
+                    markdown_number(live_summary.get("partial_updates")),
+                    stale_drop,
                     markdown_number(adapter.get("model_load_ms"), " ms"),
                     markdown_number(profile.get("elapsed_ms"), " ms"),
                     markdown_number(rss_mb, " MB"),
@@ -238,8 +253,37 @@ def run_model(
     ]
     if args.timestamps:
         command.append("--timestamps")
+    command.extend(
+        [
+            "--window-ms",
+            str(args.window_ms),
+            "--step-ms",
+            str(args.step_ms),
+            "--commit-lag-ms",
+            str(args.commit_lag_ms),
+            "--min-stable-passes",
+            str(args.min_stable_passes),
+            "--final-pass-scope",
+            args.final_pass_scope,
+            "--vad-rms-threshold",
+            str(args.vad_rms_threshold),
+            "--vad-hangover-ms",
+            str(args.vad_hangover_ms),
+            "--vad-min-speech-ms",
+            str(args.vad_min_speech_ms),
+            "--stale-job-ms",
+            str(args.stale_job_ms),
+            "--queue-limit",
+            str(args.queue_limit),
+        ]
+    )
+    command.append(
+        "--final-pass-on-release" if args.final_pass_on_release else "--no-final-pass-on-release"
+    )
 
     profile = run_profiled(command, env=args.env, timeout=args.timeout)
+    if not predictions_path.exists():
+        raise SuiteError("adapter did not write predictions")
     raw_predictions = json.loads(predictions_path.read_text(encoding="utf-8"))
     _, predictions = tb.load_predictions(predictions_path)
     scored = tb.score_corpus(corpus, predictions, model_id=model_id, runtime="nemo-asr")
@@ -273,12 +317,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-default-models", action="store_true")
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "mps", "cuda"])
-    parser.add_argument("--mode", default="offline", choices=["offline", "streaming-reference"])
+    parser.add_argument("--mode", default="offline", choices=["offline", "streaming-reference", "rolling-buffer"])
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--timestamps", action="store_true")
     parser.add_argument("--left-context-secs", type=float, default=5.6)
     parser.add_argument("--chunk-secs", type=float, default=0.56)
     parser.add_argument("--right-context-secs", type=float, default=0.56)
+    replay.add_rolling_replay_args(parser)
     parser.add_argument("--timeout", type=float, default=3600.0)
     return parser
 
@@ -324,6 +369,12 @@ def main(argv: list[str] | None = None) -> int:
         "corpus": str(args.corpus),
         "runtime": "nemo-asr",
         "models": [{"id": model_id, "repo": repo} for model_id, repo in model_specs],
+        "mode": args.mode,
+        "rolling_buffer": (
+            replay.config_from_args(args).public_dict()
+            if args.mode == "rolling-buffer"
+            else None
+        ),
         "results": results,
     }
     (args.out_dir / "summary.json").write_text(

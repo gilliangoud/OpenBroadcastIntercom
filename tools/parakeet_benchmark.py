@@ -15,6 +15,8 @@ import wave
 from pathlib import Path
 from typing import Any
 
+import rolling_transcription_replay as replay
+
 
 def load_corpus(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -67,6 +69,25 @@ def transcribe_one(asr_model: Any, audio_path: Path, *, batch_size: int, timesta
     return output_text(first)
 
 
+class NemoAsrBackend:
+    def __init__(self, asr_model: Any, args: argparse.Namespace):
+        self.asr_model = asr_model
+        self.args = args
+
+    def transcribe_file(self, path: Path) -> str:
+        return transcribe_one(
+            self.asr_model,
+            path,
+            batch_size=self.args.batch_size,
+            timestamps=self.args.timestamps,
+        )
+
+    def transcribe_timed(self, path: Path) -> tuple[str, float]:
+        started = time.perf_counter()
+        text = self.transcribe_file(path)
+        return text, (time.perf_counter() - started) * 1000.0
+
+
 def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
     try:
         import nemo.collections.asr as nemo_asr
@@ -89,23 +110,33 @@ def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
     if hasattr(asr_model, "eval"):
         asr_model.eval()
     model_load_ms = (time.perf_counter() - started_load) * 1000.0
+    backend = NemoAsrBackend(asr_model, args)
 
     for segment in corpus["segments"]:
         segment_id = segment["id"]
         audio_path = (corpus_dir / segment["audio"]).resolve()
-        started = time.perf_counter()
-        text = transcribe_one(
-            asr_model,
-            audio_path,
-            batch_size=args.batch_size,
-            timestamps=args.timestamps,
-        )
-        latency_ms = (time.perf_counter() - started) * 1000.0
+        if args.mode in {"offline", "streaming-reference"}:
+            text, latency_ms = backend.transcribe_timed(audio_path)
+            chunks: list[dict[str, Any]] = []
+            partials: list[dict[str, Any]] = []
+            live_metrics: dict[str, Any] | None = None
+        else:
+            text, latency_ms, chunks, partials, live_metrics = replay.transcribe_rolling_buffer(
+                backend,
+                audio_path,
+                config=replay.config_from_args(args),
+                temp_prefix="redline-nemo-rolling-",
+            )
         predictions[segment_id] = {
             "text": text,
             "latency_ms": latency_ms,
             "audio_duration_ms": wav_duration_ms(audio_path),
+            "chunks": chunks,
         }
+        if partials:
+            predictions[segment_id]["partials"] = partials
+        if live_metrics is not None:
+            predictions[segment_id]["live_metrics"] = live_metrics
 
     return {
         "model_id": args.model_id,
@@ -119,6 +150,11 @@ def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "model_load_ms": model_load_ms,
         "mode": args.mode,
+        "rolling_buffer": (
+            replay.config_from_args(args).public_dict()
+            if args.mode == "rolling-buffer"
+            else None
+        ),
         "batch_size": args.batch_size,
         "timestamps": args.timestamps,
         "streaming_context": {
@@ -137,12 +173,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-id", required=True)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "mps", "cuda"])
-    parser.add_argument("--mode", default="offline", choices=["offline", "streaming-reference"])
+    parser.add_argument("--mode", default="offline", choices=["offline", "streaming-reference", "rolling-buffer"])
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--timestamps", action="store_true")
     parser.add_argument("--left-context-secs", type=float, default=5.6)
     parser.add_argument("--chunk-secs", type=float, default=0.56)
     parser.add_argument("--right-context-secs", type=float, default=0.56)
+    replay.add_rolling_replay_args(parser)
     return parser
 
 

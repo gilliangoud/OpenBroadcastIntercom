@@ -47,6 +47,23 @@
       "notes": "Strong accuracy with lower disk and memory use than the full large-v3 turbo model."
     },
     {
+      "id": "distil-large-v3-ggml",
+      "name": "Distil-Whisper large-v3 GGML",
+      "category": "transcription",
+      "runtime": "whisper_cpp",
+      "filename": "ggml-distil-large-v3.bin",
+      "url": "https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/ggml-distil-large-v3.bin?download=true",
+      "size": "1.4 GiB",
+      "size_bytes": 1519521155,
+      "sha256": "2883a11b90fb10ed592d826edeaee7d2929bf1ab985109fe9e1e7b4d2b69a298",
+      "license": "MIT",
+      "destination_dir": "intercom-models",
+      "default": true,
+      "recommended": true,
+      "available": true,
+      "notes": "Default accuracy-first model based on the current RedLine whisper-rs benchmarks; use Q5_0 on memory-constrained machines."
+    },
+    {
       "id": "whisper-large-v3-turbo-q5_0",
       "name": "Whisper large-v3 turbo Q5_0",
       "category": "transcription",
@@ -59,10 +76,10 @@
       "sha1": "e050f7970618a659205450ad97eb95a18d69c9ee",
       "license": "MIT",
       "destination_dir": "intercom-models",
-      "default": true,
+      "default": false,
       "recommended": true,
       "available": true,
-      "notes": "Default accuracy-first model for machines with limited RAM."
+      "notes": "Recommended low-memory fallback when the Distil large-v3 GGML default is too heavy."
     },
     {
       "id": "deepfilternet3-onnx",

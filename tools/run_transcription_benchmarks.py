@@ -16,6 +16,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import transcription_benchmark as tb
+import rolling_transcription_replay as replay
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -355,6 +356,8 @@ def enrich_result(
         "backend": predictions.get("backend"),
         "model_load_ms": predictions.get("model_load_ms"),
         "mode": predictions.get("mode"),
+        "replay_mode": predictions.get("replay_mode"),
+        "rolling_buffer": predictions.get("rolling_buffer"),
         "language": predictions.get("language"),
         "threads": predictions.get("threads"),
     }
@@ -400,8 +403,8 @@ def render_summary(results: list[dict[str, Any]]) -> str:
     lines = [
         "# macOS Transcription Benchmark Summary",
         "",
-        "| Model | Backend | WER | CER | Avg latency | Realtime | Load | Max RSS | CPU time |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Model | Backend | Replay | WER | CER | Avg latency | Realtime | First token | Finalize | Partials | Stale/drop | Load | Max RSS | CPU time |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for result in results:
         if result.get("error"):
@@ -411,6 +414,11 @@ def render_summary(results: list[dict[str, Any]]) -> str:
                     [
                         result["model"]["id"],
                         "failed",
+                        "-",
+                        "-",
+                        "-",
+                        "-",
+                        "-",
                         "-",
                         "-",
                         "-",
@@ -428,6 +436,10 @@ def render_summary(results: list[dict[str, Any]]) -> str:
         backend_label = "metal" if backend.get("metal") else "cpu"
         if backend.get("coreml"):
             backend_label += "+coreml"
+        live_summary = summary.get("live") or {}
+        stale_drop = "-"
+        if live_summary:
+            stale_drop = f"{live_summary.get('stale_jobs', 0)}/{live_summary.get('dropped_jobs', 0)}"
         rss_kb = result.get("macos_profile", {}).get("max_rss_kb")
         rss_mb = rss_kb / 1024.0 if isinstance(rss_kb, int) else None
         lines.append(
@@ -436,10 +448,15 @@ def render_summary(results: list[dict[str, Any]]) -> str:
                 [
                     result["model"]["id"],
                     backend_label,
+                    tb.markdown_escape(result.get("adapter", {}).get("replay_mode")),
                     tb.percent(summary["wer"]),
                     tb.percent(summary["cer"]),
                     markdown_number(summary["average_latency_ms"], " ms"),
                     markdown_number(summary["average_realtime_factor"], "x"),
+                    markdown_number(live_summary.get("average_first_token_latency_ms"), " ms"),
+                    markdown_number(live_summary.get("average_finalization_latency_ms"), " ms"),
+                    markdown_number(live_summary.get("partial_updates")),
+                    stale_drop,
                     markdown_number(result.get("adapter", {}).get("model_load_ms"), " ms"),
                     markdown_number(rss_mb, " MB"),
                     markdown_number(result.get("macos_profile", {}).get("child_cpu_time_ms"), " ms"),
@@ -494,11 +511,39 @@ def run_suite(args: argparse.Namespace) -> int:
             str(predictions_path),
             "--mode",
             args.mode,
+            "--replay-mode",
+            args.replay_mode,
             "--language",
             args.language,
             "--prompt",
             args.prompt,
         ]
+        command.extend(
+            [
+                "--window-ms",
+                str(args.window_ms),
+                "--step-ms",
+                str(args.step_ms),
+                "--commit-lag-ms",
+                str(args.commit_lag_ms),
+                "--min-stable-passes",
+                str(args.min_stable_passes),
+                "--final-pass-on-release",
+                str(args.final_pass_on_release).lower(),
+                "--final-pass-scope",
+                args.final_pass_scope,
+                "--vad-rms-threshold",
+                str(args.vad_rms_threshold),
+                "--vad-hangover-ms",
+                str(args.vad_hangover_ms),
+                "--vad-min-speech-ms",
+                str(args.vad_min_speech_ms),
+                "--stale-job-ms",
+                str(args.stale_job_ms),
+                "--queue-limit",
+                str(args.queue_limit),
+            ]
+        )
         print(f"running {model['id']}...", flush=True)
         try:
             profile = run_profiled(command, timeout=args.timeout, sample_interval=args.sample_interval)
@@ -510,6 +555,14 @@ def run_suite(args: argparse.Namespace) -> int:
                 }
             )
             print(f"failed {model['id']}: {exc}", file=sys.stderr, flush=True)
+            continue
+        if not predictions_path.exists():
+            results.append(
+                {
+                    "model": basic_model_info(model),
+                    "error": "adapter did not write predictions",
+                }
+            )
             continue
         predictions_raw = json.loads(predictions_path.read_text(encoding="utf-8"))
         prediction_model_id, predictions = tb.load_predictions(predictions_path)
@@ -528,6 +581,12 @@ def run_suite(args: argparse.Namespace) -> int:
         "corpus": str(corpus_path),
         "features": args.features,
         "mode": args.mode,
+        "replay_mode": args.replay_mode,
+        "rolling_buffer": (
+            replay.config_from_args(args).public_dict()
+            if args.replay_mode == "rolling-buffer"
+            else None
+        ),
         "language": args.language,
         "results": results,
     }
@@ -553,8 +612,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--build-adapter", action="store_true")
     parser.add_argument("--features", default="macos-metal")
     parser.add_argument("--mode", default="reliable", choices=["fast", "balanced", "reliable"])
+    parser.add_argument("--replay-mode", default="offline", choices=["offline", "rolling-buffer"])
     parser.add_argument("--language", default="en")
     parser.add_argument("--prompt", default="Sports officiating intercom.")
+    replay.add_rolling_replay_args(parser)
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument("--sample-interval", type=float, default=0.25)
     return parser
