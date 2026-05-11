@@ -169,6 +169,24 @@ python3 tools/run_transcription_benchmarks.py \
   --features macos-metal
 ```
 
+To test Apple MLX Whisper models, install `mlx-whisper` in an ignored local
+venv and run the optional adapter from a non-sandboxed Apple Silicon session:
+
+```sh
+/opt/homebrew/bin/python3.12 -m venv artifacts/transcription-benchmarks/.venv-mlx
+artifacts/transcription-benchmarks/.venv-mlx/bin/python -m pip install mlx-whisper
+HF_HOME=artifacts/transcription-benchmarks/hf-cache \
+  artifacts/transcription-benchmarks/.venv-mlx/bin/python tools/mlx_whisper_benchmark.py \
+  --corpus artifacts/transcription-benchmarks/hf-librispeech-metal/corpus.json \
+  --model mlx-community/whisper-large-v3-turbo \
+  --model-id mlx-whisper-large-v3-turbo \
+  --out artifacts/transcription-benchmarks/mlx-whisper-large-v3-turbo/predictions.json \
+  --language en \
+  --prompt "Clean read English speech."
+```
+
+Then score the predictions with `tools/transcription_benchmark.py score`.
+
 ## Evaluation Matrix
 
 Fill this table only from measured local runs. The first acceptance target is a
@@ -224,6 +242,23 @@ Q8_0 is currently the best macOS Metal default candidate because it is nearly
 as fast as the full model, loads much faster, and uses roughly 745 MB less peak
 RSS. Q5_0 remains the low-memory candidate, but it was slower than Q8_0 under
 Metal despite using less memory.
+
+MLX comparison on the same smoke corpus, using `mlx-whisper` in a local Python
+3.12 venv with `HF_HOME=artifacts/transcription-benchmarks/hf-cache`. These
+runs are cached runs after the first model download. The first segment latency
+includes MLX model load because `mlx-whisper` caches the loaded model inside the
+process on first use.
+
+| Runtime/model | WER | CER | Avg latency | Real-time factor | First segment/load | Cached wall time | Max RSS | CPU time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mlx-whisper large-v3-turbo | 3.90% | 0.28% | 1177.8 ms | 0.164x | 1976.1 ms | 5.33 s | 1399.9 MB | 3100.0 ms |
+| mlx-distil-whisper large-v3 | 1.30% | 0.28% | 1210.6 ms | 0.171x | 2177.1 ms | 5.26 s | 1557.0 MB | 3030.0 ms |
+
+MLX is the strongest macOS-specific result so far: it is faster than
+whisper.cpp Metal on this clean fixture while preserving or improving accuracy.
+The Distil-Whisper MLX model is worth keeping in the candidate set for RedLine
+captures because it was slightly more accurate on the long LibriSpeech segment,
+with roughly the same cached wall time as MLX turbo.
 
 ## Acceptance Notes
 
