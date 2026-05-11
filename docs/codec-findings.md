@@ -54,14 +54,12 @@ Processing is configured per client through the `processing` object:
   suppression, AGC/limiting, and voice activity on 48 kHz / 10 ms frames.
 - `engine = "deepfilternet"`: high-quality DeepFilterNet-style processing. It
   is opt-in per client, carries a `deep_filter_model` path, and runs compatible
-  ONNX `.tar.gz`/`.tgz` model packages behind a per-user worker thread so slow
-  inference falls back instead of blocking audio ingest. `deep_filter_backend`
-  can request `auto`, `tract`, or `coreml`, and `apple_compute_units` records
-  the preferred Apple Core ML target. The current DeepFilterNet runtime uses
-  Tract and reports a safe fallback if Core ML is requested. Core ML support is
-  not the same as Whisper acceleration; DeepFilterNet still needs a dedicated
-  Core ML model/runtime bridge before it can use Apple Neural Engine compute
-  units. The admin UI scans `deepfilternet-models/` by default. PyTorch
+  ONNX `.tar.gz`/`.tgz` model packages through Tract, or complete Core ML
+  package directories on macOS builds with `processing-deepfilternet-coreml`.
+  Each client uses a per-user worker thread so slow inference falls back instead
+  of blocking audio ingest. `deep_filter_backend` can request `auto`, `tract`,
+  or `coreml`, and `apple_compute_units` records the preferred Apple Core ML
+  target. The admin UI scans `deepfilternet-models/` by default. PyTorch
   checkpoint `.zip` packages are not runtime models for the server backend.
 
 The `pipeline` array can run processing stages in order. An empty pipeline runs
@@ -93,10 +91,13 @@ boosted. Good starting points are:
   `4`, adaptation `500 ms`, noise floor `0.006`.
 
 On macOS, build the server with `--features macos-accelerated` to enable
-whisper.cpp Metal support through `whisper-rs` for built-in recording and live
-transcription. This does not change the real-time RedLine mixer path; it only
-accelerates Whisper jobs. DeepFilterNet exposes Apple backend preferences in the
-config/status model, but the current safe runtime is Tract.
+the bundled cleanup engines plus whisper.cpp Metal support through `whisper-rs`
+for built-in recording and live transcription. The RedLine Server Tauri app
+uses that feature set when built with `--features native`. DeepFilterNet exposes
+Apple backend preferences and local Core ML package discovery in the
+config/status model. Complete Core ML package directories run through Core ML on
+macOS builds that include `processing-deepfilternet-coreml`; ONNX archives keep
+using the Tract runtime with an explicit fallback note when Core ML is requested.
 
 ## Opus Profiles
 

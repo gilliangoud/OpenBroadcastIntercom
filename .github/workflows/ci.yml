@@ -54,5 +54,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios-sim
+      - name: Check macOS server app accelerated features
+        run: cargo check -p server-app --features native
       - name: Check iOS simulator Rust target
         run: cargo check -p app --features native --target aarch64-apple-ios-sim

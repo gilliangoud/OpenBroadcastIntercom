@@ -259,12 +259,25 @@ function deepFilterNetModelOptions(selected) {
   }
   for (const model of models) {
     const selectedAttr = selected && selected === model.path ? ' selected' : '';
-    options.push(`<option value="${esc(model.path)}"${selectedAttr}>${esc(model.name)}</option>`);
+    const runtime = model.runtime ? ` (${model.runtime})` : '';
+    options.push(`<option value="${esc(model.path)}"${selectedAttr}>${esc(model.name)}${esc(runtime)}</option>`);
   }
   if (!models.length) {
     options.push(`<option value="" disabled>No models found in ${esc(state.deepfilternet?.model_dir || 'deepfilternet-models')}</option>`);
   }
   return options.join('');
+}
+function deepFilterNetCoreMlStatusHtml() {
+  const deepFilter = state.deepfilternet || {};
+  const packages = deepFilter.coreml_packages || [];
+  if (!deepFilter.coreml_compiled && !packages.length) return '';
+  const support = deepFilter.coreml_compiled
+    ? 'Core ML runtime support is compiled into this macOS build. Select a complete Core ML package and the Core ML backend to use Apple acceleration; ONNX archives use Tract.'
+    : 'Core ML package support is not compiled into this server build.';
+  const packageText = packages.length
+    ? ` Packages: ${packages.map((pkg) => `${pkg.name}${pkg.complete ? '' : ' incomplete'}`).join(', ')}.`
+    : '';
+  return `<p class="muted wide">${esc(support + packageText)}</p>`;
 }
 function deepFilterNetBackendOptions() {
   const coremlLabel = state.deepfilternet?.coreml_runtime_available ? 'Apple Core ML' : 'Apple Core ML (planned)';
@@ -1153,6 +1166,7 @@ function clientDetailHtml(userId) {
         <label id="apple-compute-units-field">Apple Compute Units<select id="processing-apple-compute-units"><option value="all">All</option><option value="cpu_and_gpu">CPU + GPU</option><option value="cpu_and_neural_engine">CPU + Neural Engine</option><option value="cpu_only">CPU only</option></select></label>
         <label id="deep-filter-model-field">DeepFilterNet Model<select id="processing-deep-filter-model">${deepFilterNetModelOptions(cfg.processing?.deep_filter_model || '')}</select></label>
         <label>Worker Queue Frames<input id="processing-worker-queue" type="number" min="1" max="200" step="1"></label>
+        ${deepFilterNetCoreMlStatusHtml()}
         ${pipelineStatusHtml(live)}
       </fieldset>
       <details class="wide advanced-client-features"><summary>Advanced Client Features</summary>

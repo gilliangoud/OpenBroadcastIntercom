@@ -7,7 +7,7 @@ default-run = "server-app-native"
 
 [features]
 default = []
-native = ["dep:tauri"]
+native = ["dep:tauri", "server/macos-accelerated"]
 macos-release-native = [
   "native",
   "server/engines-all",

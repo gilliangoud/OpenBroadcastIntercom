@@ -60,6 +60,8 @@ use webrtc_audio_processing::config::{
 #[cfg(feature = "transcription-whisper")]
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+#[cfg(all(feature = "processing-deepfilternet-coreml", target_os = "macos"))]
+mod deepfilternet_coreml;
 mod discovery;
 #[cfg(feature = "tts-supertonic")]
 mod supertonic_tts;
@@ -1495,6 +1497,8 @@ struct DeepFilterNetStatusResponse {
     apple_compute_units: Vec<String>,
     model_dir: String,
     models: Vec<DeepFilterNetModelInfo>,
+    coreml_packages: Vec<DeepFilterNetCoreMlPackageInfo>,
+    coreml_compiled: bool,
     detail: Option<String>,
 }
 
@@ -1509,6 +1513,15 @@ struct WhisperAccelerationStatus {
 struct DeepFilterNetModelInfo {
     name: String,
     path: String,
+    runtime: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DeepFilterNetCoreMlPackageInfo {
+    name: String,
+    path: String,
+    complete: bool,
+    detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -7422,9 +7435,11 @@ async fn list_whisper_models(state: &ServerState) -> Vec<WhisperModelInfo> {
 async fn deepfilternet_status_snapshot(state: &ServerState) -> DeepFilterNetStatusResponse {
     let model_dir = state.deepfilternet_model_dir.read().await.clone();
     let models = list_deepfilternet_models_from_dir(&model_dir).await;
+    let coreml_packages = list_deepfilternet_coreml_packages_from_dir(&model_dir).await;
     let backend_available = processing_engine_available(ProcessingEngine::DeepFilterNet);
     let coreml_runtime_available = deepfilternet_coreml_runtime_available();
     let no_models = models.is_empty();
+    let has_coreml_packages = !coreml_packages.is_empty();
     DeepFilterNetStatusResponse {
         backend_available,
         supported_backends: deepfilternet_supported_backend_names(),
@@ -7433,14 +7448,23 @@ async fn deepfilternet_status_snapshot(state: &ServerState) -> DeepFilterNetStat
         apple_compute_units: apple_compute_unit_names(),
         model_dir: model_dir.display().to_string(),
         models,
+        coreml_compiled: cfg!(all(
+            target_os = "macos",
+            feature = "processing-deepfilternet-coreml"
+        )),
+        coreml_packages,
         detail: if !backend_available {
             Some(unavailable_processing_engine_detail(
                 ProcessingEngine::DeepFilterNet,
             ))
         } else if no_models {
-            Some("No compatible DeepFilterNet ONNX .tar.gz models found".to_string())
+            Some(if has_coreml_packages {
+                "Core ML packages are present, but no complete runtime model is selectable. Use a complete Core ML package on macOS with the Core ML backend, or add a compatible ONNX .tar.gz model for Tract.".to_string()
+            } else {
+                "No compatible DeepFilterNet ONNX .tar.gz models or complete Core ML package directories found".to_string()
+            })
         } else if !coreml_runtime_available {
-            Some("DeepFilterNet Core ML acceleration is not available in this build; coreml requests use the Tract fallback".to_string())
+            Some("DeepFilterNet Core ML acceleration is not available in this build; Core ML package directories require macOS with processing-deepfilternet-coreml, or use ONNX .tar.gz models with Tract".to_string())
         } else {
             None
         },
@@ -7465,11 +7489,11 @@ fn apple_compute_unit_names() -> Vec<String> {
 }
 
 fn deepfilternet_auto_backend() -> &'static str {
-    "tract"
-}
-
-fn deepfilternet_coreml_runtime_available() -> bool {
-    false
+    if deepfilternet_coreml_runtime_available() {
+        "coreml"
+    } else {
+        "tract"
+    }
 }
 
 async fn list_deepfilternet_models_from_dir(model_dir: &Path) -> Vec<DeepFilterNetModelInfo> {
@@ -7487,13 +7511,50 @@ async fn list_deepfilternet_models_from_dir(model_dir: &Path) -> Vec<DeepFilterN
             .and_then(|name| name.to_str())
             .unwrap_or_default()
             .to_string();
+        let runtime = if is_supported_deepfilternet_coreml_package_path(&path) {
+            "coreml"
+        } else {
+            "tract"
+        };
         models.push(DeepFilterNetModelInfo {
             name,
             path: path.display().to_string(),
+            runtime: runtime.to_string(),
         });
     }
     models.sort_by(|a, b| a.name.cmp(&b.name));
     models
+}
+
+async fn list_deepfilternet_coreml_packages_from_dir(
+    model_dir: &Path,
+) -> Vec<DeepFilterNetCoreMlPackageInfo> {
+    let mut packages = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(model_dir).await else {
+        return packages;
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !is_supported_deepfilternet_coreml_package_path(&path) {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let (complete, detail) = deepfilternet_coreml_package_status(&path);
+        packages.push(DeepFilterNetCoreMlPackageInfo {
+            name,
+            path: path.display().to_string(),
+            complete,
+            detail,
+        });
+    }
+
+    packages.sort_by(|a, b| a.name.cmp(&b.name));
+    packages
 }
 
 async fn list_whisper_models_from_paths(
@@ -7536,11 +7597,107 @@ fn is_supported_deepfilternet_model_path(path: &Path) -> bool {
 }
 
 fn is_supported_deepfilternet_runtime_model_path(path: &Path) -> bool {
+    is_supported_deepfilternet_onnx_archive_path(path)
+        || (is_supported_deepfilternet_coreml_package_path(path)
+            && deepfilternet_coreml_package_status(path).0)
+}
+
+fn is_supported_deepfilternet_onnx_archive_path(path: &Path) -> bool {
     let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
     let file_name = file_name.to_ascii_lowercase();
     file_name.ends_with(".tar.gz") || file_name.ends_with(".tgz")
+}
+
+fn is_supported_deepfilternet_coreml_package_path(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let file_name = file_name.to_ascii_lowercase();
+    path.is_dir() && file_name.contains("coreml")
+}
+
+fn deepfilternet_coreml_package_status(path: &Path) -> (bool, Option<String>) {
+    let required_dirs = ["enc.mlmodelc", "erb_dec.mlmodelc", "df_dec.mlmodelc"];
+    let required_files = ["config.ini", "metadata.json"];
+    let mut missing = required_dirs
+        .iter()
+        .filter(|name| !path.join(name).is_dir())
+        .copied()
+        .collect::<Vec<_>>();
+    missing.extend(
+        required_files
+            .iter()
+            .filter(|name| !path.join(name).is_file())
+            .copied(),
+    );
+
+    if missing.is_empty() {
+        missing.extend(deepfilternet_coreml_missing_config_keys(path));
+    }
+
+    if missing.is_empty() {
+        return (true, None);
+    }
+
+    (
+        false,
+        Some(format!(
+            "Incomplete Core ML package; missing required entries: {}",
+            missing.join(", ")
+        )),
+    )
+}
+
+fn deepfilternet_coreml_missing_config_keys(path: &Path) -> Vec<&'static str> {
+    let Ok(contents) = std::fs::read_to_string(path.join("config.ini")) else {
+        return vec!["config.ini readable"];
+    };
+    let mut section = "";
+    let mut keys = std::collections::HashSet::<(&str, &str)>::new();
+    for raw_line in contents.lines() {
+        let line = raw_line.split(['#', ';']).next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim();
+            continue;
+        }
+        let Some((key, _)) = line.split_once('=') else {
+            continue;
+        };
+        keys.insert((section, key.trim()));
+    }
+
+    let mut missing = [
+        ("df", "sr", "df.sr"),
+        ("df", "hop_size", "df.hop_size"),
+        ("df", "fft_size", "df.fft_size"),
+        ("df", "min_nb_erb_freqs", "df.min_nb_erb_freqs"),
+        ("df", "nb_erb", "df.nb_erb"),
+        ("df", "nb_df", "df.nb_df"),
+        (
+            "deepfilternet",
+            "conv_lookahead",
+            "deepfilternet.conv_lookahead",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(section, key, label)| (!keys.contains(&(section, key))).then_some(label))
+    .collect::<Vec<_>>();
+
+    for key in ["df_order", "df_lookahead"] {
+        if !keys.contains(&("df", key)) && !keys.contains(&("deepfilternet", key)) {
+            missing.push(match key {
+                "df_order" => "df.df_order or deepfilternet.df_order",
+                _ => "df.df_lookahead or deepfilternet.df_lookahead",
+            });
+        }
+    }
+
+    missing
 }
 
 async fn select_whisper_model(
@@ -9711,12 +9868,19 @@ struct WebRtcProcessorState {
 
 #[cfg(feature = "processing-deepfilternet")]
 struct DeepFilterNetFrameProcessor {
-    model: DfTract,
+    runtime: DeepFilterNetRuntime,
     input: Array2<f32>,
     output: Array2<f32>,
     key: DeepFilterNetConfigKey,
     active_backend: DeepFilterBackend,
     fallback_reason: Option<String>,
+}
+
+#[cfg(feature = "processing-deepfilternet")]
+enum DeepFilterNetRuntime {
+    Tract(DfTract),
+    #[cfg(all(feature = "processing-deepfilternet-coreml", target_os = "macos"))]
+    CoreMl(deepfilternet_coreml::CoreMlDeepFilterNet),
 }
 
 #[cfg(feature = "processing-deepfilternet")]
@@ -9834,21 +9998,52 @@ impl From<&ProcessingConfig> for WebRtcConfigKey {
 #[cfg(feature = "processing-deepfilternet")]
 impl DeepFilterNetFrameProcessor {
     fn new(key: DeepFilterNetConfigKey) -> anyhow::Result<Self> {
-        let (active_backend, fallback_reason) = deepfilternet_select_runtime_backend(key.backend);
-        let df_params = DfParams::new(key.model_path.clone())?;
         let runtime_params = deepfilternet_runtime_params(key.profile);
-        let model = DfTract::new(df_params, &runtime_params)?;
-        if model.sr != MIX_SAMPLE_RATE as usize || model.hop_size != MIX_SAMPLES_PER_FRAME {
-            bail!(
-                "DeepFilterNet model must run at {} Hz with {}-sample frames; model is {} Hz / {} samples",
-                MIX_SAMPLE_RATE,
-                MIX_SAMPLES_PER_FRAME,
-                model.sr,
-                model.hop_size
-            );
-        }
+        let (active_backend, fallback_reason) =
+            deepfilternet_select_runtime_backend(key.backend, &key.model_path);
+        let runtime = match active_backend {
+            #[cfg(all(feature = "processing-deepfilternet-coreml", target_os = "macos"))]
+            DeepFilterBackend::CoreMl => {
+                let params = deepfilternet_coreml::CoreMlRuntimeParams {
+                    post_filter: runtime_params.post_filter,
+                    post_filter_beta: runtime_params.post_filter_beta,
+                    atten_lim_db: runtime_params.atten_lim_db,
+                    min_db_thresh: runtime_params.min_db_thresh,
+                    max_db_erb_thresh: runtime_params.max_db_erb_thresh,
+                    max_db_df_thresh: runtime_params.max_db_df_thresh,
+                };
+                DeepFilterNetRuntime::CoreMl(deepfilternet_coreml::CoreMlDeepFilterNet::new(
+                    &key.model_path,
+                    key.compute_units,
+                    &params,
+                )?)
+            }
+            _ => {
+                if is_supported_deepfilternet_coreml_package_path(&key.model_path) {
+                    bail!(
+                        "{}",
+                        fallback_reason.clone().unwrap_or_else(|| {
+                            "DeepFilterNet Core ML package selected, but Core ML runtime is unavailable"
+                                .to_string()
+                        })
+                    );
+                }
+                let df_params = DfParams::new(key.model_path.clone())?;
+                let model = DfTract::new(df_params, &runtime_params)?;
+                if model.sr != MIX_SAMPLE_RATE as usize || model.hop_size != MIX_SAMPLES_PER_FRAME {
+                    bail!(
+                        "DeepFilterNet model must run at {} Hz with {}-sample frames; model is {} Hz / {} samples",
+                        MIX_SAMPLE_RATE,
+                        MIX_SAMPLES_PER_FRAME,
+                        model.sr,
+                        model.hop_size
+                    );
+                }
+                DeepFilterNetRuntime::Tract(model)
+            }
+        };
         Ok(Self {
-            model,
+            runtime,
             input: Array2::zeros((1, MIX_SAMPLES_PER_FRAME)),
             output: Array2::zeros((1, MIX_SAMPLES_PER_FRAME)),
             key,
@@ -9861,6 +10056,31 @@ impl DeepFilterNetFrameProcessor {
         &mut self,
         samples: [i16; MIX_SAMPLES_PER_FRAME],
     ) -> anyhow::Result<DeepFilterNetFrameResult> {
+        #[cfg(all(feature = "processing-deepfilternet-coreml", target_os = "macos"))]
+        if let DeepFilterNetRuntime::CoreMl(model) = &mut self.runtime {
+            let started = Instant::now();
+            let result = model.process(samples)?;
+            let inference_ms = started.elapsed().as_secs_f32() * 1_000.0;
+            return Ok(DeepFilterNetFrameResult {
+                samples: result.samples,
+                lsnr_db: result.lsnr_db,
+                lookahead_frames: result.lookahead_frames,
+                model_name: result.model_name,
+                requested_backend: self.key.backend,
+                active_backend: self.active_backend,
+                compute_units: self.key.compute_units,
+                inference_ms,
+                fallback_reason: self.fallback_reason.clone(),
+            });
+        }
+
+        let model = match &mut self.runtime {
+            DeepFilterNetRuntime::Tract(model) => model,
+            #[cfg(all(feature = "processing-deepfilternet-coreml", target_os = "macos"))]
+            DeepFilterNetRuntime::CoreMl(_) => {
+                bail!("DeepFilterNet Core ML runtime was not handled on this platform")
+            }
+        };
         let input_slice = self
             .input
             .as_slice_mut()
@@ -9869,9 +10089,7 @@ impl DeepFilterNetFrameProcessor {
             *dst = *sample as f32 / i16::MAX as f32;
         }
         let started = Instant::now();
-        let lsnr_db = self
-            .model
-            .process(self.input.view(), self.output.view_mut())?;
+        let lsnr_db = model.process(self.input.view(), self.output.view_mut())?;
         let inference_ms = started.elapsed().as_secs_f32() * 1_000.0;
         let output_slice = self
             .output
@@ -9887,7 +10105,7 @@ impl DeepFilterNetFrameProcessor {
         Ok(DeepFilterNetFrameResult {
             samples: output,
             lsnr_db,
-            lookahead_frames: self.model.lookahead,
+            lookahead_frames: model.lookahead,
             model_name: self
                 .key
                 .model_path
@@ -10771,7 +10989,7 @@ fn deepfilternet_config_key(config: &ProcessingConfig) -> Result<DeepFilterNetCo
     let model_path = PathBuf::from(model);
     if !is_supported_deepfilternet_runtime_model_path(&model_path) {
         return Err(format!(
-            "DeepFilterNet runtime requires an ONNX .tar.gz or .tgz model archive; selected `{}`",
+            "DeepFilterNet runtime requires an ONNX .tar.gz/.tgz model archive or a complete Core ML package directory; selected `{}`",
             model_path.display()
         ));
     }
@@ -10786,18 +11004,66 @@ fn deepfilternet_config_key(config: &ProcessingConfig) -> Result<DeepFilterNetCo
 #[cfg_attr(not(feature = "processing-deepfilternet"), allow(dead_code))]
 fn deepfilternet_select_runtime_backend(
     requested: DeepFilterBackend,
+    model_path: &Path,
 ) -> (DeepFilterBackend, Option<String>) {
+    let model_is_coreml = is_supported_deepfilternet_coreml_package_path(model_path);
     match requested {
-        DeepFilterBackend::Tract => (DeepFilterBackend::Tract, None),
-        DeepFilterBackend::Auto => (DeepFilterBackend::Tract, None),
-        DeepFilterBackend::CoreMl => (
-            DeepFilterBackend::Tract,
-            Some(
-                "Core ML backend requested, but DeepFilterNet currently uses the Tract runtime; used Tract fallback"
-                    .to_string(),
-            ),
-        ),
+        DeepFilterBackend::Tract => {
+            if model_is_coreml {
+                (
+                    DeepFilterBackend::Tract,
+                    Some("Tract backend requested, but selected model is a Core ML package; select an ONNX .tar.gz model or use the Core ML backend".to_string()),
+                )
+            } else {
+                (DeepFilterBackend::Tract, None)
+            }
+        }
+        DeepFilterBackend::Auto => {
+            if model_is_coreml && deepfilternet_coreml_runtime_available() {
+                (DeepFilterBackend::CoreMl, None)
+            } else if model_is_coreml {
+                (
+                    DeepFilterBackend::Tract,
+                    Some(deepfilternet_coreml_fallback_detail(model_path)),
+                )
+            } else {
+                (DeepFilterBackend::Tract, None)
+            }
+        }
+        DeepFilterBackend::CoreMl => {
+            if model_is_coreml && deepfilternet_coreml_runtime_available() {
+                (DeepFilterBackend::CoreMl, None)
+            } else {
+                (
+                    DeepFilterBackend::Tract,
+                    Some(deepfilternet_coreml_fallback_detail(model_path)),
+                )
+            }
+        }
     }
+}
+
+fn deepfilternet_coreml_runtime_available() -> bool {
+    cfg!(all(
+        target_os = "macos",
+        feature = "processing-deepfilternet-coreml"
+    ))
+}
+
+fn deepfilternet_coreml_fallback_detail(model_path: &Path) -> String {
+    if !cfg!(target_os = "macos") {
+        return "Core ML backend requested, but Core ML packages only run on macOS; build on macOS with processing-deepfilternet-coreml or select an ONNX .tar.gz model for Tract".to_string();
+    }
+    if !cfg!(feature = "processing-deepfilternet-coreml") {
+        return "Core ML backend requested, but server was built without processing-deepfilternet-coreml; rebuild with that feature or select an ONNX .tar.gz model for Tract".to_string();
+    }
+    if !is_supported_deepfilternet_coreml_package_path(model_path) {
+        return "Core ML backend requested, but the selected DeepFilterNet model is not a Core ML package; select a complete Core ML package directory".to_string();
+    }
+    let (_, detail) = deepfilternet_coreml_package_status(model_path);
+    detail.unwrap_or_else(|| {
+        "Core ML backend requested, but the selected DeepFilterNet Core ML package is not usable; select a complete Core ML package directory or an ONNX .tar.gz model for Tract".to_string()
+    })
 }
 
 fn deep_filter_backend_name(backend: DeepFilterBackend) -> &'static str {
@@ -11815,12 +12081,15 @@ mod tests {
 
     #[test]
     fn deepfilternet_coreml_request_selects_safe_tract_fallback() {
-        let (active, detail) = deepfilternet_select_runtime_backend(DeepFilterBackend::CoreMl);
+        let (active, detail) = deepfilternet_select_runtime_backend(
+            DeepFilterBackend::CoreMl,
+            Path::new("deepfilternet-models/DeepFilterNet3_onnx.tar.gz"),
+        );
 
         assert_eq!(active, DeepFilterBackend::Tract);
         assert!(detail
             .as_deref()
-            .is_some_and(|message| message.contains("Tract fallback")));
+            .is_some_and(|message| message.contains("Core ML")));
     }
 
     #[test]
@@ -12542,7 +12811,9 @@ mod tests {
         assert!(ADMIN_JS.contains("dbfsText"));
         assert!(ADMIN_JS.contains("class=\"peak\""));
         assert!(ADMIN_JS.contains("function deepFilterNetModelOptions"));
+        assert!(ADMIN_JS.contains("function deepFilterNetCoreMlStatusHtml"));
         assert!(ADMIN_JS.contains("processing-deep-filter-model"));
+        assert!(ADMIN_JS.contains("coreml_packages"));
         assert!(ADMIN_CSS.contains(".pan-slider-wrap::after"));
     }
 
@@ -12582,6 +12853,65 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
+    #[tokio::test]
+    async fn deepfilternet_model_folder_lists_coreml_packages_separately() {
+        let dir = temp_state_path("deepfilternet-coreml-models");
+        let package = dir.join("DeepFilterNet3_ll_coreml");
+        tokio::fs::create_dir_all(package.join("enc.mlmodelc"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(package.join("erb_dec.mlmodelc"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(package.join("df_dec.mlmodelc"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            package.join("config.ini"),
+            b"[df]\nsr = 48000\nhop_size = 480\nfft_size = 960\nmin_nb_erb_freqs = 2\nnb_erb = 32\nnb_df = 96\ndf_order = 5\ndf_lookahead = 2\n[deepfilternet]\nconv_lookahead = 2\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(package.join("metadata.json"), b"{}")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(dir.join("DeepFilterNet3_broken_coreml"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.join("DeepFilterNet3_onnx.tar.gz"), b"model")
+            .await
+            .unwrap();
+
+        let runtime_models = list_deepfilternet_models_from_dir(&dir).await;
+        assert_eq!(runtime_models.len(), 2);
+        assert!(runtime_models
+            .iter()
+            .any(|model| model.name == "DeepFilterNet3_onnx.tar.gz" && model.runtime == "tract"));
+        assert!(runtime_models
+            .iter()
+            .any(|model| model.name == "DeepFilterNet3_ll_coreml" && model.runtime == "coreml"));
+
+        let packages = list_deepfilternet_coreml_packages_from_dir(&dir).await;
+        assert_eq!(packages.len(), 2);
+        let complete = packages
+            .iter()
+            .find(|package| package.name == "DeepFilterNet3_ll_coreml")
+            .unwrap();
+        assert!(complete.complete);
+        assert!(complete.detail.is_none());
+        let broken = packages
+            .iter()
+            .find(|package| package.name == "DeepFilterNet3_broken_coreml")
+            .unwrap();
+        assert!(!broken.complete);
+        assert!(broken
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("enc.mlmodelc")));
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
     #[cfg(feature = "processing-deepfilternet")]
     #[test]
     fn deepfilternet_worker_processes_local_model_when_present() {
@@ -12605,6 +12935,34 @@ mod tests {
 
         let result = worker.process(&samples, Duration::from_secs(10)).unwrap();
         assert_eq!(result.samples.len(), MIX_SAMPLES_PER_FRAME);
+        assert!(result.model_name.contains("DeepFilterNet3"));
+        assert!(result.lsnr_db.is_finite());
+    }
+
+    #[cfg(all(feature = "processing-deepfilternet-coreml", target_os = "macos"))]
+    #[test]
+    fn deepfilternet_coreml_processor_runs_local_package_when_present() {
+        let model_path = PathBuf::from("deepfilternet-coreml-models/DeepFilterNet3_ll_coreml");
+        if !model_path.exists() {
+            return;
+        }
+
+        let key = DeepFilterNetConfigKey {
+            model_path,
+            profile: ProcessingProfile::VoiceIsolation,
+            backend: DeepFilterBackend::CoreMl,
+            compute_units: AppleComputeUnits::All,
+        };
+        let mut processor = DeepFilterNetFrameProcessor::new(key).unwrap();
+        let mut samples = [0_i16; MIX_SAMPLES_PER_FRAME];
+        for (index, sample) in samples.iter_mut().enumerate() {
+            let phase = index as f32 * 440.0 * std::f32::consts::TAU / MIX_SAMPLE_RATE as f32;
+            *sample = (phase.sin() * 5000.0).round() as i16;
+        }
+
+        let result = processor.process(samples).unwrap();
+        assert_eq!(result.samples.len(), MIX_SAMPLES_PER_FRAME);
+        assert_eq!(result.active_backend, DeepFilterBackend::CoreMl);
         assert!(result.model_name.contains("DeepFilterNet3"));
         assert!(result.lsnr_db.is_finite());
     }

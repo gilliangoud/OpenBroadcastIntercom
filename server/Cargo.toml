@@ -9,14 +9,14 @@ default = []
 processing-webrtc = ["dep:webrtc-audio-processing"]
 processing-rnnoise = ["dep:nnnoiseless"]
 processing-deepfilternet = ["dep:df", "dep:ndarray", "dep:tract-core", "dep:tract-hir", "dep:tract-onnx", "dep:tract-pulse"]
-processing-deepfilternet-coreml = ["processing-deepfilternet"]
+processing-deepfilternet-coreml = ["processing-deepfilternet", "dep:coreml-native"]
 transcription-whisper = ["dep:whisper-rs"]
 tts-supertonic = ["dep:ort"]
 processing-all = ["processing-webrtc", "processing-rnnoise", "processing-deepfilternet"]
 engines-all = ["processing-all", "transcription-whisper", "tts-supertonic"]
 macos-metal = ["transcription-whisper", "whisper-rs/metal"]
 macos-coreml = ["transcription-whisper", "whisper-rs/coreml"]
-macos-accelerated = ["macos-metal"]
+macos-accelerated = ["processing-all", "processing-deepfilternet-coreml", "macos-metal"]
 
 [dependencies]
 anyhow.workspace = true
@@ -24,6 +24,7 @@ axum.workspace = true
 base64.workspace = true
 clap.workspace = true
 common.workspace = true
+coreml-native = { version = "0.2", optional = true }
 df = { git = "https://github.com/Rikorose/DeepFilterNet", version = "0.5.7-pre", package = "deep_filter", default-features = false, features = ["tract"], optional = true }
 futures-util.workspace = true
 hound.workspace = true
