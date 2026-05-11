@@ -45,6 +45,11 @@ __pycache__/
 # Whisper/whisper.cpp models are local downloads from Hugging Face.
 /intercom-models/*.bin
 /intercom-models/*.gguf
+/intercom-models/*/
+
+# Locally generated DeepFilterNet/Core ML test packages.
+/.venv-coreml/
+/deepfilternet-coreml-models/
 
 # Private signing material must never be committed.
 *.mobileprovision

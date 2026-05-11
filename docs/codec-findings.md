@@ -91,10 +91,12 @@ boosted. Good starting points are:
   `4`, adaptation `500 ms`, noise floor `0.006`.
 
 On macOS, build the server with `--features macos-accelerated` to enable
-whisper.cpp Metal support through `whisper-rs` for built-in recording and live
-transcription. This does not change the real-time RedLine mixer path; it only
-accelerates Whisper jobs. DeepFilterNet exposes Apple backend preferences in the
-config/status model, but the current safe runtime is Tract.
+the bundled cleanup engines plus whisper.cpp Metal support through `whisper-rs`
+for built-in recording and live transcription. The RedLine Server Tauri app
+uses that feature set when built with `--features native`. DeepFilterNet exposes
+Apple backend preferences and local Core ML package discovery in the
+config/status model, but the current realtime inference runtime is still Tract
+with an explicit fallback note when Core ML is requested.
 
 ## Opus Profiles
 

@@ -193,12 +193,25 @@ function deepFilterNetModelOptions(selected) {
   }
   for (const model of models) {
     const selectedAttr = selected && selected === model.path ? ' selected' : '';
-    options.push(`<option value="${esc(model.path)}"${selectedAttr}>${esc(model.name)}</option>`);
+    const runtime = model.runtime ? ` (${model.runtime})` : '';
+    options.push(`<option value="${esc(model.path)}"${selectedAttr}>${esc(model.name)}${esc(runtime)}</option>`);
   }
   if (!models.length) {
     options.push(`<option value="" disabled>No models found in ${esc(state.deepfilternet?.model_dir || 'deepfilternet-models')}</option>`);
   }
   return options.join('');
+}
+function deepFilterNetCoreMlStatusHtml() {
+  const deepFilter = state.deepfilternet || {};
+  const packages = deepFilter.coreml_packages || [];
+  if (!deepFilter.coreml_compiled && !packages.length) return '';
+  const support = deepFilter.coreml_compiled
+    ? 'Core ML package support is compiled into this macOS build; realtime inference currently falls back to Tract.'
+    : 'Core ML package support is not compiled into this server build.';
+  const packageText = packages.length
+    ? ` Packages: ${packages.map((pkg) => `${pkg.name}${pkg.complete ? '' : ' incomplete'}`).join(', ')}.`
+    : '';
+  return `<p class="muted wide">${esc(support + packageText)}</p>`;
 }
 function defaultEsp32Audio() {
   return {
@@ -987,6 +1000,7 @@ function openClientEditor(userId) {
         <label id="deep-filter-model-field">DeepFilterNet Model<select id="processing-deep-filter-model">${deepFilterNetModelOptions(cfg.processing?.deep_filter_model || '')}</select></label>
         <label>Worker Queue Frames<input id="processing-worker-queue" type="number" min="1" max="200" step="1"></label>
         ${state.deepfilternet?.detail ? `<p class="muted wide">${esc(state.deepfilternet.detail)}</p>` : ''}
+        ${deepFilterNetCoreMlStatusHtml()}
         ${processingStageText(live.processing_status) ? `<p class="muted wide">Stages: ${esc(processingStageText(live.processing_status))}</p>` : ''}
         ${normalizationStatusText(live.processing_status?.normalization) ? `<p class="muted wide">Leveler: ${esc(normalizationStatusText(live.processing_status?.normalization))}</p>` : ''}
         ${live.processing_status?.engine_detail ? `<p class="muted wide">${esc(live.processing_status.engine_detail)}</p>` : ''}
