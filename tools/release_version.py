@@ -83,7 +83,7 @@ def update_cargo_version(version: str) -> None:
 
 
 def update_cargo_lock() -> None:
-    subprocess.run(["cargo", "update", "--workspace"], cwd=ROOT, check=True)
+    subprocess.run(["cargo", "generate-lockfile"], cwd=ROOT, check=True)
 
 
 def update_tauri_config(path: Path, version: str) -> None:

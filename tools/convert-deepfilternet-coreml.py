@@ -56,6 +56,10 @@ def fail(message: str) -> None:
 def safe_extract(archive: Path, destination: Path) -> None:
     with tarfile.open(archive, "r:gz") as handle:
         for member in handle.getmembers():
+            if member.issym() or member.islnk():
+                fail(f"unsafe archive link member: {member.name}")
+            if not member.isfile() and not member.isdir():
+                fail(f"unsupported archive member type: {member.name}")
             target = destination / member.name
             if not target.resolve().is_relative_to(destination.resolve()):
                 fail(f"unsafe archive member: {member.name}")

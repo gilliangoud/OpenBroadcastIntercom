@@ -31,6 +31,8 @@ def safe_leaf(value: object, label: str) -> str:
 def safe_destination(value: object, label: str) -> str:
     if not isinstance(value, str) or not value:
         fail(f"{label} is required")
+    if "\\" in value:
+        fail(f"{label} must be a safe relative directory: {value!r}")
     path = PurePosixPath(value)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         fail(f"{label} must be a safe relative directory: {value!r}")

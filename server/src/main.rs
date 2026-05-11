@@ -36,6 +36,8 @@ struct Args {
     whisper_model_dir: PathBuf,
     #[arg(long, default_value = "deepfilternet-models")]
     deepfilternet_model_dir: PathBuf,
+    #[arg(long, default_value = "deepfilternet-coreml-models")]
+    deepfilternet_coreml_model_dir: PathBuf,
     #[arg(long, value_enum)]
     transcription_engine: Option<server::TranscriptionEngineMode>,
 }
@@ -74,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
             debug_audio_dir = ?args.debug_audio_dir,
             model_dir = %args.whisper_model_dir.display(),
             deepfilternet_model_dir = %args.deepfilternet_model_dir.display(),
+            deepfilternet_coreml_model_dir = %args.deepfilternet_coreml_model_dir.display(),
             transcription_engine = ?transcription_engine,
             "intercom server listening; admin UI/API requires HTTP authorization"
         );
@@ -88,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
             debug_audio_dir = ?args.debug_audio_dir,
             model_dir = %args.whisper_model_dir.display(),
             deepfilternet_model_dir = %args.deepfilternet_model_dir.display(),
+            deepfilternet_coreml_model_dir = %args.deepfilternet_coreml_model_dir.display(),
             transcription_engine = ?transcription_engine,
             "intercom server listening; admin UI has no authentication"
         );
@@ -108,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
         whisper_model: args.whisper_model,
         whisper_model_dir: args.whisper_model_dir,
         deepfilternet_model_dir: args.deepfilternet_model_dir,
-        deepfilternet_coreml_model_dir: PathBuf::from("deepfilternet-coreml-models"),
+        deepfilternet_coreml_model_dir: args.deepfilternet_coreml_model_dir,
         transcription_engine,
     })
     .await?;
