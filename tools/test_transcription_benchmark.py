@@ -7,6 +7,7 @@ import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import run_transcription_benchmarks as suite
 import transcription_benchmark as tb
 
 
@@ -190,6 +191,15 @@ class TranscriptionBenchmarkTests(unittest.TestCase):
             self.assertEqual(metadata["source"]["frames"], 2)
             self.assertEqual(metadata["gain"]["peak_linear"], 0.7)
             self.assertAlmostEqual(metadata["gain"]["rms_linear"], 0.2)
+
+    def test_parse_partial_macos_time_output(self):
+        metrics = suite.parse_macos_time_l(
+            "       14.57 real        43.56 user         1.80 sys\n"
+            "time: sysctl kern.clockrate: Operation not permitted\n"
+        )
+        self.assertAlmostEqual(metrics["user_time_ms"], 43560.0)
+        self.assertAlmostEqual(metrics["system_time_ms"], 1800.0)
+        self.assertAlmostEqual(metrics["child_cpu_time_ms"], 45360.0)
 
 
 if __name__ == "__main__":

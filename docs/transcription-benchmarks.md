@@ -17,6 +17,7 @@ cleanup pipelines.
 | --- | --- | --- |
 | LibriSpeech dummy | Tiny CI smoke fixture | Very small, clean English clips with transcripts. |
 | LibriSpeech ASR | Clean baseline | Good for sanity checks, not representative of intercom audio. |
+| Hugging Face LibriSpeech test_wavs | Small downloadable smoke fixture | The suite runner can download three clean WAVs plus transcripts for local ASR checks. |
 | MUSAN | Noise overlay source | Mix with speech to create repeatable crowd/music/noise cases. |
 | Common Voice Spontaneous English | More natural speech | Useful for hesitations and less scripted delivery. |
 | AMI Meeting Corpus | Overlapping multi-speaker speech | Useful for talk-over and room-mic stress cases. |
@@ -139,6 +140,35 @@ python3 tools/transcription_benchmark.py run path/to/corpus.json \
 The command template is split without a shell and supports `{audio}`,
 `{audio_path}`, `{segment_id}`, `{model_id}`, and `{model_path}` placeholders.
 
+Run the macOS Whisper/Metal suite against every installed manifest transcription
+model:
+
+```sh
+python3 tools/run_transcription_benchmarks.py \
+  --build-adapter \
+  --download-librispeech-smoke-corpus \
+  --out-dir artifacts/transcription-benchmarks/hf-librispeech-cpu \
+  --features transcription-whisper \
+  --prompt "Clean read English speech."
+```
+
+That command builds `server/src/bin/transcription_benchmark_whisper.rs`, downloads
+a small curated LibriSpeech WAV/transcript smoke corpus from Hugging Face, runs
+each installed Whisper model once with the model loaded for the whole corpus,
+and writes per-model reports plus `summary.md`. Use this only as a clean macOS
+performance smoke test; real recommendations still require RedLine recording
+sessions and noisy venue cases.
+
+For Metal-specific checks, rebuild with:
+
+```sh
+cargo build -p server --release --features macos-metal --bin transcription_benchmark_whisper
+python3 tools/run_transcription_benchmarks.py \
+  --corpus artifacts/transcription-benchmarks/hf-librispeech-cpu/corpus.json \
+  --out-dir artifacts/transcription-benchmarks/hf-librispeech-metal \
+  --features macos-metal
+```
+
 ## Evaluation Matrix
 
 Fill this table only from measured local runs. The first acceptance target is a
@@ -151,6 +181,31 @@ populated comparison for RedLine captures and at least one online smoke corpus.
 | Distil-Whisper large-v3.5 | reliable | TBD | TBD | TBD | TBD | TBD | TBD | Candidate if local adapter is practical. |
 | Parakeet/Nemotron streaming | streaming | TBD | TBD | TBD | TBD | TBD | TBD | Candidate for low-latency local ASR. |
 | Moonshine | streaming | TBD | TBD | TBD | TBD | TBD | TBD | Candidate for low-resource devices. |
+
+## Current macOS Smoke Result
+
+Local run: clean Hugging Face LibriSpeech `test_wavs`, reliable mode, prompt
+`Clean read English speech.`, built with `transcription-whisper` on macOS. This
+is a runtime sanity check, not a RedLine recommendation.
+
+| Model/runtime | Mode | Cleanup | WER | CER | Avg latency | Real-time factor | Load time | CPU time |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Whisper large-v3-turbo | reliable | none | 3.90% | 0.28% | 4732.0 ms | 0.7x | 1602.7 ms | 15860.0 ms |
+| Whisper large-v3-turbo Q8_0 | reliable | none | 3.90% | 0.28% | 6285.4 ms | 0.9x | 1339.1 ms | 20230.0 ms |
+| Whisper large-v3-turbo Q5_0 | reliable | none | 3.90% | 0.28% | 4664.7 ms | 0.6x | 264.3 ms | 14280.0 ms |
+
+In the local sandbox, the `macos-metal` build failed for all three Whisper
+models before transcription with:
+
+```text
+ggml_metal_buffer_init: error: failed to allocate buffer, size = 7.33 MiB
+```
+
+That points at a local Metal runtime/sandbox problem rather than model accuracy.
+Re-test Metal outside the restricted environment before using these numbers for
+hardware sizing. RSS sampling was unavailable in this sandbox because both live
+`ps` sampling and full `/usr/bin/time -l` reporting were restricted; CPU time
+was still captured from the partial `time -l` output.
 
 ## Acceptance Notes
 
