@@ -54,6 +54,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios-sim
+      - name: Install macOS native server build dependencies
+        run: brew install abseil cmake meson ninja pkg-config
       - name: Check macOS server app accelerated features
         run: cargo check -p server-app --features native
       - name: Check iOS simulator Rust target
