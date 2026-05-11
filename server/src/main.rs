@@ -108,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         whisper_model: args.whisper_model,
         whisper_model_dir: args.whisper_model_dir,
         deepfilternet_model_dir: args.deepfilternet_model_dir,
+        deepfilternet_coreml_model_dir: PathBuf::from("deepfilternet-coreml-models"),
         transcription_engine,
     })
     .await?;

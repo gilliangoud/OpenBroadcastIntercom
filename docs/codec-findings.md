@@ -58,9 +58,11 @@ Processing is configured per client through the `processing` object:
   inference falls back instead of blocking audio ingest. `deep_filter_backend`
   can request `auto`, `tract`, or `coreml`, and `apple_compute_units` records
   the preferred Apple Core ML target. The current DeepFilterNet runtime uses
-  Tract and reports a safe fallback if Core ML is requested. The admin UI scans
-  `deepfilternet-models/` by default. PyTorch checkpoint `.zip` packages are not
-  runtime models for the server backend.
+  Tract and reports a safe fallback if Core ML is requested. Core ML support is
+  not the same as Whisper acceleration; DeepFilterNet still needs a dedicated
+  Core ML model/runtime bridge before it can use Apple Neural Engine compute
+  units. The admin UI scans `deepfilternet-models/` by default. PyTorch
+  checkpoint `.zip` packages are not runtime models for the server backend.
 
 The `pipeline` array can run processing stages in order. An empty pipeline runs
 the selected `engine` as one stage. Useful presets are `webrtc -> built_in` for

@@ -33,6 +33,8 @@ matches="$(
     -g '!target/**' \
     -g '!tools/check-public-secrets.sh' \
     -g '!intercom-models/*.bin' \
+    -g '!intercom-models/*.gguf' \
+    -g '!deepfilternet-coreml-models/**' \
     -g '!server/assets/supertonic/**/*.onnx' \
     -g '!deepfilternet-models/*.tar.gz' \
     -e 'CONFIG_INTERCOM_WIFI_SSID="[^"]+"' \

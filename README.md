@@ -16,9 +16,9 @@ contains:
 
 ## Public Clone Notes
 
-This repository keeps large Whisper models outside Git and Git LFS. The
-supported Whisper/whisper.cpp models are declared in
-`intercom-models/manifest.json` and downloaded from Hugging Face when needed:
+This repository keeps large model weights outside Git and Git LFS. Curated
+Whisper and DeepFilterNet assets are declared in `intercom-models/manifest.json`
+and downloaded from Hugging Face when needed:
 
 ```sh
 tools/download-whisper-models.py --list
@@ -29,8 +29,8 @@ The default external model is `ggml-large-v3-turbo-q5_0.bin`. Use
 `tools/download-whisper-models.py whisper-large-v3-turbo`,
 `tools/download-whisper-models.py whisper-large-v3-turbo-q8_0`, or
 `tools/download-whisper-models.py --all` to fetch the other curated options.
-Downloaded models live in `intercom-models/`, are ignored by Git, and are
-selectable from the server admin UI. See `docs/model-assets.md`.
+Downloaded models live in their catalog destination folders, are ignored by Git,
+and are visible from the server admin System page. See `docs/model-assets.md`.
 
 Some non-Whisper model assets are still curated through Git LFS. Install Git
 LFS only if you need to work on those assets directly:
@@ -457,10 +457,15 @@ and publishes final transcript segments while people are still talking. Use
 `tools/download-whisper-models.py` or place compatible `.bin`/`.gguf` Whisper
 models in `intercom-models/` to make them selectable from the Recording page.
 Live transcription is opt-in from the Recording page or
-admin API. If transcription falls behind, the server drops transcription backlog
-and reports the drop counters instead of delaying audio. Use
-`tools/transcription_benchmark.py` and `docs/transcription-benchmarks.md` to
-score candidate local ASR models before changing catalog recommendations. Recordings and
+admin API. Operators can choose `fast`, `balanced`, or `reliable` live modes:
+fast prefers lower latency, reliable is the accuracy-first recommendation with
+longer chunks, limited context carryover, and longer stale-job windows, and
+balanced is the default. A global live transcription job limit prevents too many
+Whisper jobs from running at once; if transcription falls behind, the server
+drops stale or excess transcription backlog and reports the counters instead of
+delaying audio. Use `tools/transcription_benchmark.py` and
+`docs/transcription-benchmarks.md` to score candidate local ASR models before
+changing catalog recommendations. Recordings and
 transcripts are local files under `--recordings-dir`; enable them only where
 operators and participants expect audio/text retention.
 
@@ -513,6 +518,9 @@ Server admin HTTP API:
 - `GET /admin/api/transcription/live/status`: return live transcription engine, queue, drop, and per-user worker status.
 - `GET /admin/api/transcription/models`: list selectable `.bin` and `.gguf` models from the configured model folder.
 - `PUT /admin/api/transcription/model`: select a model from the configured model folder with `{"model":"ggml-base.en.bin"}`.
+- `GET /admin/api/models/catalog`: return curated transcription and audio-cleanup model assets with installed/download status.
+- `POST /admin/api/models/download`: manually download one curated model with `{"id":"whisper-large-v3-turbo-q5_0"}`.
+- `GET /admin/api/models/downloads`: return recent model download progress and errors.
 - `GET /admin/api/transcripts`: list transcript segments. Optional query parameters: `user_id`, `user_ids=1,2`, `channel_id`, `channel_ids=1,2`, `direct_user_id`, `source=live|recording|manual`, `since_ms`, `until_ms`, and `q` for text search.
 - `POST /admin/api/transcripts`: append a manual/test transcript segment with `{"user_id":1,"text":"..."}`.
 
@@ -602,13 +610,18 @@ Processing config shape:
 common presets are `webrtc -> built_in` and `webrtc -> rnnoise -> built_in`.
 Use `deepfilternet` only as an opt-in high-quality target. The admin UI scans
 `deepfilternet-models/` for compatible ONNX `.tar.gz`/`.tgz` models and offers
-them in a dropdown. The PyTorch checkpoint `.zip` packages are not runtime
-models for the server backend. `deep_filter_backend` may be `auto`, `tract`, or
-`coreml`; `apple_compute_units` may be `all`, `cpu_and_gpu`,
-`cpu_and_neural_engine`, or `cpu_only`. The current DeepFilterNet audio runtime
-uses Tract and reports a safe fallback if `coreml` is requested. Processing
-status reports the active backend, inference time, model load failures, worker
-timeouts, LSNR, and fallback behavior.
+them in a dropdown. The System page can download curated ONNX assets from the
+shared model catalog and can detect locally generated Core ML package
+directories under `deepfilternet-coreml-models/`. The PyTorch checkpoint `.zip`
+packages are not runtime models for the server backend. `deep_filter_backend`
+may be `auto`, `tract`, or `coreml`; `apple_compute_units` may be `all`,
+`cpu_and_gpu`, `cpu_and_neural_engine`, or `cpu_only`. The current
+DeepFilterNet audio runtime uses Tract and reports a safe fallback if `coreml`
+is requested. Core ML DeepFilterNet acceleration is tracked separately from
+Whisper acceleration and requires a native Core ML runtime bridge before it can
+use Apple Neural Engine or Core ML compute units. Processing status reports the
+active backend, inference time, model load failures, worker timeouts, LSNR, and fallback
+behavior.
 
 `normalization` is optional and defaults to disabled. When enabled, it runs
 after the selected processing chain and before channel volumes, per-talker

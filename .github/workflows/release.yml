@@ -68,8 +68,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios-sim
+      - name: Install macOS native server build dependencies
+        run: brew install abseil cmake meson ninja pkg-config
       - name: Check iOS simulator Rust target
         run: cargo check -p app --features native --target aarch64-apple-ios-sim
+      - name: Check macOS server app native release features
+        working-directory: server-app
+        run: cargo check --features macos-release-native
 
   version:
     needs: [checks, ios-check]
@@ -121,6 +126,8 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install macOS native server build dependencies
+        run: brew install abseil cmake meson ninja pkg-config
       - name: Build RedLine macOS app
         working-directory: clients/app
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
@@ -129,7 +136,7 @@ jobs:
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
       - name: Build RedLine Server macOS app
         working-directory: server-app
-        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
+        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features macos-release-native --bundles app --ci
       - name: Archive macOS apps
         run: |
           mkdir -p artifacts

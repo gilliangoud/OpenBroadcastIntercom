@@ -20,8 +20,13 @@ python3 -m unittest tools/test_release_version.py
 
 ## First-Pass Artifacts
 
-- macOS: RedLine, RedLine Bridge, and RedLine Server `.app` zip
-  archives.
+- macOS: RedLine, RedLine Bridge, and RedLine Server `.app` zip archives. The
+  server app is built with `server-app` feature `macos-release-native`, enabling
+  the native Tauri shell plus all optional server engines, Whisper Metal/Core ML
+  build support, and DeepFilterNet Core ML package support. Its bundle, Cargo,
+  and CMake deployment targets are macOS 10.15 because the native Whisper build
+  uses C++ filesystem APIs. The macOS workflow installs `abseil`, `cmake`,
+  `meson`, `ninja`, and `pkg-config` for the native audio dependencies.
 - Windows: RedLine and RedLine Bridge NSIS installers.
 - Linux: RedLine and RedLine Bridge AppImage/deb bundles.
 - Android: RedLine debug/sideload APK.
