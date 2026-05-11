@@ -185,27 +185,45 @@ populated comparison for RedLine captures and at least one online smoke corpus.
 ## Current macOS Smoke Result
 
 Local run: clean Hugging Face LibriSpeech `test_wavs`, reliable mode, prompt
-`Clean read English speech.`, built with `transcription-whisper` on macOS. This
-is a runtime sanity check, not a RedLine recommendation.
+`Clean read English speech.`, built with `transcription-whisper` and
+`macos-metal` on macOS. This is a runtime sanity check, not a RedLine
+recommendation.
 
-| Model/runtime | Mode | Cleanup | WER | CER | Avg latency | Real-time factor | Load time | CPU time |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Whisper large-v3-turbo | reliable | none | 3.90% | 0.28% | 4732.0 ms | 0.7x | 1602.7 ms | 15860.0 ms |
-| Whisper large-v3-turbo Q8_0 | reliable | none | 3.90% | 0.28% | 6285.4 ms | 0.9x | 1339.1 ms | 20230.0 ms |
-| Whisper large-v3-turbo Q5_0 | reliable | none | 3.90% | 0.28% | 4664.7 ms | 0.6x | 264.3 ms | 14280.0 ms |
+| Model/runtime | Backend | Mode | Cleanup | WER | CER | Avg latency | Real-time factor | Load time | Max RSS | CPU time |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Whisper large-v3-turbo | CPU | reliable | none | 3.90% | 0.28% | 4732.0 ms | 0.7x | 1602.7 ms | unavailable | 15860.0 ms |
+| Whisper large-v3-turbo Q8_0 | CPU | reliable | none | 3.90% | 0.28% | 6285.4 ms | 0.9x | 1339.1 ms | unavailable | 20230.0 ms |
+| Whisper large-v3-turbo Q5_0 | CPU | reliable | none | 3.90% | 0.28% | 4664.7 ms | 0.6x | 264.3 ms | unavailable | 14280.0 ms |
+| Whisper large-v3-turbo | Metal | reliable | none | 3.90% | 0.28% | 2215.7 ms | 0.3x | 2224.8 ms | 1781.0 MB | 1730.0 ms |
+| Whisper large-v3-turbo Q8_0 | Metal | reliable | none | 3.90% | 0.28% | 2175.2 ms | 0.3x | 567.9 ms | 1036.1 MB | 810.0 ms |
+| Whisper large-v3-turbo Q5_0 | Metal | reliable | none | 3.90% | 0.28% | 2501.4 ms | 0.3x | 332.0 ms | 724.4 MB | 640.0 ms |
 
-In the local sandbox, the `macos-metal` build failed for all three Whisper
-models before transcription with:
+Metal failed inside the restricted Codex sandbox with
+`ggml_metal_buffer_init: error: failed to allocate buffer, size = 7.33 MiB`, but
+the same binary succeeded when run outside that sandbox. Run Metal benchmarks
+from a normal terminal or with unrestricted local execution before using results
+for hardware sizing. CPU RSS was unavailable because live `ps` sampling and full
+`/usr/bin/time -l` reporting were restricted in the sandbox.
 
-```text
-ggml_metal_buffer_init: error: failed to allocate buffer, size = 7.33 MiB
-```
+Mode comparison on the same Metal smoke corpus:
 
-That points at a local Metal runtime/sandbox problem rather than model accuracy.
-Re-test Metal outside the restricted environment before using these numbers for
-hardware sizing. RSS sampling was unavailable in this sandbox because both live
-`ps` sampling and full `/usr/bin/time -l` reporting were restricted; CPU time
-was still captured from the partial `time -l` output.
+| Model/runtime | Mode | WER | Avg latency | Real-time factor | Max RSS | Load time |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Whisper large-v3-turbo | reliable | 3.90% | 2215.7 ms | 0.307x | 1781.0 MB | 2224.8 ms |
+| Whisper large-v3-turbo | balanced | 3.90% | 2064.2 ms | 0.282x | 1796.0 MB | 1421.9 ms |
+| Whisper large-v3-turbo | fast | 3.90% | 2252.5 ms | 0.308x | 1782.5 MB | 1690.4 ms |
+| Whisper large-v3-turbo Q8_0 | reliable | 3.90% | 2175.2 ms | 0.291x | 1036.1 MB | 567.9 ms |
+| Whisper large-v3-turbo Q8_0 | balanced | 3.90% | 2141.0 ms | 0.289x | 1047.0 MB | 851.9 ms |
+| Whisper large-v3-turbo Q8_0 | fast | 3.90% | 2174.1 ms | 0.294x | 1031.8 MB | 558.0 ms |
+| Whisper large-v3-turbo Q5_0 | reliable | 3.90% | 2501.4 ms | 0.340x | 724.4 MB | 332.0 ms |
+| Whisper large-v3-turbo Q5_0 | balanced | 3.90% | 2372.2 ms | 0.324x | 740.2 MB | 339.8 ms |
+| Whisper large-v3-turbo Q5_0 | fast | 3.90% | 2372.1 ms | 0.329x | 734.0 MB | 342.0 ms |
+
+On this smoke corpus, all modes and model variants produced the same WER/CER.
+Q8_0 is currently the best macOS Metal default candidate because it is nearly
+as fast as the full model, loads much faster, and uses roughly 745 MB less peak
+RSS. Q5_0 remains the low-memory candidate, but it was slower than Q8_0 under
+Metal despite using less memory.
 
 ## Acceptance Notes
 
