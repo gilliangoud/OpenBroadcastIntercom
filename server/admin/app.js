@@ -206,7 +206,7 @@ function deepFilterNetCoreMlStatusHtml() {
   const packages = deepFilter.coreml_packages || [];
   if (!deepFilter.coreml_compiled && !packages.length) return '';
   const support = deepFilter.coreml_compiled
-    ? 'Core ML package support is compiled into this macOS build; realtime inference currently falls back to Tract.'
+    ? 'Core ML runtime support is compiled into this macOS build. Select a complete Core ML package and the Core ML backend to use Apple acceleration; ONNX archives use Tract.'
     : 'Core ML package support is not compiled into this server build.';
   const packageText = packages.length
     ? ` Packages: ${packages.map((pkg) => `${pkg.name}${pkg.complete ? '' : ' incomplete'}`).join(', ')}.`

@@ -123,14 +123,16 @@ runs server-side RNNoise on decoded 48 kHz frames. The `pipeline` array can run
 multiple stages in order, for example `webrtc -> built_in` for laptop mic
 cleanup with a light final gate/compressor. `engine = "deepfilternet"` runs
 compatible ONNX `.tar.gz` models through the server's bundled Rust/Tract worker
-backend and reports fallback status if the model cannot load or cannot keep up.
-Its `deep_filter_backend` and `apple_compute_units` fields let the admin UI
-track Apple Core ML preferences and local Core ML packages while preserving a
-safe Tract fallback for realtime inference today. A macOS server can be built
-with `--features macos-accelerated` to include WebRTC, RNNoise, DeepFilterNet,
-Core ML package discovery, and whisper.cpp Metal support for built-in
-transcription. The macOS Server Tauri app enables that feature set through its
-`native` build feature.
+backend, or complete Core ML package directories through Apple Core ML when the
+server is built for macOS with `processing-deepfilternet-coreml`. It reports
+fallback status if the selected model cannot load or cannot keep up. Its
+`deep_filter_backend` and `apple_compute_units` fields choose the backend and
+Apple compute target; ONNX archives use Tract, while Core ML package directories
+use Core ML on supported macOS builds. A macOS server can be built with
+`--features macos-accelerated` to include WebRTC, RNNoise, DeepFilterNet, Core
+ML package inference, and whisper.cpp Metal support for built-in transcription.
+The macOS Server Tauri app enables that feature set through its `native` build
+feature.
 Use `voice_isolation` for laptop microphones and keyboard-heavy
 environments, `voice` for normal RedLine use, `broadcast` for less aggressive
 gating, and `raw` for external audio interfaces. When `native_voice_processing`
