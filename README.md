@@ -458,7 +458,9 @@ and publishes final transcript segments while people are still talking. Use
 models in `intercom-models/` to make them selectable from the Recording page.
 Live transcription is opt-in from the Recording page or
 admin API. If transcription falls behind, the server drops transcription backlog
-and reports the drop counters instead of delaying audio. Recordings and
+and reports the drop counters instead of delaying audio. Use
+`tools/transcription_benchmark.py` and `docs/transcription-benchmarks.md` to
+score candidate local ASR models before changing catalog recommendations. Recordings and
 transcripts are local files under `--recordings-dir`; enable them only where
 operators and participants expect audio/text retention.
 
