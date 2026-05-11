@@ -4,7 +4,7 @@ use std::fs::File;
 use std::future;
 use std::io::{BufWriter, ErrorKind, Write};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -23,25 +23,28 @@ use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use common::{
     codec_pcm16_payload_bytes, codec_sample_rate, codec_samples_per_frame,
-    pcm16_le_bytes_to_samples, pcm16_samples_to_le_bytes, resample_linear, AlertId,
-    AlertRecipientStatus, AlertStatus, AlertTarget, AppleComputeUnits, AudioPacket, AudioTarget,
-    BridgeStatus, ButtonCapability, ButtonId, CaptureHealthStatus, ChannelId,
-    ChannelPresenceMember, ChannelPresenceRoster, ClientLockoutPolicy, ClientRole, ClientUid,
-    Codec, ControlEvent, ControlMessage, ControlResponse, DeepFilterBackend,
-    DirectCallHistoryEntry, DirectCallStatus, EmergencyStatus, EmergencyTarget, EnrollmentStatus,
-    Esp32AudioConfig, IfbConfig, IfbStatus, InputMeterStatus, LevelNormalizationConfig,
-    LevelNormalizationStatus, OpusBandwidth, OpusProfile, OutputMeterStatus, PcmFrameResampler,
-    ProcessingConfig, ProcessingEngine, ProcessingMode, ProcessingProfile, ProcessingStageConfig,
-    ProcessingStageStatus, ProcessingStatus, SessionStatus, StatusMetrics, StereoConfig,
-    StereoStatus, TalkButtonAction, TalkButtonConfig, TalkButtonMode, TalkMode,
-    TransportHealthStatus, UserId, DEFAULT_IFB_DUCK_GAIN, MAX_PACKET_BYTES, MIX_SAMPLES_PER_FRAME,
-    MIX_SAMPLE_RATE, PCM48_STEREO_PAYLOAD_BYTES, SERVER_USER_ID,
+    default_supported_codecs, pcm16_le_bytes_to_samples, pcm16_samples_to_le_bytes,
+    resample_linear, AlertId, AlertRecipientStatus, AlertStatus, AlertTarget, AppleComputeUnits,
+    AudioPacket, AudioTarget, BridgeStatus, ButtonCapability, ButtonId, CaptureHealthStatus,
+    ChannelId, ChannelPresenceMember, ChannelPresenceRoster, ClientCapabilities,
+    ClientLockoutPolicy, ClientRole, ClientUid, Codec, ControlEvent, ControlMessage,
+    ControlResponse, DeepFilterBackend, DirectCallHistoryEntry, DirectCallStatus, EmergencyStatus,
+    EmergencyTarget, EnrollmentStatus, Esp32AudioConfig, IfbConfig, IfbStatus, InputMeterStatus,
+    LevelNormalizationConfig, LevelNormalizationStatus, OpusBandwidth, OpusProfile,
+    OutputMeterStatus, PcmFrameResampler, ProcessingConfig, ProcessingEngine, ProcessingMode,
+    ProcessingProfile, ProcessingStageConfig, ProcessingStageStatus, ProcessingStatus,
+    SessionStatus, StatusMetrics, StereoConfig, StereoStatus, TalkButtonAction, TalkButtonConfig,
+    TalkButtonMode, TalkMode, TransportHealthStatus, UserId, DEFAULT_IFB_DUCK_GAIN,
+    MAX_PACKET_BYTES, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE, PCM48_STEREO_PAYLOAD_BYTES,
+    SERVER_USER_ID,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::process::Command;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::{error::ProtocolError, Error as WsError, Message};
 
@@ -70,6 +73,7 @@ pub use discovery::{
 
 const MIX_INTERVAL: Duration = Duration::from_millis(common::FRAME_MS as u64);
 const ACTIVE_SOURCE_WINDOW: Duration = Duration::from_millis(80);
+const AUDIO_ENDPOINT_TIMEOUT: Duration = Duration::from_secs(6);
 const MAX_SOURCE_QUEUE_FRAMES: usize = 6;
 const PRIORITY_DUCK_GAIN: f32 = 0.25;
 const LIMITER_THRESHOLD: f32 = 0.95;
@@ -81,6 +85,12 @@ const LIVE_TRANSCRIPTION_OVERLAP_FRAMES: usize = 50;
 const LIVE_TRANSCRIPTION_MIN_SPEECH_FRAMES: usize = 20;
 const LIVE_TRANSCRIPTION_QUEUE_LIMIT: usize = 4;
 const LIVE_TRANSCRIPTION_RMS_THRESHOLD: f32 = 0.018;
+const LIVE_TRANSCRIPTION_DEFAULT_CONCURRENCY: usize = 2;
+const LIVE_TRANSCRIPTION_MAX_CONCURRENCY: usize = 16;
+const LIVE_TRANSCRIPTION_DEFAULT_STALE_JOB_MS: u64 = 20_000;
+const MODEL_CATALOG_JSON: &str = include_str!("../../intercom-models/manifest.json");
+const MODEL_DOWNLOAD_USER_AGENT: &str = "RedLine-model-downloader/1.0";
+const DEFAULT_DEEPFILTERNET_COREML_MODEL_DIR: &str = "deepfilternet-coreml-models";
 const TTS_SOURCE_USER_BASE: UserId = 64_000;
 const TTS_SOURCE_USER_COUNT: UserId = 1_000;
 const TTS_MAX_MESSAGE_CHARS: usize = 240;
@@ -93,6 +103,52 @@ pub enum TranscriptionEngineMode {
     Disabled,
     BuiltinWhisper,
     ExternalWhisper,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveTranscriptionMode {
+    Fast,
+    #[default]
+    Balanced,
+    Reliable,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LiveTranscriptionModeConfig {
+    silence_frames: usize,
+    max_frames: usize,
+    overlap_frames: usize,
+    min_speech_frames: usize,
+    stale_job_ms: u64,
+}
+
+impl LiveTranscriptionMode {
+    fn config(self) -> LiveTranscriptionModeConfig {
+        match self {
+            Self::Fast => LiveTranscriptionModeConfig {
+                silence_frames: 40,
+                max_frames: 400,
+                overlap_frames: 30,
+                min_speech_frames: 15,
+                stale_job_ms: 10_000,
+            },
+            Self::Balanced => LiveTranscriptionModeConfig {
+                silence_frames: LIVE_TRANSCRIPTION_SILENCE_FRAMES,
+                max_frames: LIVE_TRANSCRIPTION_MAX_FRAMES,
+                overlap_frames: LIVE_TRANSCRIPTION_OVERLAP_FRAMES,
+                min_speech_frames: LIVE_TRANSCRIPTION_MIN_SPEECH_FRAMES,
+                stale_job_ms: LIVE_TRANSCRIPTION_DEFAULT_STALE_JOB_MS,
+            },
+            Self::Reliable => LiveTranscriptionModeConfig {
+                silence_frames: 160,
+                max_frames: 1_800,
+                overlap_frames: 160,
+                min_speech_frames: 30,
+                stale_job_ms: 90_000,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, clap::ValueEnum)]
@@ -199,6 +255,8 @@ pub struct ServerState {
     recording: RwLock<RecordingState>,
     transcription: RwLock<LiveTranscriptionState>,
     deepfilternet_model_dir: RwLock<PathBuf>,
+    deepfilternet_coreml_model_dir: RwLock<PathBuf>,
+    model_downloads: RwLock<HashMap<String, ModelDownloadStatus>>,
     debug_audio_tx: RwLock<Option<mpsc::Sender<ServerDebugAudioFrame>>>,
     next_alert_id: AtomicU64,
     next_tts_id: AtomicU64,
@@ -232,6 +290,10 @@ impl ServerState {
             recording: RwLock::new(RecordingState::default()),
             transcription: RwLock::new(LiveTranscriptionState::default()),
             deepfilternet_model_dir: RwLock::new(PathBuf::from("deepfilternet-models")),
+            deepfilternet_coreml_model_dir: RwLock::new(PathBuf::from(
+                DEFAULT_DEEPFILTERNET_COREML_MODEL_DIR,
+            )),
+            model_downloads: RwLock::new(HashMap::new()),
             debug_audio_tx: RwLock::new(None),
             next_alert_id: AtomicU64::new(1),
             next_tts_id: AtomicU64::new(1),
@@ -327,6 +389,7 @@ struct Session {
     client_uid: ClientUid,
     enrollment: EnrollmentStatus,
     addr: Option<SocketAddr>,
+    audio_last_seen: Option<Instant>,
     role: ClientRole,
     listen_channels: HashSet<ChannelId>,
     tx_channels: HashSet<ChannelId>,
@@ -336,6 +399,7 @@ struct Session {
     opus_profile: OpusProfile,
     supported_codecs: HashSet<Codec>,
     advertised_buttons: Vec<ButtonCapability>,
+    capabilities: ClientCapabilities,
     buttons: Vec<TalkButtonConfig>,
     active_buttons: HashSet<ButtonId>,
     active_direct_calls: HashMap<UserId, ActiveDirectCall>,
@@ -395,6 +459,7 @@ impl Session {
     fn new() -> Self {
         Self {
             addr: None,
+            audio_last_seen: None,
             client_uid: String::new(),
             enrollment: EnrollmentStatus::Enrolled,
             role: ClientRole::Client,
@@ -406,6 +471,7 @@ impl Session {
             opus_profile: OpusProfile::default(),
             supported_codecs: [Codec::Pcm16].into(),
             advertised_buttons: Vec::new(),
+            capabilities: ClientCapabilities::default(),
             buttons: Vec::new(),
             active_buttons: HashSet::new(),
             active_direct_calls: HashMap::new(),
@@ -825,6 +891,12 @@ struct DeviceEnrollment {
     hardware_fingerprint: Option<String>,
     #[serde(default)]
     warnings: Vec<String>,
+    #[serde(default = "default_supported_codecs")]
+    supported_codecs: Vec<Codec>,
+    #[serde(default)]
+    advertised_buttons: Vec<ButtonCapability>,
+    #[serde(default)]
+    capabilities: ClientCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1367,6 +1439,7 @@ struct AdminStateResponse {
     recording: RecordingStatusResponse,
     transcription: LiveTranscriptionStatusResponse,
     deepfilternet: DeepFilterNetStatusResponse,
+    models: ModelCatalogResponse,
     channels: Vec<ChannelConfig>,
     devices: Vec<DeviceEnrollment>,
     clients: Vec<DesiredClientConfig>,
@@ -1400,6 +1473,8 @@ struct TranscriptionEngineStatus {
     command: Option<String>,
     model: Option<String>,
     model_dir: Option<String>,
+    model_quality: String,
+    model_recommendation: Option<String>,
     models: Vec<WhisperModelInfo>,
     last_error: Option<String>,
 }
@@ -1416,6 +1491,7 @@ struct DeepFilterNetStatusResponse {
     backend_available: bool,
     supported_backends: Vec<String>,
     preferred_backend: String,
+    coreml_runtime_available: bool,
     apple_compute_units: Vec<String>,
     model_dir: String,
     models: Vec<DeepFilterNetModelInfo>,
@@ -1433,6 +1509,138 @@ struct WhisperAccelerationStatus {
 struct DeepFilterNetModelInfo {
     name: String,
     path: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct ModelCatalogManifest {
+    version: u32,
+    #[serde(default)]
+    source_policy: ModelSourcePolicy,
+    #[serde(default)]
+    categories: Vec<String>,
+    models: Vec<ModelCatalogEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ModelSourcePolicy {
+    allowed_host: String,
+    custom_urls: bool,
+}
+
+impl Default for ModelSourcePolicy {
+    fn default() -> Self {
+        Self {
+            allowed_host: "huggingface.co".to_string(),
+            custom_urls: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ModelCatalogEntry {
+    id: String,
+    name: String,
+    category: String,
+    runtime: String,
+    filename: String,
+    url: Option<String>,
+    size: String,
+    size_bytes: Option<u64>,
+    sha256: Option<String>,
+    sha1: Option<String>,
+    license: String,
+    destination_dir: String,
+    #[serde(default, rename = "default")]
+    is_default: bool,
+    #[serde(default)]
+    recommended: bool,
+    #[serde(default = "default_true")]
+    available: bool,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ModelCatalogResponse {
+    version: u32,
+    categories: Vec<String>,
+    source_policy: ModelSourcePolicy,
+    models: Vec<ModelCatalogItemResponse>,
+    error: Option<String>,
+}
+
+impl Default for ModelCatalogResponse {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            categories: Vec::new(),
+            source_policy: ModelSourcePolicy::default(),
+            models: Vec::new(),
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ModelCatalogItemResponse {
+    id: String,
+    name: String,
+    category: String,
+    runtime: String,
+    filename: String,
+    url: Option<String>,
+    size: String,
+    size_bytes: Option<u64>,
+    sha256: Option<String>,
+    license: String,
+    destination_dir: String,
+    destination_path: String,
+    #[serde(rename = "default")]
+    is_default: bool,
+    recommended: bool,
+    available: bool,
+    notes: Option<String>,
+    installed: bool,
+    downloading: bool,
+    status: ModelAssetStatus,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ModelAssetStatus {
+    Installed,
+    Missing,
+    Downloading,
+    Failed,
+    Unavailable,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelDownloadRequest {
+    id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ModelDownloadState {
+    Queued,
+    Downloading,
+    Installed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModelDownloadStatus {
+    id: String,
+    filename: String,
+    status: ModelDownloadState,
+    bytes_received: u64,
+    bytes_total: Option<u64>,
+    error: Option<String>,
+    started_at_ms: u64,
+    finished_at_ms: Option<u64>,
+    destination_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1534,6 +1742,10 @@ struct LiveTranscriptionState {
     active: bool,
     started_at_ms: Option<u64>,
     users: Option<HashSet<UserId>>,
+    mode: LiveTranscriptionMode,
+    max_concurrent_jobs: usize,
+    stale_job_ms: u64,
+    scheduler: Arc<Semaphore>,
     per_user: HashMap<UserId, LiveTranscriptionUserRuntime>,
     last_error: Option<String>,
 }
@@ -1550,6 +1762,10 @@ impl Default for LiveTranscriptionState {
             active: false,
             started_at_ms: None,
             users: None,
+            mode: LiveTranscriptionMode::default(),
+            max_concurrent_jobs: LIVE_TRANSCRIPTION_DEFAULT_CONCURRENCY,
+            stale_job_ms: LIVE_TRANSCRIPTION_DEFAULT_STALE_JOB_MS,
+            scheduler: Arc::new(Semaphore::new(LIVE_TRANSCRIPTION_DEFAULT_CONCURRENCY)),
             per_user: HashMap::new(),
             last_error: None,
         }
@@ -1564,8 +1780,12 @@ struct LiveTranscriptionUserRuntime {
     queued_jobs: usize,
     dropped_jobs: u64,
     dropped_frames: u64,
+    stale_jobs: u64,
+    stale_frames: u64,
     completed_segments: u64,
     last_contexts: Vec<AudioTarget>,
+    #[cfg_attr(not(feature = "transcription-whisper"), allow(dead_code))]
+    last_transcript_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1594,8 +1814,15 @@ struct LiveTranscriptionStatusResponse {
     available: bool,
     engine: TranscriptionEngineMode,
     acceleration: WhisperAccelerationStatus,
+    mode: LiveTranscriptionMode,
+    max_concurrent_jobs: usize,
+    active_jobs: usize,
+    stale_job_ms: u64,
     model: Option<String>,
     model_dir: String,
+    language: String,
+    model_quality: String,
+    model_recommendation: Option<String>,
     models: Vec<WhisperModelInfo>,
     command: Option<String>,
     started_at_ms: Option<u64>,
@@ -1603,6 +1830,8 @@ struct LiveTranscriptionStatusResponse {
     queued_jobs: usize,
     dropped_jobs: u64,
     dropped_frames: u64,
+    stale_jobs: u64,
+    stale_frames: u64,
     completed_segments: u64,
     last_error: Option<String>,
 }
@@ -1613,6 +1842,8 @@ struct LiveTranscriptionUserStatus {
     queued_jobs: usize,
     dropped_jobs: u64,
     dropped_frames: u64,
+    stale_jobs: u64,
+    stale_frames: u64,
     completed_segments: u64,
     active_chunk: bool,
     worker_running: bool,
@@ -1623,6 +1854,12 @@ struct LiveTranscriptionUserStatus {
 struct StartLiveTranscriptionRequest {
     #[serde(default)]
     users: Option<Vec<UserId>>,
+    #[serde(default)]
+    mode: Option<LiveTranscriptionMode>,
+    #[serde(default)]
+    max_concurrent_jobs: Option<usize>,
+    #[serde(default)]
+    stale_job_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2003,6 +2240,7 @@ pub struct ServerRuntimeConfig {
     pub whisper_model: Option<PathBuf>,
     pub whisper_model_dir: PathBuf,
     pub deepfilternet_model_dir: PathBuf,
+    pub deepfilternet_coreml_model_dir: PathBuf,
     pub transcription_engine: TranscriptionEngineMode,
 }
 
@@ -2023,6 +2261,7 @@ impl Default for ServerRuntimeConfig {
             whisper_model: None,
             whisper_model_dir: PathBuf::from("intercom-models"),
             deepfilternet_model_dir: PathBuf::from("deepfilternet-models"),
+            deepfilternet_coreml_model_dir: PathBuf::from(DEFAULT_DEEPFILTERNET_COREML_MODEL_DIR),
             transcription_engine: TranscriptionEngineMode::Disabled,
         }
     }
@@ -2041,6 +2280,7 @@ impl ServerRuntimeConfig {
             whisper_model: self.whisper_model.clone(),
             whisper_model_dir: self.whisper_model_dir.clone(),
             deepfilternet_model_dir: self.deepfilternet_model_dir.clone(),
+            deepfilternet_coreml_model_dir: self.deepfilternet_coreml_model_dir.clone(),
             transcription_engine: self.transcription_engine,
         }
     }
@@ -2058,6 +2298,7 @@ pub struct RunOptions {
     pub whisper_model: Option<PathBuf>,
     pub whisper_model_dir: PathBuf,
     pub deepfilternet_model_dir: PathBuf,
+    pub deepfilternet_coreml_model_dir: PathBuf,
     pub transcription_engine: TranscriptionEngineMode,
 }
 
@@ -2235,6 +2476,15 @@ async fn start_runtime_from_bound(
     } else {
         options.deepfilternet_model_dir
     };
+    let deepfilternet_coreml_model_dir = if options
+        .deepfilternet_coreml_model_dir
+        .as_os_str()
+        .is_empty()
+    {
+        PathBuf::from(DEFAULT_DEEPFILTERNET_COREML_MODEL_DIR)
+    } else {
+        options.deepfilternet_coreml_model_dir
+    };
     let state =
         Arc::new(ServerState::load(options.admin_state_file, options.enrollment_policy).await?);
     if let Some(debug_audio_dir) = options.debug_audio_dir {
@@ -2255,6 +2505,7 @@ async fn start_runtime_from_bound(
         transcription.whisper_model_dir = whisper_model_dir;
     }
     *state.deepfilternet_model_dir.write().await = deepfilternet_model_dir;
+    *state.deepfilternet_coreml_model_dir.write().await = deepfilternet_coreml_model_dir;
     let receiver_state = Arc::clone(&state);
     let mixer_state = Arc::clone(&state);
     let control_state = Arc::clone(&state);
@@ -2670,6 +2921,18 @@ fn admin_router(state: Arc<ServerState>, auth: HttpAuthConfig) -> Router {
             "/admin/api/processing/deepfilternet/models",
             get(admin_deepfilternet_models_handler),
         )
+        .route(
+            "/admin/api/models/catalog",
+            get(admin_model_catalog_handler),
+        )
+        .route(
+            "/admin/api/models/download",
+            post(admin_model_download_handler),
+        )
+        .route(
+            "/admin/api/models/downloads",
+            get(admin_model_downloads_handler),
+        )
         .route("/admin/api/transcripts", get(admin_transcripts_handler))
         .route("/admin/api/transcripts", post(admin_add_transcript_handler))
         .layer(middleware::from_fn_with_state(auth, require_http_auth))
@@ -2718,6 +2981,37 @@ async fn admin_logo_png() -> impl IntoResponse {
 
 async fn admin_state_handler(State(state): State<Arc<ServerState>>) -> Json<AdminStateResponse> {
     Json(admin_state_snapshot(&state).await)
+}
+
+async fn admin_model_catalog_handler(
+    State(state): State<Arc<ServerState>>,
+) -> Json<ModelCatalogResponse> {
+    Json(model_catalog_snapshot(&state).await)
+}
+
+async fn admin_model_download_handler(
+    State(state): State<Arc<ServerState>>,
+    Json(body): Json<ModelDownloadRequest>,
+) -> Result<Json<ModelDownloadStatus>, AdminApiError> {
+    Ok(Json(start_model_download(state, body).await?))
+}
+
+async fn admin_model_downloads_handler(
+    State(state): State<Arc<ServerState>>,
+) -> Json<Vec<ModelDownloadStatus>> {
+    let mut downloads = state
+        .model_downloads
+        .read()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    downloads.sort_by(|a, b| {
+        b.started_at_ms
+            .cmp(&a.started_at_ms)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Json(downloads)
 }
 
 async fn put_client_handler(
@@ -2944,6 +3238,9 @@ async fn update_device_enrollment(
                 last_seen_ms: now,
                 hardware_fingerprint: None,
                 warnings: Vec::new(),
+                supported_codecs: default_supported_codecs(),
+                advertised_buttons: Vec::new(),
+                capabilities: ClientCapabilities::default(),
             };
             admin_state.devices.push(device.clone());
             device
@@ -3249,6 +3546,7 @@ async fn admin_state_snapshot(state: &ServerState) -> AdminStateResponse {
     let recording = recording_status_snapshot(state).await;
     let transcription = live_transcription_status_snapshot(state).await;
     let deepfilternet = deepfilternet_status_snapshot(state).await;
+    let models = model_catalog_snapshot(state).await;
 
     AdminStateResponse {
         build: common::current_build_info(),
@@ -3258,6 +3556,7 @@ async fn admin_state_snapshot(state: &ServerState) -> AdminStateResponse {
         recording,
         transcription,
         deepfilternet,
+        models,
         channels: admin_state.channels,
         devices: admin_state.devices,
         clients: admin_state.clients,
@@ -3268,6 +3567,460 @@ async fn admin_state_snapshot(state: &ServerState) -> AdminStateResponse {
         emergency,
         warnings,
     }
+}
+
+async fn model_catalog_snapshot(state: &ServerState) -> ModelCatalogResponse {
+    let manifest = match load_model_catalog() {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            return ModelCatalogResponse {
+                error: Some(err.to_string()),
+                ..ModelCatalogResponse::default()
+            };
+        }
+    };
+    let downloads = state.model_downloads.read().await.clone();
+    let mut models = Vec::with_capacity(manifest.models.len());
+    for entry in &manifest.models {
+        let destination_path = model_destination_path(state, entry).await;
+        let installed_path = installed_model_path(state, entry).await;
+        let download = downloads.get(&entry.id);
+        let downloading = download.is_some_and(|download| {
+            matches!(
+                download.status,
+                ModelDownloadState::Queued | ModelDownloadState::Downloading
+            )
+        });
+        let failed =
+            download.is_some_and(|download| matches!(download.status, ModelDownloadState::Failed));
+        let installed = installed_path.is_some();
+        let status = if downloading {
+            ModelAssetStatus::Downloading
+        } else if installed {
+            ModelAssetStatus::Installed
+        } else if failed {
+            ModelAssetStatus::Failed
+        } else if !entry.available || entry.url.is_none() || entry.sha256.is_none() {
+            ModelAssetStatus::Unavailable
+        } else {
+            ModelAssetStatus::Missing
+        };
+        models.push(ModelCatalogItemResponse {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            category: entry.category.clone(),
+            runtime: entry.runtime.clone(),
+            filename: entry.filename.clone(),
+            url: entry.url.clone(),
+            size: entry.size.clone(),
+            size_bytes: entry.size_bytes,
+            sha256: entry.sha256.clone(),
+            license: entry.license.clone(),
+            destination_dir: entry.destination_dir.clone(),
+            destination_path: installed_path
+                .unwrap_or(destination_path)
+                .display()
+                .to_string(),
+            is_default: entry.is_default,
+            recommended: entry.recommended,
+            available: entry.available,
+            notes: entry.notes.clone(),
+            installed,
+            downloading,
+            status,
+            error: download.and_then(|download| download.error.clone()),
+        });
+    }
+
+    ModelCatalogResponse {
+        version: manifest.version,
+        categories: manifest.categories,
+        source_policy: manifest.source_policy,
+        models,
+        error: None,
+    }
+}
+
+async fn start_model_download(
+    state: Arc<ServerState>,
+    request: ModelDownloadRequest,
+) -> Result<ModelDownloadStatus, AdminApiError> {
+    let model_id = request.id.trim();
+    if model_id.is_empty() {
+        return Err(AdminApiError::BadRequest(
+            "model id is required".to_string(),
+        ));
+    }
+    let manifest = load_model_catalog()?;
+    let entry = manifest
+        .models
+        .into_iter()
+        .find(|entry| entry.id == model_id)
+        .ok_or_else(|| AdminApiError::BadRequest(format!("unknown model id `{model_id}`")))?;
+    if !entry.available {
+        return Err(AdminApiError::BadRequest(format!(
+            "model `{}` is not available for download yet",
+            entry.id
+        )));
+    }
+    let url = entry.url.clone().ok_or_else(|| {
+        AdminApiError::BadRequest(format!("model `{}` does not have a curated URL", entry.id))
+    })?;
+    entry.sha256.as_ref().ok_or_else(|| {
+        AdminApiError::BadRequest(format!("model `{}` does not have a checksum", entry.id))
+    })?;
+    validate_model_url(&url, &manifest.source_policy.allowed_host, &entry.filename)
+        .map_err(AdminApiError::BadRequest)?;
+
+    let destination = model_destination_path(&state, &entry).await;
+    let status = ModelDownloadStatus {
+        id: entry.id.clone(),
+        filename: entry.filename.clone(),
+        status: ModelDownloadState::Queued,
+        bytes_received: 0,
+        bytes_total: entry.size_bytes,
+        error: None,
+        started_at_ms: unix_time_ms(),
+        finished_at_ms: None,
+        destination_path: destination.display().to_string(),
+    };
+
+    {
+        let mut downloads = state.model_downloads.write().await;
+        if let Some(existing) = downloads.get(&entry.id) {
+            if matches!(
+                existing.status,
+                ModelDownloadState::Queued | ModelDownloadState::Downloading
+            ) {
+                return Err(AdminApiError::BadRequest(format!(
+                    "model `{}` is already downloading",
+                    entry.id
+                )));
+            }
+        }
+        downloads.insert(entry.id.clone(), status.clone());
+    }
+
+    tokio::spawn(download_model_task(Arc::clone(&state), entry, destination));
+    Ok(status)
+}
+
+fn load_model_catalog() -> anyhow::Result<ModelCatalogManifest> {
+    let manifest = serde_json::from_str::<ModelCatalogManifest>(MODEL_CATALOG_JSON)
+        .context("parse model catalog manifest")?;
+    validate_model_catalog(&manifest).map_err(|err| anyhow::anyhow!(err))?;
+    Ok(manifest)
+}
+
+fn validate_model_catalog(manifest: &ModelCatalogManifest) -> Result<(), String> {
+    if manifest.version == 0 {
+        return Err("model catalog version must be greater than zero".to_string());
+    }
+    if manifest.source_policy.custom_urls {
+        return Err("model catalog must not allow custom URLs".to_string());
+    }
+    if manifest.source_policy.allowed_host != "huggingface.co" {
+        return Err("model catalog host allowlist must be huggingface.co".to_string());
+    }
+    let allowed_categories = manifest.categories.iter().cloned().collect::<HashSet<_>>();
+    if allowed_categories.is_empty() {
+        return Err("model catalog categories must not be empty".to_string());
+    }
+    let mut ids = HashSet::new();
+    let mut destinations = HashSet::new();
+    for entry in &manifest.models {
+        if entry.id.trim().is_empty() {
+            return Err("model id must not be empty".to_string());
+        }
+        if !ids.insert(entry.id.clone()) {
+            return Err(format!("duplicate model id `{}`", entry.id));
+        }
+        if !allowed_categories.contains(&entry.category) {
+            return Err(format!(
+                "model `{}` uses unknown category `{}`",
+                entry.id, entry.category
+            ));
+        }
+        validate_model_filename(&entry.filename)
+            .map_err(|err| format!("model `{}`: {err}", entry.id))?;
+        validate_model_destination_dir(&entry.destination_dir)
+            .map_err(|err| format!("model `{}`: {err}", entry.id))?;
+        if !destinations.insert((entry.destination_dir.clone(), entry.filename.clone())) {
+            return Err(format!(
+                "duplicate model destination `{}/{}`",
+                entry.destination_dir, entry.filename
+            ));
+        }
+        match (&entry.url, &entry.sha256, entry.available) {
+            (Some(url), Some(sha256), true) => {
+                validate_model_url(url, &manifest.source_policy.allowed_host, &entry.filename)
+                    .map_err(|err| format!("model `{}`: {err}", entry.id))?;
+                if !is_lower_hex(sha256, 64) {
+                    return Err(format!(
+                        "model `{}` sha256 must be 64 lowercase hex characters",
+                        entry.id
+                    ));
+                }
+            }
+            (None, None, false) => {}
+            (None, _, true) => {
+                return Err(format!("model `{}` is available but has no URL", entry.id));
+            }
+            (_, None, true) => {
+                return Err(format!(
+                    "model `{}` is available but has no sha256",
+                    entry.id
+                ));
+            }
+            (Some(url), None, false) => {
+                validate_model_url(url, &manifest.source_policy.allowed_host, &entry.filename)
+                    .map_err(|err| format!("model `{}`: {err}", entry.id))?;
+            }
+            (Some(url), Some(sha256), false) => {
+                validate_model_url(url, &manifest.source_policy.allowed_host, &entry.filename)
+                    .map_err(|err| format!("model `{}`: {err}", entry.id))?;
+                if !is_lower_hex(sha256, 64) {
+                    return Err(format!(
+                        "model `{}` sha256 must be 64 lowercase hex characters",
+                        entry.id
+                    ));
+                }
+            }
+            (None, Some(_), false) => {
+                return Err(format!("model `{}` has a checksum but no URL", entry.id));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_model_filename(filename: &str) -> Result<(), String> {
+    if filename.is_empty()
+        || filename.starts_with('.')
+        || filename.contains('/')
+        || filename.contains('\\')
+        || Path::new(filename).components().count() != 1
+    {
+        return Err(format!("unsafe filename `{filename}`"));
+    }
+    Ok(())
+}
+
+fn validate_model_destination_dir(destination_dir: &str) -> Result<(), String> {
+    let path = Path::new(destination_dir);
+    if destination_dir.is_empty() || path.is_absolute() {
+        return Err(format!("unsafe destination_dir `{destination_dir}`"));
+    }
+    for component in path.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(format!("unsafe destination_dir `{destination_dir}`"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_model_url(url: &str, allowed_host: &str, filename: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|err| format!("invalid URL: {err}"))?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some(allowed_host) {
+        return Err(format!("URL must use https://{allowed_host}"));
+    }
+    if !parsed.path().ends_with(filename) {
+        return Err("URL path must end with the model filename".to_string());
+    }
+    Ok(())
+}
+
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+async fn model_destination_path(state: &ServerState, entry: &ModelCatalogEntry) -> PathBuf {
+    model_destination_dir(state, entry)
+        .await
+        .join(&entry.filename)
+}
+
+async fn model_destination_dir(state: &ServerState, entry: &ModelCatalogEntry) -> PathBuf {
+    match entry.category.as_str() {
+        "transcription" => state.transcription.read().await.whisper_model_dir.clone(),
+        "deepfilternet_onnx" => state.deepfilternet_model_dir.read().await.clone(),
+        "deepfilternet_coreml" => state.deepfilternet_coreml_model_dir.read().await.clone(),
+        _ => PathBuf::from(&entry.destination_dir),
+    }
+}
+
+async fn installed_model_path(state: &ServerState, entry: &ModelCatalogEntry) -> Option<PathBuf> {
+    let path = model_destination_path(state, entry).await;
+    if tokio::fs::metadata(&path).await.is_ok() {
+        return Some(path);
+    }
+    if entry.category == "deepfilternet_coreml" {
+        for candidate in coreml_package_install_candidates(&path) {
+            if tokio::fs::metadata(&candidate).await.is_ok()
+                && is_valid_deepfilternet_coreml_package(&candidate).await
+            {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn coreml_package_install_candidates(archive_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(file_name) = archive_path.file_name().and_then(|name| name.to_str()) {
+        for suffix in [".tar.gz", ".tgz", ".zip"] {
+            if let Some(stem) = file_name.strip_suffix(suffix) {
+                candidates.push(archive_path.with_file_name(stem));
+            }
+        }
+    }
+    candidates
+}
+
+async fn is_valid_deepfilternet_coreml_package(path: &Path) -> bool {
+    let required = [
+        "config.ini",
+        "enc.mlmodelc",
+        "erb_dec.mlmodelc",
+        "df_dec.mlmodelc",
+        "metadata.json",
+    ];
+    for item in required {
+        if tokio::fs::metadata(path.join(item)).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+async fn download_model_task(
+    state: Arc<ServerState>,
+    entry: ModelCatalogEntry,
+    destination: PathBuf,
+) {
+    update_model_download_status(&state, &entry.id, |status| {
+        status.status = ModelDownloadState::Downloading;
+    })
+    .await;
+    let result = download_model_file(&state, &entry, &destination).await;
+    match result {
+        Ok(()) => {
+            update_model_download_status(&state, &entry.id, |status| {
+                status.status = ModelDownloadState::Installed;
+                status.bytes_received = status.bytes_total.unwrap_or(status.bytes_received);
+                status.error = None;
+                status.finished_at_ms = Some(unix_time_ms());
+            })
+            .await;
+        }
+        Err(err) => {
+            let temp_path = destination.with_file_name(format!(".{}.download", entry.filename));
+            let _ = tokio::fs::remove_file(temp_path).await;
+            update_model_download_status(&state, &entry.id, |status| {
+                status.status = ModelDownloadState::Failed;
+                status.error = Some(err.to_string());
+                status.finished_at_ms = Some(unix_time_ms());
+            })
+            .await;
+        }
+    }
+}
+
+async fn update_model_download_status(
+    state: &ServerState,
+    model_id: &str,
+    update: impl FnOnce(&mut ModelDownloadStatus),
+) {
+    let mut downloads = state.model_downloads.write().await;
+    if let Some(status) = downloads.get_mut(model_id) {
+        update(status);
+    }
+}
+
+async fn download_model_file(
+    state: &ServerState,
+    entry: &ModelCatalogEntry,
+    destination: &Path,
+) -> anyhow::Result<()> {
+    let url = entry
+        .url
+        .as_deref()
+        .context("model catalog entry has no URL")?;
+    let expected_sha256 = entry
+        .sha256
+        .as_deref()
+        .context("model catalog entry has no sha256")?;
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("model destination has no parent directory")?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .with_context(|| format!("create model directory {}", parent.display()))?;
+    let temp_path = destination.with_file_name(format!(".{}.download", entry.filename));
+    let mut file = tokio::fs::File::create(&temp_path)
+        .await
+        .with_context(|| format!("create temp model file {}", temp_path.display()))?;
+
+    let response = reqwest::Client::new()
+        .get(url)
+        .header(reqwest::header::USER_AGENT, MODEL_DOWNLOAD_USER_AGENT)
+        .send()
+        .await
+        .with_context(|| format!("download model {}", entry.id))?
+        .error_for_status()
+        .with_context(|| format!("download model {}", entry.id))?;
+    let bytes_total = response.content_length().or(entry.size_bytes);
+    update_model_download_status(state, &entry.id, |status| {
+        status.bytes_total = bytes_total;
+    })
+    .await;
+
+    let mut stream = response.bytes_stream();
+    let mut hasher = Sha256::new();
+    let mut bytes_received = 0_u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("stream model {}", entry.id))?;
+        hasher.update(&chunk);
+        bytes_received = bytes_received.saturating_add(chunk.len() as u64);
+        file.write_all(&chunk)
+            .await
+            .with_context(|| format!("write temp model file {}", temp_path.display()))?;
+        update_model_download_status(state, &entry.id, |status| {
+            status.bytes_received = bytes_received;
+        })
+        .await;
+    }
+    file.flush()
+        .await
+        .with_context(|| format!("flush temp model file {}", temp_path.display()))?;
+    drop(file);
+
+    let actual_sha256 = format!("{:x}", hasher.finalize());
+    if actual_sha256 != expected_sha256 {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        bail!(
+            "checksum mismatch for {}: expected {}, got {}",
+            entry.filename,
+            expected_sha256,
+            actual_sha256
+        );
+    }
+
+    tokio::fs::rename(&temp_path, destination)
+        .await
+        .with_context(|| {
+            format!(
+                "install model {} to {}",
+                entry.filename,
+                destination.display()
+            )
+        })?;
+    Ok(())
 }
 
 fn admin_warnings(
@@ -4040,6 +4793,7 @@ async fn clear_audio_endpoint_if_matches(
         return false;
     }
     session.addr = None;
+    session.audio_last_seen = None;
     true
 }
 
@@ -4051,6 +4805,7 @@ async fn apply_control(state: &ServerState, control: ControlMessage) -> ControlR
             client_uid,
             codecs,
             buttons,
+            capabilities,
             role,
         } => {
             let requested_user_id = requested_user_id.or((user_id > 0).then_some(user_id));
@@ -4071,13 +4826,18 @@ async fn apply_control(state: &ServerState, control: ControlMessage) -> ControlR
             let user_id = enrollment.user_id;
             let desired = desired_client(state, user_id).await;
             let preconfigured = enrollment.preconfigured || desired.is_some();
+            let supported_codecs = normalize_supported_codecs(codecs);
+            let advertised_buttons = normalize_button_capabilities(buttons);
+            let capabilities = normalize_client_capabilities(capabilities);
+            let persisted_supported_codecs = sorted_codecs(&supported_codecs);
             let mut sessions = state.sessions.write().await;
             let session = sessions.entry(user_id).or_insert_with(Session::new);
             session.client_uid = enrollment.client_uid.clone();
             session.enrollment = enrollment.status;
             session.role = role;
-            session.supported_codecs = normalize_supported_codecs(codecs);
-            session.advertised_buttons = normalize_button_capabilities(buttons);
+            session.supported_codecs = supported_codecs;
+            session.advertised_buttons = advertised_buttons.clone();
+            session.capabilities = capabilities.clone();
             if let Some(desired) = desired.as_ref() {
                 apply_desired_to_session_fields(desired, session);
             } else {
@@ -4093,6 +4853,18 @@ async fn apply_control(state: &ServerState, control: ControlMessage) -> ControlR
                 codecs = ?session.supported_codecs,
                 "registered control client"
             );
+            drop(sessions);
+            if let Err(message) = persist_client_advertisement(
+                state,
+                &enrollment.client_uid,
+                persisted_supported_codecs,
+                advertised_buttons,
+                capabilities,
+            )
+            .await
+            {
+                tracing::warn!(%message, "could not persist client advertisement");
+            }
             ControlResponse::Hello {
                 preconfigured,
                 user_id,
@@ -4478,6 +5250,9 @@ async fn apply_desired_client(
                     last_seen_ms: now,
                     hardware_fingerprint: None,
                     warnings: Vec::new(),
+                    supported_codecs: default_supported_codecs(),
+                    advertised_buttons: Vec::new(),
+                    capabilities: ClientCapabilities::default(),
                 });
             }
             normalize_device_enrollments(&mut admin_state.devices);
@@ -5100,6 +5875,7 @@ async fn resolve_alert_recipients(
     sender: UserId,
     target: AlertTarget,
 ) -> Vec<UserId> {
+    let now = Instant::now();
     let sessions = state.sessions.read().await;
     let control_clients = state.control_clients.read().await;
     let mut recipients = match target {
@@ -5109,7 +5885,7 @@ async fn resolve_alert_recipients(
                 && (control_clients.contains_key(&user_id)
                     || sessions
                         .get(&user_id)
-                        .is_some_and(|session| session.addr.is_some()))
+                        .is_some_and(|session| session_audio_addr(session, now).is_some()))
             {
                 vec![user_id]
             } else {
@@ -5121,7 +5897,8 @@ async fn resolve_alert_recipients(
             .filter_map(|(&user_id, session)| {
                 if user_id != sender
                     && session.listen_channels.contains(&channel_id)
-                    && (control_clients.contains_key(&user_id) || session.addr.is_some())
+                    && (control_clients.contains_key(&user_id)
+                        || session_audio_addr(session, now).is_some())
                 {
                     Some(user_id)
                 } else {
@@ -5656,6 +6433,18 @@ fn normalize_button_capabilities(mut buttons: Vec<ButtonCapability>) -> Vec<Butt
     buttons
 }
 
+fn normalize_client_capabilities(mut capabilities: ClientCapabilities) -> ClientCapabilities {
+    let mut seen = HashSet::new();
+    capabilities.button_action_types = capabilities
+        .button_action_types
+        .into_iter()
+        .map(|action| action.trim().to_ascii_lowercase())
+        .filter(|action| !action.is_empty())
+        .filter(|action| seen.insert(action.clone()))
+        .collect();
+    capabilities
+}
+
 fn compare_button_ids(left: &str, right: &str) -> std::cmp::Ordering {
     match (left.parse::<u16>(), right.parse::<u16>()) {
         (Ok(left), Ok(right)) => left.cmp(&right),
@@ -5926,6 +6715,12 @@ fn normalize_device_enrollments(devices: &mut Vec<DeviceEnrollment>) {
         device.name = device.name.trim().to_string();
         device.warnings.sort();
         device.warnings.dedup();
+        let supported = normalize_supported_codecs(std::mem::take(&mut device.supported_codecs));
+        device.supported_codecs = sorted_codecs(&supported);
+        device.advertised_buttons =
+            normalize_button_capabilities(std::mem::take(&mut device.advertised_buttons));
+        device.capabilities =
+            normalize_client_capabilities(std::mem::take(&mut device.capabilities));
     }
     devices.sort_by_key(|device| (device.user_id, device.client_uid.clone()));
     devices.dedup_by(|left, right| left.client_uid == right.client_uid);
@@ -6023,6 +6818,9 @@ async fn resolve_client_enrollment(
             last_seen_ms: now,
             hardware_fingerprint: None,
             warnings: Vec::new(),
+            supported_codecs: default_supported_codecs(),
+            advertised_buttons: Vec::new(),
+            capabilities: ClientCapabilities::default(),
         });
         normalize_device_enrollments(&mut admin_state.devices);
         let snapshot = admin_state.clone();
@@ -6060,6 +6858,9 @@ async fn resolve_client_enrollment(
                 last_seen_ms: now,
                 hardware_fingerprint: None,
                 warnings: Vec::new(),
+                supported_codecs: default_supported_codecs(),
+                advertised_buttons: Vec::new(),
+                capabilities: ClientCapabilities::default(),
             });
             normalize_device_enrollments(&mut admin_state.devices);
             let snapshot = admin_state.clone();
@@ -6111,6 +6912,9 @@ async fn resolve_client_enrollment(
         last_seen_ms: now,
         hardware_fingerprint: None,
         warnings,
+        supported_codecs: default_supported_codecs(),
+        advertised_buttons: Vec::new(),
+        capabilities: ClientCapabilities::default(),
     });
     normalize_device_enrollments(&mut admin_state.devices);
     let snapshot = admin_state.clone();
@@ -6125,6 +6929,35 @@ async fn resolve_client_enrollment(
         status,
         preconfigured: false,
     })
+}
+
+async fn persist_client_advertisement(
+    state: &ServerState,
+    client_uid: &str,
+    supported_codecs: Vec<Codec>,
+    advertised_buttons: Vec<ButtonCapability>,
+    capabilities: ClientCapabilities,
+) -> Result<(), String> {
+    let mut admin_state = state.admin_state.write().await;
+    let Some(device) = admin_state
+        .devices
+        .iter_mut()
+        .find(|device| device.client_uid == client_uid)
+    else {
+        return Ok(());
+    };
+
+    device.supported_codecs = supported_codecs;
+    device.advertised_buttons = advertised_buttons;
+    if capabilities.advertised || !device.capabilities.advertised {
+        device.capabilities = capabilities;
+    }
+    normalize_device_enrollments(&mut admin_state.devices);
+    let snapshot = admin_state.clone();
+    drop(admin_state);
+    save_admin_state(state, &snapshot)
+        .await
+        .map_err(|err| format!("save admin state: {err}"))
 }
 
 async fn save_admin_state(
@@ -6185,7 +7018,8 @@ async fn codec_available_for_user(
         return Ok(());
     };
 
-    let live = session.addr.is_some() || state.control_clients.read().await.contains_key(&user_id);
+    let live = session_audio_addr(session, Instant::now()).is_some()
+        || state.control_clients.read().await.contains_key(&user_id);
     if !live {
         return Ok(());
     }
@@ -6235,6 +7069,17 @@ fn stereo_status_for_session(session: &Session) -> StereoStatus {
         }
     } else {
         StereoStatus::default()
+    }
+}
+
+fn session_audio_addr(session: &Session, now: Instant) -> Option<SocketAddr> {
+    let addr = session.addr?;
+    match session.audio_last_seen {
+        Some(last_seen) if now.saturating_duration_since(last_seen) <= AUDIO_ENDPOINT_TIMEOUT => {
+            Some(addr)
+        }
+        Some(_) => None,
+        None => Some(addr),
     }
 }
 
@@ -6334,6 +7179,7 @@ async fn recording_status_snapshot(state: &ServerState) -> RecordingStatusRespon
         )
     };
     let models = list_whisper_models_from_paths(&whisper_model_dir, whisper_model.as_deref()).await;
+    let (model_quality, model_recommendation) = whisper_model_quality(whisper_model.as_deref());
     let engine = TranscriptionEngineStatus {
         available: transcription_engine_available_parts(
             engine_mode,
@@ -6350,6 +7196,8 @@ async fn recording_status_snapshot(state: &ServerState) -> RecordingStatusRespon
             .as_ref()
             .map(|path| path.display().to_string()),
         model_dir: Some(whisper_model_dir.display().to_string()),
+        model_quality,
+        model_recommendation,
         models,
         last_error: last_error.or_else(|| recording.last_engine_error.clone()),
     };
@@ -6432,10 +7280,60 @@ fn whisper_acceleration_backend() -> &'static str {
     }
 }
 
+fn whisper_model_quality(model: Option<&Path>) -> (String, Option<String>) {
+    let Some(model) = model else {
+        return (
+            "missing".to_string(),
+            Some(
+                "Install the recommended Distil-Whisper large-v3 GGML model for reliable transcription"
+                    .to_string(),
+            ),
+        );
+    };
+    let name = model
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name.contains("distil") && name.contains("large-v3") {
+        return ("accuracy_first".to_string(), None);
+    }
+    if name.contains("large-v3-turbo") {
+        return ("accuracy_first".to_string(), None);
+    }
+    if name.contains("tiny") || name.contains("base") || name.contains("small") {
+        return (
+            "low_accuracy".to_string(),
+            Some(
+                "Tiny/base/small Whisper models are fast but often inaccurate for intercom audio; use Distil-Whisper large-v3 GGML for reliable mode"
+                    .to_string(),
+            ),
+        );
+    }
+    (
+        "unknown".to_string(),
+        Some("Reliable mode is tuned for Distil-Whisper large-v3 GGML and large-v3-turbo Q5/Q8 fallback models".to_string()),
+    )
+}
+
 async fn live_transcription_status_snapshot(
     state: &ServerState,
 ) -> LiveTranscriptionStatusResponse {
-    let (active, available, engine, model, model_dir, command, started_at_ms, last_error, users) = {
+    let (
+        active,
+        available,
+        engine,
+        mode,
+        max_concurrent_jobs,
+        active_jobs,
+        stale_job_ms,
+        model,
+        model_dir,
+        command,
+        started_at_ms,
+        last_error,
+        users,
+    ) = {
         let transcription = state.transcription.read().await;
         let mut users = transcription
             .per_user
@@ -6445,6 +7343,8 @@ async fn live_transcription_status_snapshot(
                 queued_jobs: runtime.pending.len(),
                 dropped_jobs: runtime.dropped_jobs,
                 dropped_frames: runtime.dropped_frames,
+                stale_jobs: runtime.stale_jobs,
+                stale_frames: runtime.stale_frames,
                 completed_segments: runtime.completed_segments,
                 active_chunk: !runtime.chunker.buffer.is_empty(),
                 worker_running: runtime.worker_running,
@@ -6452,10 +7352,17 @@ async fn live_transcription_status_snapshot(
             })
             .collect::<Vec<_>>();
         users.sort_by_key(|status| status.user_id);
+        let active_jobs = transcription
+            .max_concurrent_jobs
+            .saturating_sub(transcription.scheduler.available_permits());
         (
             transcription.active,
             transcription_engine_available(&transcription),
             transcription.engine_mode,
+            transcription.mode,
+            transcription.max_concurrent_jobs,
+            active_jobs,
+            transcription.stale_job_ms,
             transcription.whisper_model.clone(),
             transcription.whisper_model_dir.clone(),
             transcription.whisper_command.clone(),
@@ -6465,9 +7372,12 @@ async fn live_transcription_status_snapshot(
         )
     };
     let models = list_whisper_models_from_paths(&model_dir, model.as_deref()).await;
+    let (model_quality, model_recommendation) = whisper_model_quality(model.as_deref());
     let queued_jobs = users.iter().map(|user| user.queued_jobs).sum();
     let dropped_jobs = users.iter().map(|user| user.dropped_jobs).sum();
     let dropped_frames = users.iter().map(|user| user.dropped_frames).sum();
+    let stale_jobs = users.iter().map(|user| user.stale_jobs).sum();
+    let stale_frames = users.iter().map(|user| user.stale_frames).sum();
     let completed_segments = users.iter().map(|user| user.completed_segments).sum();
 
     LiveTranscriptionStatusResponse {
@@ -6475,8 +7385,15 @@ async fn live_transcription_status_snapshot(
         available,
         engine,
         acceleration: whisper_acceleration_status(),
+        mode,
+        max_concurrent_jobs,
+        active_jobs,
+        stale_job_ms,
         model: model.as_ref().map(|path| path.display().to_string()),
         model_dir: model_dir.display().to_string(),
+        language: "en".to_string(),
+        model_quality,
+        model_recommendation,
         models,
         command: command.as_ref().map(|path| path.display().to_string()),
         started_at_ms,
@@ -6484,6 +7401,8 @@ async fn live_transcription_status_snapshot(
         queued_jobs,
         dropped_jobs,
         dropped_frames,
+        stale_jobs,
+        stale_frames,
         completed_segments,
         last_error,
     }
@@ -6504,11 +7423,13 @@ async fn deepfilternet_status_snapshot(state: &ServerState) -> DeepFilterNetStat
     let model_dir = state.deepfilternet_model_dir.read().await.clone();
     let models = list_deepfilternet_models_from_dir(&model_dir).await;
     let backend_available = processing_engine_available(ProcessingEngine::DeepFilterNet);
+    let coreml_runtime_available = deepfilternet_coreml_runtime_available();
     let no_models = models.is_empty();
     DeepFilterNetStatusResponse {
         backend_available,
         supported_backends: deepfilternet_supported_backend_names(),
         preferred_backend: deepfilternet_auto_backend().to_string(),
+        coreml_runtime_available,
         apple_compute_units: apple_compute_unit_names(),
         model_dir: model_dir.display().to_string(),
         models,
@@ -6518,6 +7439,8 @@ async fn deepfilternet_status_snapshot(state: &ServerState) -> DeepFilterNetStat
             ))
         } else if no_models {
             Some("No compatible DeepFilterNet ONNX .tar.gz models found".to_string())
+        } else if !coreml_runtime_available {
+            Some("DeepFilterNet Core ML acceleration is not available in this build; coreml requests use the Tract fallback".to_string())
         } else {
             None
         },
@@ -6543,6 +7466,10 @@ fn apple_compute_unit_names() -> Vec<String> {
 
 fn deepfilternet_auto_backend() -> &'static str {
     "tract"
+}
+
+fn deepfilternet_coreml_runtime_available() -> bool {
+    false
 }
 
 async fn list_deepfilternet_models_from_dir(model_dir: &Path) -> Vec<DeepFilterNetModelInfo> {
@@ -6664,6 +7591,20 @@ async fn start_live_transcription(
 ) -> Result<(), AdminApiError> {
     ensure_live_transcription_engine(state).await?;
     let mut transcription = state.transcription.write().await;
+    if let Some(mode) = request.mode {
+        transcription.mode = mode;
+        transcription.stale_job_ms = mode.config().stale_job_ms;
+    }
+    if let Some(stale_job_ms) = request.stale_job_ms {
+        transcription.stale_job_ms = stale_job_ms.clamp(5_000, 300_000);
+    }
+    if let Some(max_concurrent_jobs) = request.max_concurrent_jobs {
+        let max_concurrent_jobs = max_concurrent_jobs.clamp(1, LIVE_TRANSCRIPTION_MAX_CONCURRENCY);
+        if transcription.max_concurrent_jobs != max_concurrent_jobs {
+            transcription.max_concurrent_jobs = max_concurrent_jobs;
+            transcription.scheduler = Arc::new(Semaphore::new(max_concurrent_jobs));
+        }
+    }
     transcription.active = true;
     transcription.started_at_ms = Some(unix_time_ms());
     transcription.users = request
@@ -6680,13 +7621,15 @@ async fn stop_live_transcription(state: &Arc<ServerState>) -> Result<(), AdminAp
         transcription.active = false;
         transcription.started_at_ms = None;
         transcription.users = None;
+        let mode_config = transcription.mode.config();
         for (&user_id, runtime) in &mut transcription.per_user {
-            if let Some(job) = runtime.chunker.flush(user_id) {
+            if let Some(job) = runtime.chunker.flush(user_id, mode_config) {
                 if runtime.pending.len() >= LIVE_TRANSCRIPTION_QUEUE_LIMIT {
                     runtime.dropped_jobs += 1;
                     runtime.dropped_frames += frames_in_live_job(&job) as u64;
                 } else {
                     runtime.pending.push_back(job);
+                    runtime.queued_jobs = runtime.pending.len();
                     if !runtime.worker_running {
                         runtime.worker_running = true;
                         jobs_to_spawn.push(user_id);
@@ -7065,7 +8008,13 @@ async fn run_builtin_recording_transcription(
             contexts: Vec::new(),
             samples_16khz,
         };
-        if let Some(completed) = transcribe_live_job_with_builtin(Arc::clone(&context), job).await?
+        if let Some(completed) = transcribe_live_job_with_builtin(
+            Arc::clone(&context),
+            job,
+            LiveTranscriptionMode::Reliable,
+            None,
+        )
+        .await?
         {
             append_transcript_segment(
                 &state,
@@ -7196,7 +8145,7 @@ async fn status_snapshot(state: &ServerState) -> (Vec<SessionStatus>, StatusMetr
                 client_uid: session.client_uid.clone(),
                 enrollment: session.enrollment,
                 role: session.role,
-                addr: session.addr.map(|addr| addr.to_string()),
+                addr: session_audio_addr(session, now).map(|addr| addr.to_string()),
                 listen,
                 tx,
                 talker_vol: session.talker_volumes.clone(),
@@ -7204,6 +8153,7 @@ async fn status_snapshot(state: &ServerState) -> (Vec<SessionStatus>, StatusMetr
                 opus_profile: session.opus_profile,
                 supported_codecs: sorted_codecs(&session.supported_codecs),
                 advertised_buttons: session.advertised_buttons.clone(),
+                capabilities: session.capabilities.clone(),
                 buttons: sorted_buttons(&session.buttons),
                 active_buttons,
                 active_direct_calls,
@@ -7296,7 +8246,7 @@ async fn channel_rosters_for_user(
                     Some(ChannelPresenceMember {
                         user_id: member_id,
                         name: session.name.clone(),
-                        present: session.addr.is_some(),
+                        present: session_audio_addr(session, now).is_some(),
                         transmitting: active
                             && session
                                 .active_tx_targets()
@@ -7390,10 +8340,12 @@ async fn register_audio_endpoint(
     addr: SocketAddr,
 ) -> Option<DesiredClientConfig> {
     let desired = desired_client(state, user_id).await;
+    let now = Instant::now();
     let mut sessions = state.sessions.write().await;
     let session = sessions.entry(user_id).or_insert_with(Session::new);
     let was_new_addr = session.addr != Some(addr);
     session.addr = Some(addr);
+    session.audio_last_seen = Some(now);
     if codec_supported(codec) {
         session.supported_codecs.insert(codec);
     }
@@ -7402,7 +8354,7 @@ async fn register_audio_endpoint(
     } else {
         session.output_codec = codec;
     }
-    session.last_seen = Instant::now();
+    session.last_seen = now;
 
     if was_new_addr {
         tracing::info!(user_id, %addr, "registered audio endpoint");
@@ -7677,9 +8629,17 @@ async fn transcribe_ingest_frame(
             return;
         }
 
+        let mode = transcription.mode;
+        let mode_config = mode.config();
+        let stale_job_ms = transcription.stale_job_ms;
         let runtime = transcription.per_user.entry(user_id).or_default();
-        if let Some(job) = runtime.chunker.push_frame(user_id, target, samples) {
+        drop_stale_live_transcription_jobs(runtime, stale_job_ms, unix_time_ms());
+        if let Some(job) = runtime
+            .chunker
+            .push_frame(user_id, target, samples, mode_config)
+        {
             runtime.last_contexts = job.contexts.clone();
+            drop_stale_live_transcription_jobs(runtime, stale_job_ms, unix_time_ms());
             if runtime.pending.len() >= LIVE_TRANSCRIPTION_QUEUE_LIMIT {
                 runtime.dropped_jobs += 1;
                 runtime.dropped_frames += frames_in_live_job(&job) as u64;
@@ -7814,6 +8774,7 @@ impl LiveTranscriptChunker {
         user_id: UserId,
         target: AudioTarget,
         samples: &[i16],
+        mode: LiveTranscriptionModeConfig,
     ) -> Option<LiveTranscriptJob> {
         let samples_16khz = resample_linear(samples, MIX_SAMPLE_RATE, common::SAMPLE_RATE);
         let meter = measure_i16(&samples_16khz);
@@ -7847,25 +8808,34 @@ impl LiveTranscriptChunker {
             return None;
         }
 
-        let end_for_silence = self.silence_frames >= LIVE_TRANSCRIPTION_SILENCE_FRAMES;
-        let end_for_length = self.total_frames >= LIVE_TRANSCRIPTION_MAX_FRAMES;
+        let end_for_silence = self.silence_frames >= mode.silence_frames;
+        let end_for_length = self.total_frames >= mode.max_frames;
         if end_for_silence || end_for_length {
-            return self.finalize(user_id, end_for_length);
+            return self.finalize(user_id, end_for_length, mode);
         }
 
         None
     }
 
-    fn flush(&mut self, user_id: UserId) -> Option<LiveTranscriptJob> {
+    fn flush(
+        &mut self,
+        user_id: UserId,
+        mode: LiveTranscriptionModeConfig,
+    ) -> Option<LiveTranscriptJob> {
         if self.voiced_frames == 0 {
             self.clear();
             return None;
         }
-        self.finalize(user_id, false)
+        self.finalize(user_id, false, mode)
     }
 
-    fn finalize(&mut self, user_id: UserId, keep_overlap: bool) -> Option<LiveTranscriptJob> {
-        if self.voiced_frames < LIVE_TRANSCRIPTION_MIN_SPEECH_FRAMES {
+    fn finalize(
+        &mut self,
+        user_id: UserId,
+        keep_overlap: bool,
+        mode: LiveTranscriptionModeConfig,
+    ) -> Option<LiveTranscriptJob> {
+        if self.voiced_frames < mode.min_speech_frames {
             self.clear();
             return None;
         }
@@ -7882,18 +8852,18 @@ impl LiveTranscriptChunker {
         };
 
         if keep_overlap {
-            let overlap_samples = LIVE_TRANSCRIPTION_OVERLAP_FRAMES * common::SAMPLES_PER_FRAME;
+            let overlap_samples = mode.overlap_frames * common::SAMPLES_PER_FRAME;
             let keep = overlap_samples.min(self.buffer.len());
             let overlap = self.buffer[self.buffer.len().saturating_sub(keep)..].to_vec();
             let contexts = self.contexts.clone();
             self.buffer = overlap;
             self.contexts = contexts;
-            self.started_at_ms = Some(ended_at_ms.saturating_sub(
-                (LIVE_TRANSCRIPTION_OVERLAP_FRAMES as u64) * common::FRAME_MS as u64,
-            ));
-            self.voiced_frames = LIVE_TRANSCRIPTION_OVERLAP_FRAMES.min(self.total_frames);
+            self.started_at_ms = Some(
+                ended_at_ms.saturating_sub((mode.overlap_frames as u64) * common::FRAME_MS as u64),
+            );
+            self.voiced_frames = mode.overlap_frames.min(self.total_frames);
             self.silence_frames = 0;
-            self.total_frames = LIVE_TRANSCRIPTION_OVERLAP_FRAMES.min(self.total_frames);
+            self.total_frames = mode.overlap_frames.min(self.total_frames);
         } else {
             self.clear();
         }
@@ -7915,31 +8885,92 @@ fn frames_in_live_job(job: &LiveTranscriptJob) -> usize {
     job.samples_16khz.len() / common::SAMPLES_PER_FRAME
 }
 
+fn live_transcription_job_is_stale(
+    job: &LiveTranscriptJob,
+    stale_job_ms: u64,
+    now_ms: u64,
+) -> bool {
+    now_ms.saturating_sub(job.ended_at_ms) > stale_job_ms
+}
+
+fn drop_stale_live_transcription_jobs(
+    runtime: &mut LiveTranscriptionUserRuntime,
+    stale_job_ms: u64,
+    now_ms: u64,
+) {
+    let mut kept = VecDeque::with_capacity(runtime.pending.len());
+    while let Some(job) = runtime.pending.pop_front() {
+        if live_transcription_job_is_stale(&job, stale_job_ms, now_ms) {
+            runtime.stale_jobs += 1;
+            runtime.stale_frames += frames_in_live_job(&job) as u64;
+        } else {
+            kept.push_back(job);
+        }
+    }
+    runtime.pending = kept;
+    runtime.queued_jobs = runtime.pending.len();
+}
+
+#[cfg_attr(not(feature = "transcription-whisper"), allow(dead_code))]
+fn pop_next_live_transcription_job(
+    runtime: &mut LiveTranscriptionUserRuntime,
+    stale_job_ms: u64,
+    now_ms: u64,
+) -> Option<LiveTranscriptJob> {
+    while let Some(job) = runtime.pending.pop_front() {
+        if live_transcription_job_is_stale(&job, stale_job_ms, now_ms) {
+            runtime.stale_jobs += 1;
+            runtime.stale_frames += frames_in_live_job(&job) as u64;
+            continue;
+        }
+        runtime.queued_jobs = runtime.pending.len();
+        return Some(job);
+    }
+    runtime.queued_jobs = 0;
+    None
+}
+
 #[cfg(feature = "transcription-whisper")]
 async fn run_live_transcription_worker(state: Arc<ServerState>, user_id: UserId) {
     loop {
-        let (job, context) = {
+        let (job, context, scheduler, stale_job_ms, mode, prompt) = {
             let mut transcription = state.transcription.write().await;
             let context = transcription.whisper_context.clone();
+            let stale_job_ms = transcription.stale_job_ms;
+            let mode = transcription.mode;
+            let scheduler = Arc::clone(&transcription.scheduler);
             let Some(runtime) = transcription.per_user.get_mut(&user_id) else {
                 return;
             };
-            let Some(job) = runtime.pending.pop_front() else {
+            let prompt = runtime.last_transcript_text.clone();
+            let Some(job) = pop_next_live_transcription_job(runtime, stale_job_ms, unix_time_ms())
+            else {
                 runtime.worker_running = false;
-                runtime.queued_jobs = 0;
                 return;
             };
-            runtime.queued_jobs = runtime.pending.len();
             let Some(context) = context else {
                 runtime.worker_running = false;
                 return;
             };
-            (job, context)
+            (job, context, scheduler, stale_job_ms, mode, prompt)
         };
 
-        let result = transcribe_live_job_with_builtin(context, job.clone()).await;
+        let Ok(_permit) = scheduler.acquire_owned().await else {
+            return;
+        };
+        if live_transcription_job_is_stale(&job, stale_job_ms, unix_time_ms()) {
+            let mut transcription = state.transcription.write().await;
+            if let Some(runtime) = transcription.per_user.get_mut(&user_id) {
+                runtime.stale_jobs += 1;
+                runtime.stale_frames += frames_in_live_job(&job) as u64;
+            }
+            continue;
+        }
+
+        let result = transcribe_live_job_with_builtin(context, job.clone(), mode, prompt).await;
         match result {
             Ok(Some(completed)) => {
+                let prompt_text = limited_transcript_prompt(&completed.text);
                 if let Err(err) = append_transcript_segment(
                     &state,
                     TranscriptAppend {
@@ -7961,6 +8992,7 @@ async fn run_live_transcription_worker(state: Arc<ServerState>, user_id: UserId)
                     state.transcription.write().await.per_user.get_mut(&user_id)
                 {
                     runtime.completed_segments += 1;
+                    runtime.last_transcript_text = Some(prompt_text);
                 }
             }
             Ok(None) => {}
@@ -8020,9 +9052,15 @@ fn transcribe_live_job_with_engine(
 async fn transcribe_live_job_with_builtin(
     context: Arc<WhisperContext>,
     job: LiveTranscriptJob,
+    mode: LiveTranscriptionMode,
+    prompt: Option<String>,
 ) -> anyhow::Result<Option<CompletedLiveTranscript>> {
     tokio::task::spawn_blocking(move || {
-        let mut engine = BuiltinWhisperEngine { context };
+        let mut engine = BuiltinWhisperEngine {
+            context,
+            mode,
+            initial_prompt: prompt,
+        };
         transcribe_live_job_with_engine(&mut engine, job)
     })
     .await
@@ -8032,6 +9070,8 @@ async fn transcribe_live_job_with_builtin(
 #[cfg(feature = "transcription-whisper")]
 struct BuiltinWhisperEngine {
     context: Arc<WhisperContext>,
+    mode: LiveTranscriptionMode,
+    initial_prompt: Option<String>,
 }
 
 #[cfg(feature = "transcription-whisper")]
@@ -8044,13 +9084,24 @@ impl LiveTranscriptionEngine for BuiltinWhisperEngine {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_language(Some("en"));
         params.set_translate(false);
-        params.set_no_context(true);
-        params.set_single_segment(true);
+        let reliable = matches!(self.mode, LiveTranscriptionMode::Reliable);
+        params.set_no_context(!reliable);
+        params.set_single_segment(!reliable);
+        if reliable {
+            if let Some(prompt) = self
+                .initial_prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|prompt| !prompt.is_empty())
+            {
+                params.set_initial_prompt(prompt);
+            }
+        }
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        params.set_n_threads(2);
+        params.set_n_threads(if reliable { 4 } else { 2 });
         let audio = samples_16khz
             .iter()
             .map(|sample| *sample as f32 / i16::MAX as f32)
@@ -8064,6 +9115,13 @@ impl LiveTranscriptionEngine for BuiltinWhisperEngine {
             .trim()
             .to_string())
     }
+}
+
+#[cfg(feature = "transcription-whisper")]
+fn limited_transcript_prompt(text: &str) -> String {
+    let mut words = text.split_whitespace().rev().take(80).collect::<Vec<_>>();
+    words.reverse();
+    words.join(" ")
 }
 
 async fn record_output_health(
@@ -8360,7 +9418,7 @@ async fn build_mixes(state: &ServerState) -> Vec<MixOutput> {
     sessions
         .iter_mut()
         .filter_map(|(&listener_id, listener)| {
-            let addr = listener.addr?;
+            let addr = session_audio_addr(listener, now)?;
             let active_priority_channels = source_frames
                 .iter()
                 .filter_map(|source| {
@@ -10765,6 +11823,11 @@ mod tests {
             .is_some_and(|message| message.contains("Tract fallback")));
     }
 
+    #[test]
+    fn deepfilternet_coreml_runtime_is_not_advertised_without_backend() {
+        assert!(!deepfilternet_coreml_runtime_available());
+    }
+
     #[tokio::test]
     async fn channel_roster_marks_present_and_transmitting_members() {
         let state = ServerState::default();
@@ -10837,6 +11900,46 @@ mod tests {
 
         assert_eq!(state.metrics.snapshot().audio_send_errors, 1);
         assert_eq!(state.sessions.read().await.get(&1).unwrap().addr, None);
+    }
+
+    #[tokio::test]
+    async fn stale_audio_endpoint_is_hidden_from_status_and_mixes() {
+        let state = ServerState::default();
+        let stale_addr = "127.0.0.1:50010".parse().unwrap();
+        let mut listener = Session::new();
+        listener.addr = Some(stale_addr);
+        listener.audio_last_seen = Some(
+            Instant::now()
+                .checked_sub(AUDIO_ENDPOINT_TIMEOUT + Duration::from_secs(1))
+                .unwrap(),
+        );
+        listener.listen_channels = [CHANNEL_PROGRAM].into();
+        let mut talker = Session::new();
+        talker.tx_channels = [CHANNEL_PROGRAM].into();
+        {
+            let mut sessions = state.sessions.write().await;
+            sessions.insert(1, listener);
+            sessions.insert(2, talker);
+        }
+
+        let (statuses, _) = status_snapshot(&state).await;
+        assert_eq!(
+            statuses
+                .iter()
+                .find(|status| status.user_id == 1)
+                .unwrap()
+                .addr,
+            None
+        );
+
+        store_source_frame(
+            &state,
+            2,
+            AudioTarget::Channel(CHANNEL_PROGRAM),
+            vec![i16::MAX / 4; MIX_SAMPLES_PER_FRAME],
+        )
+        .await;
+        assert!(build_mixes(&state).await.is_empty());
     }
 
     #[test]
@@ -11424,7 +12527,10 @@ mod tests {
         assert!(ADMIN_JS.contains("function updateRecordingPage()"));
         assert!(ADMIN_JS.contains("recordingModelTouched"));
         assert!(ADMIN_JS.contains("function renderSystemPage()"));
-        assert!(ADMIN_JS.contains("if (!modalRoot().innerHTML) refresh()"));
+        assert!(ADMIN_JS.contains("clients-layout"));
+        assert!(ADMIN_JS.contains("Audio Pipeline"));
+        assert!(ADMIN_JS.contains("Advanced Client Features"));
+        assert!(ADMIN_JS.contains("!clientEditorDirty"));
         assert!(ADMIN_JS.contains("data-editor-vol"));
         assert!(ADMIN_JS.contains("data-ifb-program"));
         assert!(ADMIN_JS.contains("data-button-tx-users"));
@@ -12280,6 +13386,7 @@ mod tests {
             opus_profile: OpusProfile::default(),
             supported_codecs: vec![Codec::Pcm16],
             advertised_buttons: Vec::new(),
+            capabilities: ClientCapabilities::default(),
             buttons: Vec::new(),
             active_buttons: Vec::new(),
             active_direct_calls: Vec::new(),
@@ -12639,6 +13746,9 @@ mod tests {
                     last_seen_ms: 1,
                     hardware_fingerprint: None,
                     warnings: Vec::new(),
+                    supported_codecs: default_supported_codecs(),
+                    advertised_buttons: Vec::new(),
+                    capabilities: ClientCapabilities::default(),
                 }],
                 ..PersistedAdminState::default()
             },
@@ -12741,6 +13851,7 @@ mod tests {
                 client_uid: "approved-device".to_string(),
                 codecs: vec![Codec::Pcm16],
                 buttons: Vec::new(),
+                capabilities: ClientCapabilities::default(),
                 role: ClientRole::Client,
             },
         )
@@ -12767,6 +13878,7 @@ mod tests {
                 client_uid: "approved-device".to_string(),
                 codecs: vec![Codec::Pcm16],
                 buttons: Vec::new(),
+                capabilities: ClientCapabilities::default(),
                 role: ClientRole::Client,
             },
         )
@@ -12781,6 +13893,49 @@ mod tests {
             }
         ));
         assert!(audio_user_is_enrolled(&state, 12).await);
+    }
+
+    #[tokio::test]
+    async fn hello_capabilities_persist_to_admin_state() {
+        let state = ServerState::new_with_admin_state(
+            PersistedAdminState::default(),
+            None,
+            EnrollmentPolicy::Auto,
+        );
+        let capabilities = ClientCapabilities::mobile();
+        let response = apply_control(
+            &state,
+            ControlMessage::Hello {
+                user_id: 21,
+                requested_user_id: Some(21),
+                client_uid: "mobile-device".to_string(),
+                codecs: vec![Codec::Pcm16, Codec::Opus],
+                buttons: vec![ButtonCapability {
+                    id: "talk".to_string(),
+                    label: "Talk".to_string(),
+                }],
+                capabilities: capabilities.clone(),
+                role: ClientRole::Client,
+            },
+        )
+        .await;
+
+        assert!(matches!(
+            response,
+            ControlResponse::Hello {
+                enrollment: EnrollmentStatus::Enrolled,
+                ..
+            }
+        ));
+        let admin = state.admin_state.read().await;
+        let device = admin
+            .devices
+            .iter()
+            .find(|device| device.client_uid == "mobile-device")
+            .unwrap();
+        assert_eq!(device.supported_codecs, vec![Codec::Pcm16, Codec::Opus]);
+        assert_eq!(device.advertised_buttons[0].id, "talk");
+        assert_eq!(device.capabilities, capabilities);
     }
 
     #[tokio::test]
@@ -12916,10 +14071,11 @@ mod tests {
     #[test]
     fn live_transcription_chunker_ignores_silence_and_finalizes_after_speech() {
         let mut chunker = LiveTranscriptChunker::default();
+        let mode = LiveTranscriptionMode::Balanced.config();
         let silence = vec![0; MIX_SAMPLES_PER_FRAME];
         for _ in 0..100 {
             assert!(chunker
-                .push_frame(1, AudioTarget::Channel(7), &silence)
+                .push_frame(1, AudioTarget::Channel(7), &silence, mode)
                 .is_none());
         }
         assert!(chunker.buffer.is_empty());
@@ -12927,12 +14083,12 @@ mod tests {
         let speech = vec![12_000; MIX_SAMPLES_PER_FRAME];
         for _ in 0..LIVE_TRANSCRIPTION_MIN_SPEECH_FRAMES {
             assert!(chunker
-                .push_frame(1, AudioTarget::Channel(7), &speech)
+                .push_frame(1, AudioTarget::Channel(7), &speech, mode)
                 .is_none());
         }
         let mut job = None;
         for _ in 0..LIVE_TRANSCRIPTION_SILENCE_FRAMES {
-            job = chunker.push_frame(1, AudioTarget::Channel(7), &silence);
+            job = chunker.push_frame(1, AudioTarget::Channel(7), &silence, mode);
             if job.is_some() {
                 break;
             }
@@ -12949,10 +14105,11 @@ mod tests {
     #[test]
     fn live_transcription_chunker_finalizes_long_speech_at_max_length() {
         let mut chunker = LiveTranscriptChunker::default();
+        let mode = LiveTranscriptionMode::Balanced.config();
         let speech = vec![12_000; MIX_SAMPLES_PER_FRAME];
         let mut job = None;
         for _ in 0..LIVE_TRANSCRIPTION_MAX_FRAMES {
-            job = chunker.push_frame(2, AudioTarget::Direct(3), &speech);
+            job = chunker.push_frame(2, AudioTarget::Direct(3), &speech, mode);
             if job.is_some() {
                 break;
             }
@@ -12964,6 +14121,39 @@ mod tests {
             !chunker.buffer.is_empty(),
             "long chunks keep overlap context"
         );
+    }
+
+    #[test]
+    fn live_transcription_modes_trade_latency_for_reliability() {
+        let fast = LiveTranscriptionMode::Fast.config();
+        let balanced = LiveTranscriptionMode::Balanced.config();
+        let reliable = LiveTranscriptionMode::Reliable.config();
+
+        assert!(fast.max_frames < balanced.max_frames);
+        assert!(fast.silence_frames < balanced.silence_frames);
+        assert!(reliable.max_frames > balanced.max_frames);
+        assert!(reliable.silence_frames > balanced.silence_frames);
+        assert!(reliable.stale_job_ms > balanced.stale_job_ms);
+    }
+
+    #[test]
+    fn stale_live_transcription_jobs_are_counted_and_removed() {
+        let mut runtime = LiveTranscriptionUserRuntime::default();
+        runtime.pending.push_back(LiveTranscriptJob {
+            user_id: 9,
+            started_at_ms: 1_000,
+            ended_at_ms: 2_000,
+            contexts: vec![AudioTarget::Channel(3)],
+            samples_16khz: vec![1; common::SAMPLES_PER_FRAME * 3],
+        });
+        runtime.queued_jobs = runtime.pending.len();
+
+        drop_stale_live_transcription_jobs(&mut runtime, 5_000, 20_000);
+
+        assert_eq!(runtime.pending.len(), 0);
+        assert_eq!(runtime.queued_jobs, 0);
+        assert_eq!(runtime.stale_jobs, 1);
+        assert_eq!(runtime.stale_frames, 3);
     }
 
     #[cfg(feature = "transcription-whisper")]
@@ -13093,6 +14283,112 @@ mod tests {
 
         assert!(err.to_string().contains("parse admin state file"));
         let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[test]
+    fn model_catalog_manifest_is_valid() {
+        let manifest = load_model_catalog().unwrap();
+
+        assert_eq!(manifest.version, 2);
+        assert!(manifest
+            .models
+            .iter()
+            .any(|model| model.category == "transcription" && model.recommended));
+        let transcription_defaults = manifest
+            .models
+            .iter()
+            .filter(|model| model.category == "transcription" && model.is_default)
+            .collect::<Vec<_>>();
+        assert_eq!(transcription_defaults.len(), 1);
+        assert_eq!(transcription_defaults[0].id, "distil-large-v3-ggml");
+        assert!(manifest
+            .models
+            .iter()
+            .any(|model| model.category == "deepfilternet_onnx"));
+    }
+
+    #[test]
+    fn model_catalog_validation_rejects_unsafe_entries() {
+        let mut duplicate = load_model_catalog().unwrap();
+        duplicate.models[1].id = duplicate.models[0].id.clone();
+        assert!(validate_model_catalog(&duplicate)
+            .unwrap_err()
+            .contains("duplicate model id"));
+
+        let mut unsafe_name = load_model_catalog().unwrap();
+        unsafe_name.models[0].filename = "../model.bin".to_string();
+        assert!(validate_model_catalog(&unsafe_name)
+            .unwrap_err()
+            .contains("unsafe filename"));
+
+        let mut arbitrary_host = load_model_catalog().unwrap();
+        arbitrary_host.models[0].url =
+            Some("https://example.com/ggml-large-v3-turbo.bin".to_string());
+        assert!(validate_model_catalog(&arbitrary_host)
+            .unwrap_err()
+            .contains("huggingface.co"));
+
+        let mut missing_checksum = load_model_catalog().unwrap();
+        missing_checksum.models[0].sha256 = None;
+        assert!(validate_model_catalog(&missing_checksum)
+            .unwrap_err()
+            .contains("sha256"));
+    }
+
+    #[tokio::test]
+    async fn coreml_package_detection_requires_expected_layout() {
+        let dir = temp_state_path("coreml-package");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("config.ini"), b"").await.unwrap();
+        tokio::fs::create_dir_all(dir.join("enc.mlmodelc"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(dir.join("erb_dec.mlmodelc"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(dir.join("df_dec.mlmodelc"))
+            .await
+            .unwrap();
+
+        assert!(!is_valid_deepfilternet_coreml_package(&dir).await);
+        tokio::fs::write(dir.join("metadata.json"), b"{}")
+            .await
+            .unwrap();
+        assert!(is_valid_deepfilternet_coreml_package(&dir).await);
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_model_download_is_rejected_before_network() {
+        let state = Arc::new(ServerState::default());
+        state.model_downloads.write().await.insert(
+            "whisper-large-v3-turbo-q5_0".to_string(),
+            ModelDownloadStatus {
+                id: "whisper-large-v3-turbo-q5_0".to_string(),
+                filename: "ggml-large-v3-turbo-q5_0.bin".to_string(),
+                status: ModelDownloadState::Downloading,
+                bytes_received: 0,
+                bytes_total: None,
+                error: None,
+                started_at_ms: unix_time_ms(),
+                finished_at_ms: None,
+                destination_path: "intercom-models/ggml-large-v3-turbo-q5_0.bin".to_string(),
+            },
+        );
+
+        let err = start_model_download(
+            state,
+            ModelDownloadRequest {
+                id: "whisper-large-v3-turbo-q5_0".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            AdminApiError::BadRequest(message) => assert!(message.contains("already downloading")),
+            AdminApiError::Internal(message) => panic!("{message}"),
+        }
     }
 
     fn temp_state_path(name: &str) -> PathBuf {

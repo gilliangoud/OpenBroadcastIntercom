@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,12 +82,42 @@ def update_cargo_version(version: str) -> None:
     path.write_text(updated)
 
 
+def update_cargo_lock() -> None:
+    subprocess.run(["cargo", "generate-lockfile"], cwd=ROOT, check=True)
+
+
 def update_tauri_config(path: Path, version: str) -> None:
     data = json.loads(path.read_text())
     data["version"] = version
     if path == ROOT / "clients/app/tauri.conf.json":
         data.setdefault("bundle", {}).setdefault("android", {})["versionCode"] = version_code(version)
     path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def workspace_package_versions() -> dict[str, str]:
+    result = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    metadata = json.loads(result.stdout)
+    member_ids = set(metadata["workspace_members"])
+    return {
+        package["name"]: package["version"]
+        for package in metadata["packages"]
+        if package["id"] in member_ids
+    }
+
+
+def cargo_lock_package_versions() -> dict[str, str]:
+    data = tomllib.loads((ROOT / "Cargo.lock").read_text())
+    return {
+        package["name"]: package["version"]
+        for package in data.get("package", [])
+        if "source" not in package
+    }
 
 
 def assert_versions_synced() -> None:
@@ -107,12 +138,18 @@ def assert_versions_synced() -> None:
             mismatches.append(
                 f"clients/app/tauri.conf.json android.versionCode={actual_code} expected={expected_code}"
             )
+    lock_versions = cargo_lock_package_versions()
+    for package, expected_version in workspace_package_versions().items():
+        actual_version = lock_versions.get(package)
+        if actual_version != expected_version:
+            mismatches.append(f"Cargo.lock {package}={actual_version} expected={expected_version}")
     if mismatches:
         raise RuntimeError("version sync failed:\n" + "\n".join(mismatches))
 
 
 def apply_version(version: str) -> None:
     update_cargo_version(version)
+    update_cargo_lock()
     for config in TAURI_CONFIGS:
         update_tauri_config(config, version)
     assert_versions_synced()

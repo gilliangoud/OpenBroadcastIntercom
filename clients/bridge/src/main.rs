@@ -14,9 +14,9 @@ use client_core::{
     DEFAULT_SERVER_HOST,
 };
 use common::{
-    codec_samples_per_frame, AudioPacket, BridgeStatus, ClientLockoutPolicy, ClientRole, Codec,
-    ControlMessage, ControlResponse, Esp32AudioConfig, IfbConfig, OpusProfile, ProcessingConfig,
-    StereoConfig, TalkMode, MIX_SAMPLES_PER_FRAME,
+    codec_samples_per_frame, AudioPacket, BridgeStatus, ClientCapabilities, ClientLockoutPolicy,
+    ClientRole, Codec, ControlMessage, ControlResponse, Esp32AudioConfig, IfbConfig, OpusProfile,
+    ProcessingConfig, StereoConfig, TalkMode, MIX_SAMPLES_PER_FRAME,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -179,6 +179,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         load_or_create_client_uid(args.client_uid.as_deref(), args.identity_file.as_deref())?;
     let codec = Codec::from(args.codec);
     let opus_profile = OpusProfile::from(args.opus_profile);
+    let capabilities = ClientCapabilities::bridge();
     let runtime_config = Arc::new(Mutex::new(ClientConfig {
         user_id,
         client_uid,
@@ -218,6 +219,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         active_alerts: Vec::new(),
         recent_alerts: Vec::new(),
         advertised_buttons: Vec::new(),
+        capabilities: capabilities.clone(),
         ifb: IfbConfig::default(),
         lockout: ClientLockoutPolicy::default(),
         stereo: StereoConfig {
@@ -245,6 +247,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             client_uid: initial.client_uid.clone(),
             codecs: supported_codecs(),
             buttons: Vec::new(),
+            capabilities,
             role: ClientRole::Bridge,
         },
     )
@@ -911,6 +914,7 @@ mod tests {
             active_alerts: Vec::new(),
             recent_alerts: Vec::new(),
             advertised_buttons: Vec::new(),
+            capabilities: ClientCapabilities::default(),
             ifb: IfbConfig::default(),
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),

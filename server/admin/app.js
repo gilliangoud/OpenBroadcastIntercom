@@ -1,12 +1,16 @@
-let state = { sessions: [], clients: [], devices: [], channels: [], metrics: {}, warnings: [], deepfilternet: { models: [] } };
+let state = { sessions: [], clients: [], devices: [], channels: [], metrics: {}, warnings: [], deepfilternet: { models: [] }, models: { models: [] } };
 let selectedUser = null;
 let refreshTimer = null;
 let recordingModelTouched = false;
+let clientEditorDirty = false;
+let clientTypeDefaults = {};
+try { clientTypeDefaults = JSON.parse(window.localStorage.getItem('redline.clientTypeDefaults') || '{}'); } catch { clientTypeDefaults = {}; }
 
 const page = document.body.dataset.page || 'dashboard';
 const $ = (id) => document.getElementById(id);
 const root = () => $('page-root');
 const modalRoot = () => $('modal-root');
+const editorRoot = () => $('client-detail') || modalRoot();
 
 async function api(path, opts = {}) {
   const res = await fetch('/admin/api' + path, {
@@ -94,6 +98,55 @@ function clientEditorName(id, cfg, live) {
   const role = cfg.role || live.role || device.role || '';
   const name = String(cfg.name || live.name || device.name || '').trim();
   return name && name !== uid && name !== role ? name : '';
+}
+function persistClientTypeDefaults() {
+  window.localStorage.setItem('redline.clientTypeDefaults', JSON.stringify(clientTypeDefaults));
+}
+function defaultCapabilitiesForType(type) {
+  const actions = ['transmit', 'alert', 'apply_preset', 'set_talk_mode', 'route_edit'];
+  const base = {
+    advertised: false,
+    client_kind: type || 'unknown',
+    supports_processing: false,
+    supports_native_voice_processing: false,
+    supports_esp32_audio: false,
+    supports_stereo: false,
+    supports_ifb: false,
+    supports_local_api: false,
+    supports_device_selection: false,
+    button_action_types: actions,
+  };
+  if (type === 'desktop') return { ...base, supports_processing: true, supports_native_voice_processing: true, supports_stereo: true, supports_ifb: true, supports_local_api: true, supports_device_selection: true };
+  if (type === 'mobile') return { ...base, supports_native_voice_processing: true, supports_stereo: true, supports_ifb: true };
+  if (type === 'pi') return { ...base, supports_stereo: true, supports_ifb: true, supports_local_api: true, supports_device_selection: true };
+  if (type === 'esp32') return { ...base, supports_esp32_audio: true, button_action_types: actions };
+  if (type === 'bridge') return { ...base, supports_stereo: true, supports_device_selection: true, button_action_types: [] };
+  return { ...base, client_kind: 'desktop', supports_processing: true, supports_native_voice_processing: true, supports_stereo: true, supports_ifb: true, supports_local_api: true, supports_device_selection: true };
+}
+function fallbackClientType(userId, cfg = {}, live = {}, device = {}) {
+  const stored = clientTypeDefaults[userId];
+  if (stored) return stored;
+  if ((cfg.role || live.role || device.role) === 'bridge') return 'bridge';
+  const kind = live.capture?.runtime?.client_kind || live.capabilities?.client_kind || device.capabilities?.client_kind;
+  if (kind && kind !== 'unknown') return kind;
+  return 'desktop';
+}
+function capabilityContext(userId, cfg = {}, live = {}, device = {}) {
+  if (live.capabilities?.advertised) return { capabilities: live.capabilities, source: 'live advertisement', fallback: false };
+  if (device.capabilities?.advertised) return { capabilities: device.capabilities, source: 'last-known advertisement', fallback: false };
+  const type = fallbackClientType(userId, cfg, live, device);
+  return { capabilities: defaultCapabilitiesForType(type), source: `${type} default`, fallback: true };
+}
+function clientSupportedCodecs(userId, cfg = {}, live = {}, device = {}, capabilities = {}) {
+  const liveCodecs = live.supported_codecs || [];
+  if (liveCodecs.length) return liveCodecs;
+  const deviceCodecs = device.supported_codecs || [];
+  if (deviceCodecs.length) return deviceCodecs;
+  if ((capabilities.client_kind || '') === 'bridge') return ['pcm16', 'pcm24', 'pcm48', 'opus'];
+  return ['pcm16', 'pcm24', 'pcm48', 'opus'];
+}
+function clientAdvertisedButtons(live = {}, device = {}) {
+  return (live.advertised_buttons || []).length ? live.advertised_buttons : (device.advertised_buttons || []);
 }
 function channelLabel(id) {
   const ch = (state.channels || []).find((item) => item.id === Number(id));
@@ -184,6 +237,19 @@ function normalizationStatusText(status) {
   }
   return `bypassed: ${status.reason || 'inactive'} input ${input}% target ${target}%`;
 }
+function pipelineStatusHtml(live = {}) {
+  const rows = [];
+  const processing = live.processing_status || {};
+  if (processing.engine) rows.push(`<span>Active engine ${esc(processing.engine)}</span>`);
+  const stageText = processingStageText(processing);
+  if (stageText) rows.push(`<span>Stages ${esc(stageText)}</span>`);
+  const normalization = normalizationStatusText(processing.normalization);
+  if (normalization) rows.push(`<span>Leveler ${esc(normalization)}</span>`);
+  if (processing.engine_detail) rows.push(`<span>${esc(processing.engine_detail)}</span>`);
+  if (state.deepfilternet?.detail) rows.push(`<span>${esc(state.deepfilternet.detail)}</span>`);
+  if (!rows.length) rows.push('<span>No live processing status from this client yet.</span>');
+  return `<div class="pipeline-status wide">${rows.join('')}</div>`;
+}
 function deepFilterNetModelOptions(selected) {
   const models = state.deepfilternet?.models || [];
   const values = new Set(models.map((model) => model.path));
@@ -199,6 +265,10 @@ function deepFilterNetModelOptions(selected) {
     options.push(`<option value="" disabled>No models found in ${esc(state.deepfilternet?.model_dir || 'deepfilternet-models')}</option>`);
   }
   return options.join('');
+}
+function deepFilterNetBackendOptions() {
+  const coremlLabel = state.deepfilternet?.coreml_runtime_available ? 'Apple Core ML' : 'Apple Core ML (planned)';
+  return `<option value="auto">Auto</option><option value="tract">Tract CPU</option><option value="coreml">${esc(coremlLabel)}</option>`;
 }
 function defaultEsp32Audio() {
   return {
@@ -248,29 +318,34 @@ function audioLabel(item) {
   const codec = codecName(item.codec);
   return item.codec === 'opus' ? `${codec} ${opusProfileName(item.opus_profile)}` : codec;
 }
-function codecOptionsHtml(live = {}, cfg = {}) {
-  const supported = new Set(live.supported_codecs || []);
-  const canValidate = !!live.addr && supported.size > 0;
+function codecOptionsHtml(live = {}, cfg = {}, supportedCodecs = null) {
+  const supported = new Set(supportedCodecs || live.supported_codecs || []);
+  const canValidate = supported.size > 0;
   const current = cfg.codec || 'pcm16';
-  return [
+  const options = [
     ['pcm16', 'PCM Low CPU (16 kHz)'],
     ['pcm24', 'PCM Balanced (24 kHz)'],
     ['pcm48', 'PCM High Quality (48 kHz)'],
     ['opus', 'Opus'],
-  ].map(([value, label]) => {
+  ].filter(([value]) => !supported.size || supported.has(value));
+  if (current && !options.some(([value]) => value === current)) {
+    options.unshift([current, `${codecName(current)} (currently saved)`]);
+  }
+  return options.map(([value, label]) => {
     const unsupported = canValidate && !supported.has(value);
     const selected = current === value;
     const suffix = unsupported ? ' (unsupported by connected client)' : '';
-    return `<option value="${value}" ${selected ? 'selected' : ''} ${unsupported && !selected ? 'disabled' : ''}>${label}${suffix}</option>`;
+    return `<option value="${value}" ${selected ? 'selected' : ''} ${unsupported && !selected ? 'disabled' : ''} ${unsupported && selected ? 'hidden' : ''}>${label}${suffix}</option>`;
   }).join('');
 }
-function liveCodecNoteHtml(live = {}, cfg = {}) {
-  if (!live.addr || !(live.supported_codecs || []).length) return '';
-  const supported = new Set(live.supported_codecs || []);
+function liveCodecNoteHtml(live = {}, cfg = {}, supportedCodecs = null, source = 'client advertisement') {
+  const codecs = supportedCodecs || live.supported_codecs || [];
+  if (!codecs.length) return '';
+  const supported = new Set(codecs);
   if (!supported.has(cfg.codec || 'pcm16')) {
     return `<p class="muted wide">Desired codec ${esc(codecName(cfg.codec))} is not advertised by this connected client. The server will save it as desired state, but live audio falls back to ${esc(codecName(live.codec))} until the client supports it.</p>`;
   }
-  return `<p class="muted wide">Connected client supports: ${(live.supported_codecs || []).map(codecName).join(', ')}</p>`;
+  return `<p class="muted wide">Codecs from ${esc(source)}: ${codecs.map(codecName).join(', ')}</p>`;
 }
 function alertTargetLabel(target) { return !target ? '-' : `${target.kind} ${target.id || ''}`; }
 function directCallSummary(calls) {
@@ -327,7 +402,7 @@ function clientCards() {
     const output = s.output || {};
     const online = !!s.addr;
     const bridge = bridgeText(item);
-    return `<article class="client-card clickable" data-open-client="${id}" role="button" tabindex="0">
+    return `<article class="client-card clickable ${selectedUser === id ? 'active' : ''}" data-open-client="${id}" role="button" tabindex="0">
       <div class="client-card-head">
         <div class="client-title"><strong>${esc(clientLabel(id))}</strong><span>${esc(item.role || 'client')} · ${esc(audioLabel(item))}</span></div>
         <div class="client-badges">${online ? badge('online') : badge('offline', 'offline')}${item.stereo?.enabled ? badge(item.stereo_status?.active ? 'stereo' : 'stereo configured', item.stereo_status?.active ? '' : 'warn') : ''}</div>
@@ -466,20 +541,27 @@ function recordingSummary() {
   const live = state.transcription || {};
   const accel = live.acceleration?.active_backend || rec.engine?.acceleration?.active_backend || 'cpu';
   return `<div class="status-line">${rec.active ? badge('active') : badge('inactive', 'offline')}<span>Users ${csv(rec.recorded_users || []) || '-'}</span><span>Frames ${rec.frames_recorded || 0}</span><span>Transcripts ${rec.transcript_segments || 0}</span></div>
-    <div class="status-line">${live.active ? badge('live transcription') : badge('live off', 'offline')}<span>Engine ${esc(live.engine || rec.engine?.mode || 'disabled')}</span><span>Accel ${esc(accel)}</span><span>Queued ${live.queued_jobs || 0}</span><span>Dropped ${live.dropped_jobs || 0}</span></div>
-    <p class="muted">Whisper ${rec.engine?.available || live.available ? 'configured' : 'not configured'}${(live.last_error || rec.engine?.last_error) ? `: ${esc(live.last_error || rec.engine.last_error)}` : ''}</p>`;
+    <div class="status-line">${live.active ? badge('live transcription') : badge('live off', 'offline')}<span>Engine ${esc(live.engine || rec.engine?.mode || 'disabled')}</span><span>Mode ${esc(live.mode || 'balanced')}</span><span>Quality ${esc(live.model_quality || rec.engine?.model_quality || 'unknown')}</span><span>Accel ${esc(accel)}</span><span>Queued ${live.queued_jobs || 0}</span><span>Dropped ${live.dropped_jobs || 0}</span></div>
+    <p class="muted">Whisper ${rec.engine?.available || live.available ? 'configured' : 'not configured'}${(live.model_recommendation || rec.engine?.model_recommendation) ? `: ${esc(live.model_recommendation || rec.engine.model_recommendation)}` : ''}${(live.last_error || rec.engine?.last_error) ? `: ${esc(live.last_error || rec.engine.last_error)}` : ''}</p>`;
 }
 
 function renderClientsPage() {
   root().innerHTML = `
-    <section class="card">
-      <div class="card-head"><h2>Device Enrollment</h2><span class="muted">Policy: ${esc(state.enrollment_policy || 'auto')}</span></div>
-      <div class="table-wrap device-table"><table><thead><tr><th>UID</th><th>User</th><th>Status</th><th>Role</th><th>Last Seen</th><th>Warnings</th><th></th></tr></thead><tbody>${deviceRows() || '<tr><td colspan="7" class="muted">No enrolled or pending devices.</td></tr>'}</tbody></table></div>
-    </section>
-    <section class="card">
-      <div class="card-head"><h2>Clients</h2><button id="add-client" class="primary" type="button">Add Client</button></div>
-      ${clientCards()}
-    </section>`;
+    <div class="clients-page">
+      <section class="card clients-enrollment">
+        <div class="card-head"><h2>Device Enrollment</h2><span class="muted">Policy: ${esc(state.enrollment_policy || 'auto')}</span></div>
+        <div class="table-wrap device-table"><table><thead><tr><th>UID</th><th>User</th><th>Status</th><th>Role</th><th>Last Seen</th><th>Warnings</th><th></th></tr></thead><tbody>${deviceRows() || '<tr><td colspan="7" class="muted">No enrolled or pending devices.</td></tr>'}</tbody></table></div>
+      </section>
+      <div class="clients-layout">
+        <section class="card client-selection">
+          <div class="card-head"><h2>Clients</h2><button id="add-client" class="primary" type="button">Add Client</button></div>
+          ${clientCards()}
+        </section>
+        <section id="client-detail" class="card client-detail">
+          ${selectedUser ? clientDetailHtml(selectedUser) : '<div class="empty-panel"><h2>Select a client</h2><p class="muted">Choose a client or add a new one to edit setup, routing, and the server audio pipeline.</p></div>'}
+        </section>
+      </div>
+    </div>`;
   $('add-client').onclick = () => openClientEditor(nextUserId());
   root().querySelectorAll('[data-open-client]').forEach((row) => row.onclick = () => openClientEditor(Number(row.dataset.openClient)));
   root().querySelectorAll('[data-open-client]').forEach((row) => row.onkeydown = (event) => {
@@ -491,6 +573,7 @@ function renderClientsPage() {
   root().querySelectorAll('[data-approve-device]').forEach((button) => button.onclick = () => updateDevice(button.dataset.approveDevice, 'approve'));
   root().querySelectorAll('[data-reject-device]').forEach((button) => button.onclick = () => updateDevice(button.dataset.rejectDevice, 'reject'));
   root().querySelectorAll('[data-delete-device]').forEach((button) => button.onclick = () => deleteDevice(button.dataset.deleteDevice));
+  if (selectedUser) bindClientEditor(buildClientEditorConfig(selectedUser));
 }
 
 function deviceRows() {
@@ -737,6 +820,9 @@ function renderRecordingPage() {
         </form>
         <form id="live-transcription-form" class="form-grid">
           <label>Users<input id="live-transcription-users" type="text" placeholder="optional: 1,2"></label>
+          <label>Mode<select id="live-transcription-mode"><option value="fast">Fast</option><option value="balanced">Balanced</option><option value="reliable">Reliable</option></select></label>
+          <label>Max Jobs<input id="live-transcription-concurrency" type="number" min="1" max="16" step="1" value="2"></label>
+          <label>Stale Job ms<input id="live-transcription-stale-ms" type="number" min="5000" max="300000" step="1000" value="20000"></label>
           <div class="actions"><button id="live-transcription-start" type="button" class="primary">Start Live Transcription</button><button id="live-transcription-stop" type="button">Stop Live Transcription</button></div>
         </form>
         <div id="live-transcription-users-table"></div>
@@ -766,7 +852,15 @@ function renderRecordingPage() {
   };
   $('live-transcription-start').onclick = async () => {
     const users = parseCsv($('live-transcription-users').value);
-    await api('/transcription/live/start', { method: 'POST', body: JSON.stringify({ users: users.length ? users : null }) });
+    const concurrency = Number($('live-transcription-concurrency').value);
+    const staleJobMs = Number($('live-transcription-stale-ms').value);
+    const body = {
+      users: users.length ? users : null,
+      mode: $('live-transcription-mode').value || 'balanced',
+    };
+    if (Number.isFinite(concurrency) && concurrency > 0) body.max_concurrent_jobs = concurrency;
+    if (Number.isFinite(staleJobMs) && staleJobMs > 0) body.stale_job_ms = staleJobMs;
+    await api('/transcription/live/start', { method: 'POST', body: JSON.stringify(body) });
     await refresh();
   };
   $('live-transcription-stop').onclick = async () => { await api('/transcription/live/stop', { method: 'POST' }); await refresh(); };
@@ -778,12 +872,21 @@ function updateRecordingPage() {
   const rec = state.recording || {};
   $('recording-summary').innerHTML = recordingSummary();
   $('recording-sessions').innerHTML = recordingSessionsTable(rec.recent_sessions || []);
-  $('live-transcription-status').innerHTML = `<div class="status-line">${live.active ? badge('active') : badge('inactive', 'offline')}<span>Engine ${esc(live.engine || 'disabled')}</span><span>Accel ${esc(live.acceleration?.active_backend || 'cpu')}</span><span>Model ${live.model ? esc(live.model) : '-'}</span><span>Folder ${esc(live.model_dir || '-')}</span></div>`;
-  $('live-transcription-health').innerHTML = `<div class="status-line"><span>Queued ${live.queued_jobs || 0}</span><span>Dropped jobs ${live.dropped_jobs || 0}</span><span>Dropped frames ${live.dropped_frames || 0}</span><span>Segments ${live.completed_segments || 0}</span></div>`;
+  syncLiveTranscriptionControls(live);
+  $('live-transcription-status').innerHTML = `<div class="status-line">${live.active ? badge('active') : badge('inactive', 'offline')}<span>Engine ${esc(live.engine || 'disabled')}</span><span>Mode ${esc(live.mode || 'balanced')}</span><span>Language ${esc(live.language || 'en')}</span><span>Quality ${esc(live.model_quality || 'unknown')}</span><span>Jobs ${live.active_jobs || 0}/${live.max_concurrent_jobs || 0}</span><span>Accel ${esc(live.acceleration?.active_backend || 'cpu')}</span><span>Model ${live.model ? esc(live.model) : '-'}</span><span>Folder ${esc(live.model_dir || '-')}</span></div>${live.model_recommendation ? `<div class="warn-box">${esc(live.model_recommendation)}</div>` : ''}`;
+  $('live-transcription-health').innerHTML = `<div class="status-line"><span>Queued ${live.queued_jobs || 0}</span><span>Dropped jobs ${live.dropped_jobs || 0}</span><span>Dropped frames ${live.dropped_frames || 0}</span><span>Stale jobs ${live.stale_jobs || 0}</span><span>Stale frames ${live.stale_frames || 0}</span><span>Stale ms ${live.stale_job_ms || 0}</span><span>Segments ${live.completed_segments || 0}</span></div>`;
   $('live-transcription-error').innerHTML = live.last_error ? `<div class="error-box">${esc(live.last_error)}</div>` : '';
   updateModelSelect(live.models || []);
   $('live-transcription-users-table').innerHTML = liveUserTable(live.users || []);
   loadTranscripts().catch(console.warn);
+}
+function syncLiveTranscriptionControls(live) {
+  const mode = $('live-transcription-mode');
+  const concurrency = $('live-transcription-concurrency');
+  const stale = $('live-transcription-stale-ms');
+  if (mode && document.activeElement !== mode) mode.value = live.mode || 'balanced';
+  if (concurrency && document.activeElement !== concurrency) concurrency.value = live.max_concurrent_jobs || 2;
+  if (stale && document.activeElement !== stale) stale.value = live.stale_job_ms || 20000;
 }
 function recordingSessionsTable(sessions) {
   const rows = (sessions || []).slice(-8).reverse().map((session) => `<tr><td>${esc(session.id)}</td><td>${esc(csv(session.recorded_users || [])) || '-'}</td><td>${session.frames_recorded || 0}</td><td>${session.transcribe ? 'yes' : 'no'}</td><td>${esc(session.dir || '-')}</td></tr>`).join('');
@@ -804,8 +907,8 @@ function modelOptions(models) {
   return models.map((model) => `<option value="${esc(model.name)}" ${model.selected ? 'selected' : ''}>${esc(model.name)}${model.selected ? ' (selected)' : ''}</option>`).join('');
 }
 function liveUserTable(users) {
-  const rows = users.map((user) => `<tr><td>${esc(clientLabel(user.user_id))}</td><td>${user.worker_running ? badge('running') : '-'}</td><td>${user.active_chunk ? badge('speech', 'talk') : '-'}</td><td>${user.queued_jobs}</td><td>${user.dropped_jobs}</td><td>${user.dropped_frames}</td><td>${user.completed_segments}</td></tr>`).join('');
-  return `<div class="table-wrap"><table><thead><tr><th>User</th><th>Worker</th><th>Chunk</th><th>Queued</th><th>Dropped Jobs</th><th>Dropped Frames</th><th>Segments</th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="muted">No live transcription users yet.</td></tr>'}</tbody></table></div>`;
+  const rows = users.map((user) => `<tr><td>${esc(clientLabel(user.user_id))}</td><td>${user.worker_running ? badge('running') : '-'}</td><td>${user.active_chunk ? badge('speech', 'talk') : '-'}</td><td>${user.queued_jobs}</td><td>${user.dropped_jobs}</td><td>${user.dropped_frames}</td><td>${user.stale_jobs || 0}</td><td>${user.stale_frames || 0}</td><td>${user.completed_segments}</td></tr>`).join('');
+  return `<div class="table-wrap"><table><thead><tr><th>User</th><th>Worker</th><th>Chunk</th><th>Queued</th><th>Dropped Jobs</th><th>Dropped Frames</th><th>Stale Jobs</th><th>Stale Frames</th><th>Segments</th></tr></thead><tbody>${rows || '<tr><td colspan="9" class="muted">No live transcription users yet.</td></tr>'}</tbody></table></div>`;
 }
 async function loadTranscripts() {
   const params = new URLSearchParams();
@@ -833,10 +936,62 @@ function renderSystemPage() {
     <div class="grid two">
       <section class="card"><div class="card-head"><h2>Security</h2></div><div class="warn-box"><strong>No admin authentication is enforced unless configured.</strong> Anyone who can reach the admin bind address can control every client.</div></section>
       <section class="card"><div class="card-head"><h2>Transcription Engine</h2></div>${recordingSummary()}</section>
+      <section class="card wide"><div class="card-head"><h2>Model Assets</h2><button id="refresh-model-assets" type="button">Refresh</button></div>${modelAssetsHtml()}</section>
       <section class="card"><div class="card-head"><h2>Warnings</h2></div>${renderWarnings(100)}</section>
       <section class="card"><div class="card-head"><h2>Metrics</h2></div><pre>${esc(JSON.stringify(state.metrics || {}, null, 2))}</pre></section>
       <section class="card wide"><div class="card-head"><h2>Session Health</h2></div>${clientTable(['User','Role','Bridge','Address','Queue','Age ms','Input','Output','Health'], sessionHealthRows())}</section>
     </div>`;
+  bindModelAssetControls();
+}
+function modelAssetsHtml() {
+  const catalog = state.models || {};
+  if (catalog.error) return `<div class="error-box">${esc(catalog.error)}</div>`;
+  const models = catalog.models || [];
+  if (!models.length) return '<p class="muted">No model catalog entries are configured.</p>';
+  return `
+    <div class="model-assets">
+      ${modelAssetGroup('Transcription', models.filter((model) => model.category === 'transcription'))}
+      ${modelAssetGroup('Audio Cleanup', models.filter((model) => model.category === 'deepfilternet_onnx' || model.category === 'deepfilternet_coreml'))}
+    </div>`;
+}
+function modelAssetGroup(title, models) {
+  if (!models.length) return '';
+  return `<div class="model-group"><h3>${esc(title)}</h3><div class="model-list">${models.map(modelAssetRow).join('')}</div></div>`;
+}
+function modelAssetRow(model) {
+  const downloadable = model.available && !model.installed && !model.downloading && model.url && model.sha256;
+  const statusClass = model.status === 'installed' ? 'ok' : model.status === 'failed' ? 'danger' : model.status === 'downloading' ? 'talk' : 'offline';
+  const flags = [model.default ? 'default' : '', model.recommended ? 'recommended' : '', model.runtime].filter(Boolean).join(' | ');
+  return `
+    <div class="model-row">
+      <div class="model-main">
+        <strong>${esc(model.name)}</strong>
+        <span class="muted">${esc(flags)}${model.size ? ` | ${esc(model.size)}` : ''}</span>
+        <small title="${esc(model.destination_path || '')}">${esc(model.destination_path || model.filename)}</small>
+        ${model.notes ? `<small class="muted">${esc(model.notes)}</small>` : ''}
+        ${model.error ? `<small class="health-warn">${esc(model.error)}</small>` : ''}
+      </div>
+      <div class="model-actions">
+        ${badge(model.status || 'missing', statusClass)}
+        ${downloadable ? `<button type="button" data-download-model="${esc(model.id)}">Download</button>` : ''}
+      </div>
+    </div>`;
+}
+function bindModelAssetControls() {
+  const refreshButton = $('refresh-model-assets');
+  if (refreshButton) refreshButton.onclick = () => refresh().catch(showError);
+  root().querySelectorAll('[data-download-model]').forEach((button) => {
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        await api('/models/download', { method: 'POST', body: JSON.stringify({ id: button.dataset.downloadModel }) });
+        await refresh();
+      } catch (err) {
+        showError(err);
+        await refresh();
+      }
+    };
+  });
 }
 function sessionHealthRows() {
   return (state.sessions || []).map((s) => `<tr><td>${esc(clientLabel(s.user_id))}</td><td>${esc(s.role || 'client')}</td><td>${bridgeText(s)}</td><td>${esc(s.addr || '-')}</td><td>${s.queue_depth}</td><td>${s.age_ms}</td><td>${meter(s.input?.rms, '', s.input?.peak)}</td><td>${meter(s.output?.rms, 'out', s.output?.peak)}</td><td>${healthText(s)}</td></tr>`).join('');
@@ -932,8 +1087,7 @@ function bindPresetControls() {
   };
 }
 
-function openClientEditor(userId) {
-  selectedUser = userId;
+function buildClientEditorConfig(userId) {
   const live = session(userId) || {};
   const device = deviceByUser(userId) || {};
   const desiredCfg = desired(userId) || {};
@@ -946,27 +1100,41 @@ function openClientEditor(userId) {
     user_id: userId,
   };
   cfg.name = clientEditorName(userId, cfg, live);
+  return cfg;
+}
+function clientDetailHtml(userId) {
+  const live = session(userId) || {};
+  const device = deviceByUser(userId) || {};
+  const cfg = buildClientEditorConfig(userId);
   const deviceUid = cfg.client_uid || live.client_uid || device.client_uid || clientUidForUser(userId);
-  modalRoot().innerHTML = `<div class="modal" id="client-modal"><div class="modal-panel" role="dialog" aria-modal="true">
-    <div class="modal-head"><h2>Client Editor - ${esc(clientLabel(userId))}</h2><button id="close-client-modal" type="button">Close</button></div>
+  const capability = capabilityContext(userId, cfg, live, device);
+  const caps = capability.capabilities;
+  const supportedCodecs = clientSupportedCodecs(userId, cfg, live, device, caps);
+  const advertisedButtons = clientAdvertisedButtons(live, device);
+  const actionTypes = caps.button_action_types || [];
+  return `
+    <div class="client-detail-head"><div><h2>Client Setup - ${esc(clientLabel(userId))}</h2><p class="muted">Capabilities: ${esc(capability.source)}</p></div><button id="close-client-panel" type="button">Close</button></div>
     <form id="client-form" class="config-form">
-      <fieldset><legend>Identity</legend>
+      <fieldset><legend>Setup</legend>
         <label>User ID<input id="user-id" type="number" min="1" max="65535" value="${cfg.user_id}" required title="Unique numeric client ID."></label>
         <label>Stable Device UID<span class="readonly-value" title="${esc(deviceUid || 'No linked device UID')}">${esc(deviceUid || 'No linked device UID')}</span><input id="client-uid" type="hidden" value="${esc(deviceUid || '')}"></label>
         <label>Display Name<input id="client-name" type="text" value="${esc(cfg.name)}" placeholder="Optional" autocomplete="off"></label>
         <label>Role<select id="client-role"><option value="client">Client</option><option value="bridge">Bridge</option></select></label>
-      </fieldset>
-      <fieldset><legend>Audio</legend>
-        <label>Codec<select id="codec">${codecOptionsHtml(live, cfg)}</select></label>
-        <label id="opus-profile-field">Opus Profile<select id="opus-profile"><option value="speech_16_low">Speech 16 Low</option><option value="speech_24_standard">Speech 24 Standard</option><option value="speech_48_high">Speech 48 High</option><option value="music_48">Music 48</option></select></label>
-        ${liveCodecNoteHtml(live, cfg)}
+        ${capability.fallback ? `<label>Client Type<select id="client-type-default"><option value="desktop">Desktop</option><option value="mobile">Mobile</option><option value="pi">Pi</option><option value="esp32">ESP32</option><option value="bridge">Bridge</option></select></label>` : `<label>Client Type<span class="readonly-value">${esc(caps.client_kind || 'unknown')}</span></label>`}
+        <label>Codec<select id="codec">${codecOptionsHtml(live, cfg, supportedCodecs)}</select></label>
+        <label id="opus-profile-field">Quality<select id="opus-profile"><option value="speech_16_low">Speech 16 Low</option><option value="speech_24_standard">Speech 24 Standard</option><option value="speech_48_high">Speech 48 High</option><option value="music_48">Music 48</option></select></label>
+        ${liveCodecNoteHtml(live, cfg, supportedCodecs, capability.source)}
         <label>Talk Mode<select id="talk-mode"><option value="muted">Muted</option><option value="ptt">PTT</option><option value="open">Open</option></select></label>
         <label class="check"><input id="priority" type="checkbox"> Priority enabled</label>
       </fieldset>
-      <fieldset><legend>Processing</legend>
+      <fieldset class="wide"><legend>Routing & Buttons</legend>
+        ${editorRoutingHtml(cfg, { includeIfb: false })}
+        ${buttonSetupHtml(cfg, advertisedButtons, actionTypes)}
+      </fieldset>
+      <fieldset class="wide audio-pipeline-section"><legend>Audio Pipeline</legend>
         <label>Mode<select id="processing-mode"><option value="auto">Auto</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
         <label>Engine<select id="processing-engine"><option value="built_in">Built-in lightweight DSP</option><option value="webrtc">WebRTC APM</option><option value="rnnoise">RNNoise</option><option value="deepfilternet">DeepFilterNet</option></select></label>
-        <label>Pipeline Preset<select id="processing-pipeline"><option value="">Use selected engine only</option><option value="webrtc,built_in">WebRTC -> Built-in cleanup</option><option value="webrtc,rnnoise,built_in">WebRTC -> RNNoise -> Built-in cleanup</option><option value="rnnoise,built_in">RNNoise -> Built-in cleanup</option><option value="deepfilternet,built_in">DeepFilterNet -> Built-in cleanup</option></select></label>
+        <label>Ordered Server Stages<select id="processing-pipeline"><option value="">Use selected engine only</option><option value="webrtc,built_in">WebRTC -> Built-in cleanup</option><option value="webrtc,rnnoise,built_in">WebRTC -> RNNoise -> Built-in cleanup</option><option value="rnnoise,built_in">RNNoise -> Built-in cleanup</option><option value="deepfilternet,built_in">DeepFilterNet -> Built-in cleanup</option></select></label>
         <label>Profile<select id="processing-profile"><option value="raw">Raw</option><option value="voice">Voice</option><option value="voice_isolation">Voice Isolation</option><option value="broadcast">Broadcast</option></select></label>
         <label class="check"><input id="processing-high-pass" type="checkbox"> High-pass</label>
         <label class="check"><input id="processing-noise-gate" type="checkbox"> Noise gate</label>
@@ -974,7 +1142,6 @@ function openClientEditor(userId) {
         <label class="check"><input id="processing-transient" type="checkbox"> Transient suppression</label>
         <label class="check"><input id="processing-compressor" type="checkbox"> Compressor</label>
         <label class="check"><input id="processing-presence" type="checkbox"> Presence</label>
-        <label class="check"><input id="processing-native" type="checkbox"> Use native OS voice processing when available</label>
         <label class="check"><input id="processing-fallback" type="checkbox"> Use built-in fallback if selected engine is unavailable</label>
         <label class="check"><input id="normalization-enabled" type="checkbox"> Loudness normalization</label>
         <label>Target RMS<input id="normalization-target" type="number" min="0.02" max="0.4" step="0.01" title="Speech loudness target after cleanup, before mixing. 0.14 is a conservative intercom default."></label>
@@ -982,29 +1149,36 @@ function openClientEditor(userId) {
         <label>Max Attenuation<input id="normalization-max-attenuation" type="number" min="1" max="32" step="0.25" title="Maximum linear reduction applied to loud speech. 8 means the leveler may reduce to 1/8 gain."></label>
         <label>Adaptation ms<input id="normalization-adaptation-ms" type="number" min="20" max="5000" step="10" title="How quickly the leveler moves toward the target. Lower is faster but can pump."></label>
         <label>Noise Floor RMS<input id="normalization-noise-floor" type="number" min="0" max="0.2" step="0.001" title="Do not boost frames below this RMS, so silence and room noise stay quiet."></label>
-        <label id="deep-filter-backend-field">DeepFilterNet Backend<select id="processing-deep-filter-backend"><option value="auto">Auto</option><option value="tract">Tract CPU</option><option value="coreml">Apple Core ML</option></select></label>
+        <label id="deep-filter-backend-field">DeepFilterNet Backend<select id="processing-deep-filter-backend">${deepFilterNetBackendOptions()}</select></label>
         <label id="apple-compute-units-field">Apple Compute Units<select id="processing-apple-compute-units"><option value="all">All</option><option value="cpu_and_gpu">CPU + GPU</option><option value="cpu_and_neural_engine">CPU + Neural Engine</option><option value="cpu_only">CPU only</option></select></label>
         <label id="deep-filter-model-field">DeepFilterNet Model<select id="processing-deep-filter-model">${deepFilterNetModelOptions(cfg.processing?.deep_filter_model || '')}</select></label>
         <label>Worker Queue Frames<input id="processing-worker-queue" type="number" min="1" max="200" step="1"></label>
-        ${state.deepfilternet?.detail ? `<p class="muted wide">${esc(state.deepfilternet.detail)}</p>` : ''}
-        ${processingStageText(live.processing_status) ? `<p class="muted wide">Stages: ${esc(processingStageText(live.processing_status))}</p>` : ''}
-        ${normalizationStatusText(live.processing_status?.normalization) ? `<p class="muted wide">Leveler: ${esc(normalizationStatusText(live.processing_status?.normalization))}</p>` : ''}
-        ${live.processing_status?.engine_detail ? `<p class="muted wide">${esc(live.processing_status.engine_detail)}</p>` : ''}
+        ${pipelineStatusHtml(live)}
       </fieldset>
-      <fieldset class="wide"><legend>Client Telemetry</legend>${captureHealthHtml(live)}</fieldset>
-      <fieldset class="wide"><legend>ESP32 Audio Hardware</legend>${esp32AudioEditorHtml()}</fieldset>
-      <fieldset class="wide"><legend>Routing</legend>${editorRoutingHtml(cfg)}</fieldset>
-      <fieldset class="wide"><legend>Stereo Receive</legend><label class="check"><input id="stereo-enabled" type="checkbox"> Stereo receive</label><div id="stereo-pan-wrap">${panEditorHtml(cfg)}</div></fieldset>
-      <fieldset class="wide"><legend>Dedicated Buttons</legend><div class="pill-list">${advertisedButtonHtml(live, cfg)}</div><div id="button-editor">${(cfg.buttons || []).map(buttonRowHtml).join('')}</div><button id="add-button-row" type="button">Add Button</button></fieldset>
-      <fieldset class="wide"><legend>Per-Talker Gains</legend>${talkerGainEditorHtml(cfg)}</fieldset>
-      <fieldset class="wide"><legend>IFB</legend><label class="check"><input id="ifb-enabled" type="checkbox"> IFB enabled</label><label>Duck Gain<input id="ifb-duck-gain" type="number" min="0" max="1" step="0.01" value="${cfg.ifb?.duck_gain ?? 0.125}"></label></fieldset>
-      <fieldset class="wide"><legend>Client Lockout</legend>${lockoutHtml(cfg.lockout)}</fieldset>
+      <details class="wide advanced-client-features"><summary>Advanced Client Features</summary>
+        <div class="advanced-grid">
+          <fieldset class="wide"><legend>Client Telemetry</legend>${captureHealthHtml(live)}</fieldset>
+          ${(caps.supports_processing || caps.supports_native_voice_processing) ? `<fieldset><legend>Client-Local Processing</legend><label class="check"><input id="processing-native" type="checkbox"> Use native OS voice processing when available</label></fieldset>` : ''}
+          ${caps.supports_esp32_audio ? `<fieldset class="wide"><legend>ESP32 Audio Hardware</legend>${esp32AudioEditorHtml()}</fieldset>` : ''}
+          ${caps.supports_stereo ? `<fieldset class="wide"><legend>Stereo Receive</legend><label class="check"><input id="stereo-enabled" type="checkbox"> Stereo receive</label><div id="stereo-pan-wrap">${panEditorHtml(cfg)}</div></fieldset>` : ''}
+          ${caps.supports_ifb ? `<fieldset class="wide"><legend>IFB</legend><label class="check"><input id="ifb-enabled" type="checkbox"> IFB enabled</label><label>Duck Gain<input id="ifb-duck-gain" type="number" min="0" max="1" step="0.01" value="${cfg.ifb?.duck_gain ?? 0.125}"></label><div class="table-wrap">${ifbRoutingHtml(cfg)}</div></fieldset>` : ''}
+          <fieldset class="wide"><legend>Client Lockout</legend>${lockoutHtml(cfg.lockout, caps)}</fieldset>
+        </div>
+      </details>
       <div class="actions wide"><button type="submit" class="primary">Save Client</button><button id="delete-client" type="button" class="danger">Delete Desired Config</button></div>
-    </form>
-  </div></div>`;
-  bindClientEditor(cfg);
+    </form>`;
 }
-function closeModal() { selectedUser = null; modalRoot().innerHTML = ''; }
+function openClientEditor(userId) {
+  selectedUser = userId;
+  clientEditorDirty = false;
+  renderClientsPage();
+}
+function closeClientEditor() {
+  selectedUser = null;
+  clientEditorDirty = false;
+  renderClientsPage();
+}
+function closeModal() { closeClientEditor(); modalRoot().innerHTML = ''; }
 function captureHealthHtml(live) {
   const capture = live.capture;
   if (!capture) return '<p class="muted">No client telemetry reported by this client.</p>';
@@ -1115,21 +1289,26 @@ function esp32AudioEditorHtml() {
       <label>Mic-Bypass Gain %<input id="esp32-mic-bypass-gain" type="number" min="0" max="400" step="1"></label>
     </div>`;
 }
-function editorRoutingHtml(cfg) {
+function editorRoutingHtml(cfg, { includeIfb = true } = {}) {
   const listen = new Set(cfg.listen || []);
   const tx = new Set(cfg.tx || []);
   const priority = new Set(cfg.priority_channels || []);
   const ifbProgram = new Set(cfg.ifb?.program || []);
   const ifbInterrupt = new Set(cfg.ifb?.interrupt || []);
-  return `<div class="table-wrap"><table><thead><tr><th>Channel</th><th>Listen</th><th>Regular TX</th><th>Priority</th><th>Gain</th><th>IFB Program</th><th>IFB Interrupt</th></tr></thead><tbody>${allChannelIds([cfg]).map((ch) => `<tr>
+  const ifbHead = includeIfb ? '<th>IFB Program</th><th>IFB Interrupt</th>' : '';
+  return `<div class="table-wrap"><table><thead><tr><th>Channel</th><th>Listen</th><th>Regular TX</th><th>Priority</th><th>Gain</th>${ifbHead}</tr></thead><tbody>${allChannelIds([cfg]).map((ch) => `<tr>
     <td>${esc(channelLabel(ch))}</td>
     <td><input data-editor-listen="${ch}" type="checkbox" ${listen.has(ch) ? 'checked' : ''}></td>
     <td><input data-editor-tx="${ch}" type="checkbox" ${tx.has(ch) ? 'checked' : ''}></td>
     <td><input data-editor-priority="${ch}" type="checkbox" ${priority.has(ch) ? 'checked' : ''}></td>
     <td><input data-editor-vol="${ch}" type="number" min="0" max="4" step="0.05" value="${cfg.vol?.[ch] ?? 1}"></td>
-    <td><input data-ifb-program="${ch}" type="checkbox" ${ifbProgram.has(ch) ? 'checked' : ''}></td>
-    <td><input data-ifb-interrupt="${ch}" type="checkbox" ${ifbInterrupt.has(ch) ? 'checked' : ''}></td>
+    ${includeIfb ? `<td><input data-ifb-program="${ch}" type="checkbox" ${ifbProgram.has(ch) ? 'checked' : ''}></td><td><input data-ifb-interrupt="${ch}" type="checkbox" ${ifbInterrupt.has(ch) ? 'checked' : ''}></td>` : ''}
   </tr>`).join('')}</tbody></table></div>`;
+}
+function ifbRoutingHtml(cfg) {
+  const ifbProgram = new Set(cfg.ifb?.program || []);
+  const ifbInterrupt = new Set(cfg.ifb?.interrupt || []);
+  return `<table><thead><tr><th>Channel</th><th>Program</th><th>Interrupt</th></tr></thead><tbody>${allChannelIds([cfg]).map((ch) => `<tr><td>${esc(channelLabel(ch))}</td><td><input data-ifb-program="${ch}" type="checkbox" ${ifbProgram.has(ch) ? 'checked' : ''}></td><td><input data-ifb-interrupt="${ch}" type="checkbox" ${ifbInterrupt.has(ch) ? 'checked' : ''}></td></tr>`).join('')}</tbody></table>`;
 }
 function panEditorHtml(cfg) {
   const pan = cfg.stereo?.channel_pan || {};
@@ -1144,11 +1323,23 @@ function advertisedButtonHtml(live, cfg) {
   if (!buttons.length) return '<span class="muted">No advertised buttons from this connected client.</span>';
   return buttons.map((button) => `<button class="pill" data-add-advertised="${esc(button.id)}" data-label="${esc(button.label || button.id)}" type="button">${esc(button.id)}: ${esc(button.label || button.id)}${configured.has(button.id) ? ' configured' : ' available'}</button>`).join('');
 }
+function buttonSetupHtml(cfg, advertisedButtons = [], actionTypes = []) {
+  const actions = actionTypes;
+  const configured = new Set((cfg.buttons || []).map((button) => button.id));
+  const advertised = advertisedButtons.length
+    ? advertisedButtons.map((button) => `<button class="pill" data-add-advertised="${esc(button.id)}" data-label="${esc(button.label || button.id)}" type="button">${esc(button.id)}: ${esc(button.label || button.id)}${configured.has(button.id) ? ' configured' : ' available'}</button>`).join('')
+    : '<span class="muted">No advertised physical buttons from this client.</span>';
+  if (!advertisedButtons.length && !(cfg.buttons || []).length) {
+    return `<div class="button-setup"><h3>Advertised Buttons</h3><div class="pill-list">${advertised}</div><input id="button-action-types" type="hidden" value="${esc(actions.join(','))}"></div>`;
+  }
+  return `<div class="button-setup"><h3>Advertised Buttons</h3><div class="pill-list">${advertised}</div><input id="button-action-types" type="hidden" value="${esc(actions.join(','))}"><div id="button-editor">${(cfg.buttons || []).map((button) => buttonRowHtml(button, actions)).join('')}</div><button id="add-button-row" type="button">Add Button</button></div>`;
+}
 function buttonColor(value) {
   const color = String(value || '').trim();
   return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color) ? color : '#2f7dd3';
 }
-function buttonRowHtml(button = { id: '', label: '', color: '#2f7dd3', mode: 'momentary', actions: [] }) {
+function buttonRowHtml(button = { id: '', label: '', color: '#2f7dd3', mode: 'momentary', actions: [] }, actionTypes = []) {
+  const show = (type) => actionTypes.includes(type);
   const tx = (button.actions || []).find((action) => action.type === 'transmit') || {};
   const alert = (button.actions || []).find((action) => action.type === 'alert') || {};
   const alertTarget = (alert.targets || [])[0] || {};
@@ -1161,21 +1352,11 @@ function buttonRowHtml(button = { id: '', label: '', color: '#2f7dd3', mode: 'mo
     <label>Color<input data-button-color type="color" value="${buttonColor(button.color)}"></label>
     <label>Mode<select data-button-mode><option value="momentary">Momentary</option><option value="latching">Latching</option></select></label>
     <button data-remove-button type="button" class="danger">Remove</button>
-    <label>TX Channels<input data-button-tx-channels value="${csv(tx.channels)}" placeholder="1,4"></label>
-    <label>TX Users<input data-button-tx-users value="${csv(tx.users)}" placeholder="2,3"></label>
-    <label class="check"><input data-button-tx-duck type="checkbox" ${tx.duck ? 'checked' : ''}> Duck direct targets</label>
-    <label>Alert Type<select data-button-alert-kind><option value="">None</option><option value="user">User</option><option value="channel">Channel</option></select></label>
-    <label>Alert ID<input data-button-alert-id type="number" min="0" value="${alertTarget.id ?? ''}"></label>
-    <label>Alert Message<input data-button-alert-message value="${esc(alert.message || '')}"></label>
-    <label>Apply Preset<input data-button-preset value="${esc(preset.preset_id || '')}" placeholder="preset-id"></label>
-    <label>Set Talk Users<input data-button-talk-users value="${csv(talk.users)}" placeholder="2,3"></label>
-    <label>Set Talk Mode<select data-button-talk-mode><option value="">No change</option><option value="muted">Muted</option><option value="ptt">PTT</option><option value="open">Open</option></select></label>
-    <label>Listen Add<input data-route-listen-add value="${csv(route.listen_add)}"></label>
-    <label>Listen Remove<input data-route-listen-remove value="${csv(route.listen_remove)}"></label>
-    <label>Listen Toggle<input data-route-listen-toggle value="${csv(route.listen_toggle)}"></label>
-    <label>TX Add<input data-route-tx-add value="${csv(route.tx_add)}"></label>
-    <label>TX Remove<input data-route-tx-remove value="${csv(route.tx_remove)}"></label>
-    <label>TX Toggle<input data-route-tx-toggle value="${csv(route.tx_toggle)}"></label>
+    ${show('transmit') ? `<label>TX Channels<input data-button-tx-channels value="${csv(tx.channels)}" placeholder="1,4"></label><label>TX Users<input data-button-tx-users value="${csv(tx.users)}" placeholder="2,3"></label><label class="check"><input data-button-tx-duck type="checkbox" ${tx.duck ? 'checked' : ''}> Duck direct targets</label>` : ''}
+    ${show('alert') ? `<label>Alert Type<select data-button-alert-kind><option value="">None</option><option value="user">User</option><option value="channel">Channel</option></select></label><label>Alert ID<input data-button-alert-id type="number" min="0" value="${alertTarget.id ?? ''}"></label><label>Alert Message<input data-button-alert-message value="${esc(alert.message || '')}"></label>` : ''}
+    ${show('apply_preset') ? `<label>Apply Preset<input data-button-preset value="${esc(preset.preset_id || '')}" placeholder="preset-id"></label>` : ''}
+    ${show('set_talk_mode') ? `<label>Set Talk Users<input data-button-talk-users value="${csv(talk.users)}" placeholder="2,3"></label><label>Set Talk Mode<select data-button-talk-mode><option value="">No change</option><option value="muted">Muted</option><option value="ptt">PTT</option><option value="open">Open</option></select></label>` : ''}
+    ${show('route_edit') ? `<label>Listen Add<input data-route-listen-add value="${csv(route.listen_add)}"></label><label>Listen Remove<input data-route-listen-remove value="${csv(route.listen_remove)}"></label><label>Listen Toggle<input data-route-listen-toggle value="${csv(route.listen_toggle)}"></label><label>TX Add<input data-route-tx-add value="${csv(route.tx_add)}"></label><label>TX Remove<input data-route-tx-remove value="${csv(route.tx_remove)}"></label><label>TX Toggle<input data-route-tx-toggle value="${csv(route.tx_toggle)}"></label>` : ''}
   </div>`;
 }
 function talkerGainEditorHtml(cfg) {
@@ -1183,16 +1364,28 @@ function talkerGainEditorHtml(cfg) {
   if (!users.length) return '<p class="muted">No other clients yet.</p>';
   return `<div class="table-wrap"><table><thead><tr><th>Talker</th><th>Gain</th></tr></thead><tbody>${users.map((id) => `<tr><td>${esc(clientLabel(id))}</td><td><input data-editor-talker="${id}" type="number" min="0" max="4" step="0.05" value="${cfg.talker_vol?.[id] ?? 1}"></td></tr>`).join('')}</tbody></table></div>`;
 }
-function lockoutHtml(lockout = {}) {
+function lockoutHtml(lockout = {}, caps = {}) {
   const cfg = { ...defaultLockout(), ...lockout };
-  return `<div class="pill-list">${[
+  const items = [
     ['lock-channels', 'allow_channels', 'Channels'], ['lock-volumes', 'allow_volumes', 'Volumes'], ['lock-codec', 'allow_codec', 'Codec'],
     ['lock-talk-mode', 'allow_talk_mode', 'Talk Mode'], ['lock-priority', 'allow_priority', 'Priority'], ['lock-buttons', 'allow_buttons', 'Buttons'],
-    ['lock-ifb', 'allow_ifb', 'IFB'], ['lock-device-selection', 'allow_device_selection', 'Device Selection'], ['lock-local-api', 'allow_local_api', 'Local API'],
-  ].map(([id, key, label]) => `<label class="check"><input id="${id}" type="checkbox" ${cfg[key] ? 'checked' : ''}> ${label}</label>`).join('')}</div>`;
+    ...(caps.supports_ifb ? [['lock-ifb', 'allow_ifb', 'IFB']] : []),
+    ...(caps.supports_device_selection ? [['lock-device-selection', 'allow_device_selection', 'Device Selection']] : []),
+    ...(caps.supports_local_api ? [['lock-local-api', 'allow_local_api', 'Local API']] : []),
+  ];
+  return `<div class="pill-list">${items.map(([id, key, label]) => `<label class="check"><input id="${id}" type="checkbox" ${cfg[key] ? 'checked' : ''}> ${label}</label>`).join('')}</div>`;
 }
 function bindClientEditor(cfg) {
   $('client-role').value = cfg.role || 'client';
+  if ($('client-type-default')) {
+    $('client-type-default').value = fallbackClientType(cfg.user_id, cfg, session(cfg.user_id) || {}, deviceByUser(cfg.user_id) || {});
+    $('client-type-default').onchange = () => {
+      clientTypeDefaults[cfg.user_id] = $('client-type-default').value;
+      persistClientTypeDefaults();
+      clientEditorDirty = false;
+      renderClientsPage();
+    };
+  }
   $('codec').value = cfg.codec || 'pcm16';
   $('opus-profile').value = normalizeOpusProfile(cfg.opus_profile || 'speech_24_standard');
   $('talk-mode').value = cfg.talk_mode || 'ptt';
@@ -1210,7 +1403,7 @@ function bindClientEditor(cfg) {
   $('processing-transient').checked = processing.transient_suppression;
   $('processing-compressor').checked = processing.compressor;
   $('processing-presence').checked = processing.presence;
-  $('processing-native').checked = processing.native_voice_processing;
+  if ($('processing-native')) $('processing-native').checked = processing.native_voice_processing;
   $('processing-fallback').checked = processing.fallback_to_builtin !== false;
   const normalization = { ...defaultProcessing().normalization, ...(processing.normalization || {}) };
   $('normalization-enabled').checked = !!normalization.enabled;
@@ -1223,49 +1416,63 @@ function bindClientEditor(cfg) {
   $('processing-apple-compute-units').value = processing.apple_compute_units || 'all';
   $('processing-deep-filter-model').value = processing.deep_filter_model || '';
   $('processing-worker-queue').value = processing.worker_queue_frames || 12;
-  $('esp32-audio-enabled').checked = !!esp32Audio.enabled;
-  $('esp32-adc-input').value = esp32Audio.adc_input;
-  $('esp32-mic-pga').value = esp32Audio.mic_pga_gain_db;
-  $('esp32-capture-channel').value = esp32Audio.capture_channel;
-  $('esp32-high-pass').checked = !!esp32Audio.high_pass_enabled;
-  $('esp32-alc').checked = esp32Audio.alc_enabled !== false;
-  $('esp32-noise-gate').checked = esp32Audio.noise_gate_enabled !== false;
-  $('esp32-mic-sw-gain').value = esp32Audio.mic_software_gain_percent;
-  $('esp32-speaker-sw-gain').value = esp32Audio.speaker_software_gain_percent;
-  $('esp32-notification-gain').value = esp32Audio.notification_gain_percent;
-  $('esp32-sidetone-mode').value = esp32Audio.sidetone.mode;
-  $('esp32-sidetone-gain').value = esp32Audio.sidetone.firmware_gain_percent;
-  $('esp32-codec-bypass-gain').value = esp32Audio.sidetone.codec_bypass_gain_percent;
-  $('esp32-mic-bypass-gain').value = esp32Audio.sidetone.mic_bypass_gain_percent;
-  $('stereo-enabled').checked = !!cfg.stereo?.enabled;
-  $('ifb-enabled').checked = !!cfg.ifb?.enabled;
+  if ($('esp32-audio-enabled')) {
+    $('esp32-audio-enabled').checked = !!esp32Audio.enabled;
+    $('esp32-adc-input').value = esp32Audio.adc_input;
+    $('esp32-mic-pga').value = esp32Audio.mic_pga_gain_db;
+    $('esp32-capture-channel').value = esp32Audio.capture_channel;
+    $('esp32-high-pass').checked = !!esp32Audio.high_pass_enabled;
+    $('esp32-alc').checked = esp32Audio.alc_enabled !== false;
+    $('esp32-noise-gate').checked = esp32Audio.noise_gate_enabled !== false;
+    $('esp32-mic-sw-gain').value = esp32Audio.mic_software_gain_percent;
+    $('esp32-speaker-sw-gain').value = esp32Audio.speaker_software_gain_percent;
+    $('esp32-notification-gain').value = esp32Audio.notification_gain_percent;
+    $('esp32-sidetone-mode').value = esp32Audio.sidetone.mode;
+    $('esp32-sidetone-gain').value = esp32Audio.sidetone.firmware_gain_percent;
+    $('esp32-codec-bypass-gain').value = esp32Audio.sidetone.codec_bypass_gain_percent;
+    $('esp32-mic-bypass-gain').value = esp32Audio.sidetone.mic_bypass_gain_percent;
+  }
+  if ($('stereo-enabled')) $('stereo-enabled').checked = !!cfg.stereo?.enabled;
+  if ($('ifb-enabled')) $('ifb-enabled').checked = !!cfg.ifb?.enabled;
   updateOpusProfileVisibility();
-  updateStereoPanVisibility();
+  if ($('stereo-enabled')) updateStereoPanVisibility();
   updateDeepFilterModelVisibility();
   $('codec').onchange = updateOpusProfileVisibility;
   $('processing-engine').onchange = updateDeepFilterModelVisibility;
   $('processing-pipeline').onchange = updateDeepFilterModelVisibility;
   $('processing-deep-filter-backend').onchange = updateDeepFilterModelVisibility;
-  $('stereo-enabled').onchange = updateStereoPanVisibility;
-  $('esp32-audio-enabled').onchange = updateEsp32AudioVisibility;
-  updateEsp32AudioVisibility();
-  $('close-client-modal').onclick = closeModal;
-  $('client-modal').onclick = (e) => { if (e.target.id === 'client-modal') closeModal(); };
-  $('add-button-row').onclick = (e) => { e.preventDefault(); $('button-editor').insertAdjacentHTML('beforeend', buttonRowHtml()); bindButtonRows(); };
-  modalRoot().querySelectorAll('[data-add-advertised]').forEach((button) => button.onclick = () => {
-    $('button-editor').insertAdjacentHTML('beforeend', buttonRowHtml({ id: button.dataset.addAdvertised, label: button.dataset.label, mode: 'momentary', actions: [] }));
+  if ($('stereo-enabled')) $('stereo-enabled').onchange = updateStereoPanVisibility;
+  if ($('esp32-audio-enabled')) {
+    $('esp32-audio-enabled').onchange = updateEsp32AudioVisibility;
+    updateEsp32AudioVisibility();
+  }
+  if ($('close-client-panel')) $('close-client-panel').onclick = closeClientEditor;
+  if ($('add-button-row')) $('add-button-row').onclick = (e) => {
+    e.preventDefault();
+    const actionTypes = ($('button-action-types')?.value || '').split(',').filter(Boolean);
+    $('button-editor').insertAdjacentHTML('beforeend', buttonRowHtml(undefined, actionTypes));
     bindButtonRows();
+  };
+  editorRoot().querySelectorAll('[data-add-advertised]').forEach((button) => button.onclick = () => {
+    const actionTypes = ($('button-action-types')?.value || '').split(',').filter(Boolean);
+    if (!$('button-editor')) button.closest('.button-setup').insertAdjacentHTML('beforeend', `<div id="button-editor"></div><button id="add-button-row" type="button">Add Button</button>`);
+    $('button-editor').insertAdjacentHTML('beforeend', buttonRowHtml({ id: button.dataset.addAdvertised, label: button.dataset.label, mode: 'momentary', actions: [] }, actionTypes));
+    bindClientEditor(cfg);
   });
   bindButtonRows();
   bindPanControls();
   $('client-form').onsubmit = saveClientEditor;
+  editorRoot().querySelectorAll('input,select,textarea').forEach((el) => {
+    el.addEventListener('input', () => { clientEditorDirty = true; });
+    el.addEventListener('change', () => { clientEditorDirty = true; });
+  });
   $('delete-client').onclick = async () => {
     const id = Number($('user-id').value);
-    if (id) { await api(`/clients/${id}`, { method: 'DELETE' }); closeModal(); await refresh(); }
+    if (id) { await api(`/clients/${id}`, { method: 'DELETE' }); selectedUser = null; clientEditorDirty = false; await refresh(); }
   };
 }
 function updateOpusProfileVisibility() { $('opus-profile-field').classList.toggle('hide', $('codec').value !== 'opus'); }
-function updateStereoPanVisibility() { $('stereo-pan-wrap').classList.toggle('hide', !$('stereo-enabled').checked); }
+function updateStereoPanVisibility() { if ($('stereo-pan-wrap') && $('stereo-enabled')) $('stereo-pan-wrap').classList.toggle('hide', !$('stereo-enabled').checked); }
 function updateDeepFilterModelVisibility() {
   const pipeline = $('processing-pipeline').value || '';
   const usesDeepFilter = $('processing-engine').value === 'deepfilternet' || pipeline.split(',').includes('deepfilternet');
@@ -1274,26 +1481,27 @@ function updateDeepFilterModelVisibility() {
   $('deep-filter-model-field').classList.toggle('hide', !usesDeepFilter);
 }
 function updateEsp32AudioVisibility() {
+  if (!$('esp32-audio-enabled') || !$('esp32-audio-fields')) return;
   const enabled = $('esp32-audio-enabled').checked;
   $('esp32-audio-fields').classList.toggle('muted-fields', !enabled);
-  modalRoot().querySelectorAll('#esp32-audio-fields input,#esp32-audio-fields select').forEach((el) => el.disabled = !enabled);
+  editorRoot().querySelectorAll('#esp32-audio-fields input,#esp32-audio-fields select').forEach((el) => el.disabled = !enabled);
 }
 function bindButtonRows() {
-  modalRoot().querySelectorAll('[data-remove-button]').forEach((button) => button.onclick = () => button.closest('.button-row').remove());
-  modalRoot().querySelectorAll('[data-button-mode]').forEach((select) => {
+  editorRoot().querySelectorAll('[data-remove-button]').forEach((button) => button.onclick = () => button.closest('.button-row').remove());
+  editorRoot().querySelectorAll('[data-button-mode]').forEach((select) => {
     const row = select.closest('.button-row');
     const id = row.querySelector('[data-button-id]').value;
     const cfg = (desired(selectedUser)?.buttons || []).find((button) => button.id === id);
     if (cfg) select.value = cfg.mode || 'momentary';
   });
-  modalRoot().querySelectorAll('[data-button-alert-kind]').forEach((select) => {
+  editorRoot().querySelectorAll('[data-button-alert-kind]').forEach((select) => {
     const row = select.closest('.button-row');
     const id = row.querySelector('[data-button-id]').value;
     const cfg = (desired(selectedUser)?.buttons || []).find((button) => button.id === id);
     const alert = (cfg?.actions || []).find((action) => action.type === 'alert');
     if (alert) select.value = (alert.targets || [])[0]?.kind || '';
   });
-  modalRoot().querySelectorAll('[data-button-talk-mode]').forEach((select) => {
+  editorRoot().querySelectorAll('[data-button-talk-mode]').forEach((select) => {
     const row = select.closest('.button-row');
     const id = row.querySelector('[data-button-id]').value;
     const cfg = (desired(selectedUser)?.buttons || []).find((button) => button.id === id);
@@ -1307,12 +1515,12 @@ function clampPanUi(value) {
   return Math.round(next);
 }
 function bindPanControls() {
-  modalRoot().querySelectorAll('[data-pan]').forEach((slider) => {
-    const number = modalRoot().querySelector(`[data-pan-number="${slider.dataset.pan}"]`);
+  editorRoot().querySelectorAll('[data-pan]').forEach((slider) => {
+    const number = editorRoot().querySelector(`[data-pan-number="${slider.dataset.pan}"]`);
     slider.oninput = () => { const value = clampPanUi(slider.value); slider.value = value; number.value = value; };
   });
-  modalRoot().querySelectorAll('[data-pan-number]').forEach((input) => {
-    const slider = modalRoot().querySelector(`[data-pan="${input.dataset.panNumber}"]`);
+  editorRoot().querySelectorAll('[data-pan-number]').forEach((input) => {
+    const slider = editorRoot().querySelector(`[data-pan="${input.dataset.panNumber}"]`);
     input.onkeydown = (e) => {
       if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); input.value = clampPanUi(Number(input.value) - 1); slider.value = input.value; }
       if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); input.value = clampPanUi(Number(input.value) + 1); slider.value = input.value; }
@@ -1321,11 +1529,11 @@ function bindPanControls() {
   });
 }
 function checkedNumbers(selector, attr) {
-  return sortedChannels([...modalRoot().querySelectorAll(selector)].filter((el) => el.checked).map((el) => Number(el.dataset[attr])));
+  return sortedChannels([...editorRoot().querySelectorAll(selector)].filter((el) => el.checked).map((el) => Number(el.dataset[attr])));
 }
 function numberMap(selector, attr, skipDefault = true) {
   const out = {};
-  modalRoot().querySelectorAll(selector).forEach((el) => {
+  editorRoot().querySelectorAll(selector).forEach((el) => {
     const value = Number(el.value);
     const id = Number(el.dataset[attr]);
     if (Number.isFinite(value) && (!skipDefault || value !== 1)) out[id] = value;
@@ -1334,57 +1542,78 @@ function numberMap(selector, attr, skipDefault = true) {
 }
 function readPanMap() {
   const out = {};
-  if (!$('stereo-enabled').checked) return out;
-  modalRoot().querySelectorAll('[data-pan-number]').forEach((el) => {
+  if (!$('stereo-enabled') || !$('stereo-enabled').checked) return out;
+  editorRoot().querySelectorAll('[data-pan-number]').forEach((el) => {
     const value = clampPanUi(el.value);
     if (value !== 0) out[el.dataset.panNumber] = value / 100;
   });
   return out;
 }
 function readButtons() {
-  return [...modalRoot().querySelectorAll('.button-row')].map((row) => {
+  const actionTypes = ($('button-action-types')?.value || '').split(',').filter(Boolean);
+  const actionVisible = (type, selector) => actionTypes.includes(type) && !!selector;
+  return [...editorRoot().querySelectorAll('.button-row')].map((row) => {
     const id = row.querySelector('[data-button-id]').value.trim();
-    const actions = [];
-    const channels = parseCsv(row.querySelector('[data-button-tx-channels]').value, { allowZero: true });
-    const users = parseCsv(row.querySelector('[data-button-tx-users]').value);
-    if (channels.length || users.length) actions.push({ type: 'transmit', channels, users, duck: row.querySelector('[data-button-tx-duck]').checked });
-    const alertKind = row.querySelector('[data-button-alert-kind]').value;
-    const alertId = Number(row.querySelector('[data-button-alert-id]').value);
-    const alertIdValid = Number.isInteger(alertId) && (alertKind === 'channel' ? alertId >= 0 : alertId > 0);
-    if (alertKind && alertIdValid) actions.push({ type: 'alert', targets: [{ kind: alertKind, id: alertId }], message: row.querySelector('[data-button-alert-message]').value.trim() || null });
-    const presetId = row.querySelector('[data-button-preset]').value.trim();
-    if (presetId) actions.push({ type: 'apply_preset', preset_id: presetId });
-    const talkMode = row.querySelector('[data-button-talk-mode]').value;
-    const talkUsers = parseCsv(row.querySelector('[data-button-talk-users]').value);
-    if (talkMode && talkUsers.length) actions.push({ type: 'set_talk_mode', users: talkUsers, mode: talkMode });
-    const route = {
-      users: [],
-      listen_add: parseCsv(row.querySelector('[data-route-listen-add]').value, { allowZero: true }),
-      listen_remove: parseCsv(row.querySelector('[data-route-listen-remove]').value, { allowZero: true }),
-      listen_toggle: parseCsv(row.querySelector('[data-route-listen-toggle]').value, { allowZero: true }),
-      tx_add: parseCsv(row.querySelector('[data-route-tx-add]').value, { allowZero: true }),
-      tx_remove: parseCsv(row.querySelector('[data-route-tx-remove]').value, { allowZero: true }),
-      tx_toggle: parseCsv(row.querySelector('[data-route-tx-toggle]').value, { allowZero: true }),
-    };
-    if (Object.entries(route).some(([key, value]) => key !== 'users' && value.length)) actions.push({ type: 'route_edit', ...route });
+    const original = (shownClient(selectedUser)?.buttons || []).find((button) => button.id === id) || {};
+    const actions = (original.actions || []).filter((action) => !actionTypes.includes(action.type));
+    const txChannels = row.querySelector('[data-button-tx-channels]');
+    const txUsers = row.querySelector('[data-button-tx-users]');
+    if (actionVisible('transmit', txChannels && txUsers)) {
+      const channels = parseCsv(txChannels.value, { allowZero: true });
+      const users = parseCsv(txUsers.value);
+      if (channels.length || users.length) actions.push({ type: 'transmit', channels, users, duck: !!row.querySelector('[data-button-tx-duck]')?.checked });
+    }
+    const alertKindInput = row.querySelector('[data-button-alert-kind]');
+    if (actionVisible('alert', alertKindInput)) {
+      const alertKind = alertKindInput.value;
+      const alertId = Number(row.querySelector('[data-button-alert-id]')?.value);
+      const alertIdValid = Number.isInteger(alertId) && (alertKind === 'channel' ? alertId >= 0 : alertId > 0);
+      if (alertKind && alertIdValid) actions.push({ type: 'alert', targets: [{ kind: alertKind, id: alertId }], message: row.querySelector('[data-button-alert-message]')?.value.trim() || null });
+    }
+    const presetInput = row.querySelector('[data-button-preset]');
+    if (actionVisible('apply_preset', presetInput)) {
+      const presetId = presetInput.value.trim();
+      if (presetId) actions.push({ type: 'apply_preset', preset_id: presetId });
+    }
+    const talkModeInput = row.querySelector('[data-button-talk-mode]');
+    if (actionVisible('set_talk_mode', talkModeInput)) {
+      const talkMode = talkModeInput.value;
+      const talkUsers = parseCsv(row.querySelector('[data-button-talk-users]')?.value);
+      if (talkMode && talkUsers.length) actions.push({ type: 'set_talk_mode', users: talkUsers, mode: talkMode });
+    }
+    const routeInput = row.querySelector('[data-route-listen-add]');
+    if (actionVisible('route_edit', routeInput)) {
+      const route = {
+        users: [],
+        listen_add: parseCsv(row.querySelector('[data-route-listen-add]')?.value, { allowZero: true }),
+        listen_remove: parseCsv(row.querySelector('[data-route-listen-remove]')?.value, { allowZero: true }),
+        listen_toggle: parseCsv(row.querySelector('[data-route-listen-toggle]')?.value, { allowZero: true }),
+        tx_add: parseCsv(row.querySelector('[data-route-tx-add]')?.value, { allowZero: true }),
+        tx_remove: parseCsv(row.querySelector('[data-route-tx-remove]')?.value, { allowZero: true }),
+        tx_toggle: parseCsv(row.querySelector('[data-route-tx-toggle]')?.value, { allowZero: true }),
+      };
+      if (Object.entries(route).some(([key, value]) => key !== 'users' && value.length)) actions.push({ type: 'route_edit', ...route });
+    }
     const color = buttonColor(row.querySelector('[data-button-color]').value);
     return { id, label: row.querySelector('[data-button-label]').value.trim() || id, color, mode: row.querySelector('[data-button-mode]').value, actions };
   }).filter((button) => button.id);
 }
 function lockoutBody() {
+  const existing = shownClient(selectedUser)?.lockout || defaultLockout();
+  const checked = (id, key) => $(id) ? $(id).checked : existing[key];
   return {
-    allow_channels: $('lock-channels').checked,
-    allow_volumes: $('lock-volumes').checked,
-    allow_codec: $('lock-codec').checked,
-    allow_talk_mode: $('lock-talk-mode').checked,
-    allow_priority: $('lock-priority').checked,
-    allow_buttons: $('lock-buttons').checked,
-    allow_ifb: $('lock-ifb').checked,
-    allow_device_selection: $('lock-device-selection').checked,
-    allow_local_api: $('lock-local-api').checked,
+    allow_channels: checked('lock-channels', 'allow_channels'),
+    allow_volumes: checked('lock-volumes', 'allow_volumes'),
+    allow_codec: checked('lock-codec', 'allow_codec'),
+    allow_talk_mode: checked('lock-talk-mode', 'allow_talk_mode'),
+    allow_priority: checked('lock-priority', 'allow_priority'),
+    allow_buttons: checked('lock-buttons', 'allow_buttons'),
+    allow_ifb: checked('lock-ifb', 'allow_ifb'),
+    allow_device_selection: checked('lock-device-selection', 'allow_device_selection'),
+    allow_local_api: checked('lock-local-api', 'allow_local_api'),
   };
 }
-function processingBody() {
+function processingBody(existing = {}) {
   const model = $('processing-deep-filter-model').value.trim();
   return {
     mode: $('processing-mode').value,
@@ -1397,7 +1626,7 @@ function processingBody() {
     transient_suppression: $('processing-transient').checked,
     compressor: $('processing-compressor').checked,
     presence: $('processing-presence').checked,
-    native_voice_processing: $('processing-native').checked,
+    native_voice_processing: $('processing-native') ? $('processing-native').checked : existing.native_voice_processing !== false,
     fallback_to_builtin: $('processing-fallback').checked,
     deep_filter_model: model || null,
     deep_filter_backend: $('processing-deep-filter-backend').value,
@@ -1413,7 +1642,8 @@ function processingBody() {
     },
   };
 }
-function esp32AudioBody() {
+function esp32AudioBody(existing = defaultEsp32Audio()) {
+  if (!$('esp32-audio-enabled')) return existing;
   return {
     enabled: $('esp32-audio-enabled').checked,
     adc_input: $('esp32-adc-input').value,
@@ -1436,6 +1666,11 @@ function esp32AudioBody() {
 async function saveClientEditor(e) {
   e.preventDefault();
   const id = Number($('user-id').value);
+  const existing = shownClient(id);
+  const hasButtons = !!$('button-editor');
+  const hasTalkerGains = editorRoot().querySelectorAll('[data-editor-talker]').length > 0;
+  const hasIfb = !!$('ifb-enabled');
+  const hasStereo = !!$('stereo-enabled');
   const body = {
     client_uid: $('client-uid').value.trim() || null,
     role: $('client-role').value,
@@ -1443,23 +1678,23 @@ async function saveClientEditor(e) {
     listen: checkedNumbers('[data-editor-listen]', 'editorListen'),
     tx: checkedNumbers('[data-editor-tx]', 'editorTx'),
     vol: numberMap('[data-editor-vol]', 'editorVol', false),
-    talker_vol: numberMap('[data-editor-talker]', 'editorTalker'),
+    talker_vol: hasTalkerGains ? numberMap('[data-editor-talker]', 'editorTalker') : existing.talker_vol || {},
     codec: $('codec').value,
     opus_profile: $('opus-profile').value,
     talk_mode: $('talk-mode').value,
     priority: $('priority').checked,
     priority_channels: checkedNumbers('[data-editor-priority]', 'editorPriority'),
-    buttons: readButtons(),
-    ifb: { enabled: $('ifb-enabled').checked, program: checkedNumbers('[data-ifb-program]', 'ifbProgram'), interrupt: checkedNumbers('[data-ifb-interrupt]', 'ifbInterrupt'), duck_gain: Number($('ifb-duck-gain').value) },
+    buttons: hasButtons ? readButtons() : existing.buttons || [],
+    ifb: hasIfb ? { enabled: $('ifb-enabled').checked, program: checkedNumbers('[data-ifb-program]', 'ifbProgram'), interrupt: checkedNumbers('[data-ifb-interrupt]', 'ifbInterrupt'), duck_gain: Number($('ifb-duck-gain').value) } : existing.ifb || defaultClient(id).ifb,
     lockout: lockoutBody(),
-    stereo: { enabled: $('stereo-enabled').checked, channel_pan: readPanMap() },
-    processing: processingBody(),
-    esp32_audio: esp32AudioBody(),
+    stereo: hasStereo ? { enabled: $('stereo-enabled').checked, channel_pan: readPanMap() } : existing.stereo || defaultClient(id).stereo,
+    processing: processingBody(existing.processing || defaultProcessing()),
+    esp32_audio: esp32AudioBody(existing.esp32_audio || defaultEsp32Audio()),
   };
   try {
     await api(`/clients/${id}`, { method: 'PUT', body: JSON.stringify(body) });
     selectedUser = id;
-    closeModal();
+    clientEditorDirty = false;
     await refresh();
   } catch (err) {
     showError(err);
@@ -1467,8 +1702,8 @@ async function saveClientEditor(e) {
 }
 function showError(err) { window.alert(err.message || String(err)); }
 
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && modalRoot().innerHTML) closeModal(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && selectedUser) closeClientEditor(); });
 refresh().catch(showError);
 refreshTimer = window.setInterval(() => {
-  if (!modalRoot().innerHTML) refresh().catch(console.warn);
+  if (!modalRoot().innerHTML && !clientEditorDirty && !(page === 'clients' && selectedUser)) refresh().catch(console.warn);
 }, 1000);

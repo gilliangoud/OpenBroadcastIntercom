@@ -2016,6 +2016,25 @@ static void send_hello(void)
     }
     cJSON_AddItemToObject(root, "buttons", buttons);
 
+    cJSON *capabilities = cJSON_CreateObject();
+    cJSON_AddBoolToObject(capabilities, "advertised", true);
+    cJSON_AddStringToObject(capabilities, "client_kind", "esp32");
+    cJSON_AddBoolToObject(capabilities, "supports_processing", false);
+    cJSON_AddBoolToObject(capabilities, "supports_native_voice_processing", false);
+    cJSON_AddBoolToObject(capabilities, "supports_esp32_audio", true);
+    cJSON_AddBoolToObject(capabilities, "supports_stereo", false);
+    cJSON_AddBoolToObject(capabilities, "supports_ifb", false);
+    cJSON_AddBoolToObject(capabilities, "supports_local_api", false);
+    cJSON_AddBoolToObject(capabilities, "supports_device_selection", false);
+    cJSON *actions = cJSON_CreateArray();
+    cJSON_AddItemToArray(actions, cJSON_CreateString("transmit"));
+    cJSON_AddItemToArray(actions, cJSON_CreateString("alert"));
+    cJSON_AddItemToArray(actions, cJSON_CreateString("apply_preset"));
+    cJSON_AddItemToArray(actions, cJSON_CreateString("set_talk_mode"));
+    cJSON_AddItemToArray(actions, cJSON_CreateString("route_edit"));
+    cJSON_AddItemToObject(capabilities, "button_action_types", actions);
+    cJSON_AddItemToObject(root, "capabilities", capabilities);
+
     ESP_LOGI(TAG, "sending hello for user %u uid=%s", (unsigned)user_id, s_client_uid);
     log_control_send_result("hello", send_json(root), true);
     cJSON_Delete(root);

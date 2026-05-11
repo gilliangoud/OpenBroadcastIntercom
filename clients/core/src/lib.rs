@@ -10,10 +10,11 @@ use anyhow::{anyhow, bail, Context};
 use common::{
     codec_pcm16_payload_bytes, codec_sample_rate, pcm16_le_bytes_to_samples,
     pcm16_samples_to_le_bytes, AlertStatus, AudioTarget, ButtonCapability, ButtonId,
-    ChannelPresenceRoster, ClientLockoutPolicy, ClientRole, ClientUid, Codec, ControlEvent,
-    ControlMessage, ControlResponse, DirectCallHistoryEntry, DirectCallStatus, EmergencyStatus,
-    Esp32AudioConfig, IfbConfig, OpusBandwidth, OpusProfile, ProcessingConfig, StereoConfig,
-    TalkButtonAction, TalkButtonConfig, TalkMode, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
+    ChannelPresenceRoster, ClientCapabilities, ClientLockoutPolicy, ClientRole, ClientUid, Codec,
+    ControlEvent, ControlMessage, ControlResponse, DirectCallHistoryEntry, DirectCallStatus,
+    EmergencyStatus, Esp32AudioConfig, IfbConfig, OpusBandwidth, OpusProfile, ProcessingConfig,
+    StereoConfig, TalkButtonAction, TalkButtonConfig, TalkMode, MIX_SAMPLES_PER_FRAME,
+    MIX_SAMPLE_RATE,
 };
 use futures_util::{SinkExt, StreamExt};
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
@@ -447,6 +448,7 @@ pub struct ClientConfig {
     pub active_alerts: Vec<AlertStatus>,
     pub recent_alerts: Vec<AlertStatus>,
     pub advertised_buttons: Vec<ButtonCapability>,
+    pub capabilities: ClientCapabilities,
     pub ifb: IfbConfig,
     pub lockout: ClientLockoutPolicy,
     pub stereo: StereoConfig,
@@ -1174,6 +1176,7 @@ pub async fn run_control_connection(
                 client_uid: snapshot.client_uid.clone(),
                 codecs: supported_codecs(),
                 buttons: snapshot.advertised_buttons,
+                capabilities: snapshot.capabilities,
                 role: snapshot.role,
             };
             if let Err(err) = write
@@ -2239,6 +2242,7 @@ mod tests {
             active_alerts: Vec::new(),
             recent_alerts: Vec::new(),
             advertised_buttons: Vec::new(),
+            capabilities: ClientCapabilities::default(),
             ifb: IfbConfig::default(),
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),
@@ -2291,6 +2295,7 @@ mod tests {
             active_alerts: Vec::new(),
             recent_alerts: Vec::new(),
             advertised_buttons: Vec::new(),
+            capabilities: ClientCapabilities::default(),
             ifb: IfbConfig::default(),
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),
@@ -2336,6 +2341,7 @@ mod tests {
             active_alerts: Vec::new(),
             recent_alerts: Vec::new(),
             advertised_buttons: Vec::new(),
+            capabilities: ClientCapabilities::default(),
             ifb: IfbConfig::default(),
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),
@@ -2477,6 +2483,7 @@ mod tests {
             active_alerts: Vec::new(),
             recent_alerts: Vec::new(),
             advertised_buttons: Vec::new(),
+            capabilities: ClientCapabilities::default(),
             ifb: IfbConfig::default(),
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),
