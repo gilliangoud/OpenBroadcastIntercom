@@ -9,8 +9,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_transcription_benchmarks as suite
 import run_mlx_whisper_benchmarks as mlx_suite
+import run_moonshine_benchmarks as moonshine_suite
 import run_parakeet_benchmarks as parakeet_suite
 import run_whisperkit_benchmarks as whisperkit_suite
+import moonshine_benchmark
 import parakeet_benchmark
 import transcription_benchmark as tb
 import whisperkit_benchmark
@@ -262,6 +264,27 @@ class TranscriptionBenchmarkTests(unittest.TestCase):
             venv_python.symlink_to(base_python)
 
             absolute = parakeet_suite.absolute_without_symlink_resolution(venv_python)
+
+            self.assertEqual(absolute, venv_python.absolute())
+            self.assertNotEqual(absolute, base_python.resolve())
+
+    def test_moonshine_normalizes_transcribe_output(self):
+        self.assertEqual(
+            moonshine_benchmark.normalize_transcribe_output(["Ref one", {"text": "check"}]),
+            "Ref one check",
+        )
+
+    def test_moonshine_runner_keeps_venv_python_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_python = root / "homebrew-python"
+            base_python.write_text("", encoding="utf-8")
+            venv_bin = root / "venv" / "bin"
+            venv_bin.mkdir(parents=True)
+            venv_python = venv_bin / "python"
+            venv_python.symlink_to(base_python)
+
+            absolute = moonshine_suite.absolute_without_symlink_resolution(venv_python)
 
             self.assertEqual(absolute, venv_python.absolute())
             self.assertNotEqual(absolute, base_python.resolve())

@@ -252,6 +252,46 @@ corpus path for all three models and records the streaming context parameters
 that should be used for later streaming-specific captures. This keeps the
 comparison apples-to-apples until we add live chunked benchmark fixtures.
 
+To test Moonshine, prefer the ONNX backend when it is available because Useful
+Sensors recommends ONNX for on-device applications. The runner also supports a
+Transformers backend for quick local checks:
+
+```sh
+/opt/homebrew/bin/python3.12 -m venv artifacts/transcription-benchmarks/.venv-moonshine
+artifacts/transcription-benchmarks/.venv-moonshine/bin/python -m pip install -U pip wheel
+artifacts/transcription-benchmarks/.venv-moonshine/bin/python -m pip install \
+  'useful-moonshine-onnx @ git+https://github.com/moonshine-ai/moonshine.git#subdirectory=moonshine-onnx'
+python3 tools/run_moonshine_benchmarks.py \
+  --corpus artifacts/transcription-benchmarks/hf-librispeech-metal/corpus.json \
+  --out-dir artifacts/transcription-benchmarks/moonshine-onnx \
+  --backend onnx \
+  --mode offline \
+  --mode chunked \
+  --chunk-ms 2000
+```
+
+If the ONNX package install is blocked by Git LFS, use Transformers:
+
+```sh
+artifacts/transcription-benchmarks/.venv-moonshine/bin/python -m pip install \
+  transformers torch soundfile
+python3 tools/run_moonshine_benchmarks.py \
+  --corpus artifacts/transcription-benchmarks/hf-librispeech-metal/corpus.json \
+  --out-dir artifacts/transcription-benchmarks/moonshine-transformers \
+  --backend transformers \
+  --mode offline \
+  --mode chunked \
+  --chunk-ms 2000
+```
+
+`offline` mode transcribes each benchmark WAV as one segment. `chunked` mode
+splits each WAV into sequential chunks and transcribes each chunk independently,
+then concatenates the chunk transcripts for scoring. This is closer to a live
+feed than whole-file transcription, but it is not yet the same as RedLine's
+server path because it does not replay Opus decode, VAD hangover, cleanup
+state, context carry, partial/final transcript timing, or server-side
+finalization.
+
 ## Evaluation Matrix
 
 Fill this table only from measured local runs. The first acceptance target is a
@@ -383,6 +423,26 @@ did not instantiate with the PyPI NeMo 2.7.3 package on macOS because the model
 config contains `att_chunk_context_size`, which the installed encoder rejected.
 Keep Unified in the candidate set, but test it through NeMo main/nightly or an
 ONNX/runtime-specific path before using it for product decisions.
+
+Moonshine comparison on the same smoke corpus, using the Transformers backend
+in `artifacts/transcription-benchmarks/.venv-moonshine`. The preferred
+`moonshine_onnx` package install stalled in `git-lfs filter-process` while
+cloning the upstream repository, so these results are not the ONNX numbers we
+ultimately want for an on-device/server runtime:
+
+| Runtime/model | Backend | Mode | WER | CER | Avg latency | Real-time factor | Load time | Cached wall time | Max RSS | CPU time |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| moonshine tiny | transformers | offline | 1.30% | 0.85% | 811.9 ms | 0.1x | 7062.4 ms | 9.94 s | 506.1 MB | 5570.0 ms |
+| moonshine tiny | transformers | chunked 2000 ms | 24.68% | 12.18% | 692.6 ms | 0.1x | 5746.8 ms | 8.29 s | 523.2 MB | 4930.0 ms |
+| moonshine base | transformers | offline | 3.90% | 0.57% | 683.5 ms | 0.1x | 6082.0 ms | 8.59 s | 586.9 MB | 5290.0 ms |
+| moonshine base | transformers | chunked 2000 ms | 28.57% | 18.41% | 713.5 ms | 0.1x | 5695.7 ms | 8.25 s | 523.2 MB | 5090.0 ms |
+
+Moonshine is worth keeping in the candidate set because offline tiny was both
+fast and accurate on this clean fixture. The naive chunked mode is much worse,
+which is exactly why the benchmark suite needs a RedLine live replay mode before
+we choose a streaming default. Short chunks need VAD-aware boundaries, overlap
+handling, context carry, and finalization rules; simply cutting every two
+seconds is not representative enough for production quality.
 
 ## Acceptance Notes
 
