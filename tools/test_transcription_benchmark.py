@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_transcription_benchmarks as suite
+import run_mlx_whisper_benchmarks as mlx_suite
 import transcription_benchmark as tb
 
 
@@ -200,6 +201,21 @@ class TranscriptionBenchmarkTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["user_time_ms"], 43560.0)
         self.assertAlmostEqual(metrics["system_time_ms"], 1800.0)
         self.assertAlmostEqual(metrics["child_cpu_time_ms"], 45360.0)
+
+    def test_mlx_runner_keeps_venv_python_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_python = root / "homebrew-python"
+            base_python.write_text("", encoding="utf-8")
+            venv_bin = root / "venv" / "bin"
+            venv_bin.mkdir(parents=True)
+            venv_python = venv_bin / "python"
+            venv_python.symlink_to(base_python)
+
+            absolute = mlx_suite.absolute_without_symlink_resolution(venv_python)
+
+            self.assertEqual(absolute, venv_python.absolute())
+            self.assertNotEqual(absolute, base_python.resolve())
 
 
 if __name__ == "__main__":

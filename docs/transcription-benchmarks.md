@@ -186,6 +186,18 @@ HF_HOME=artifacts/transcription-benchmarks/hf-cache \
 ```
 
 Then score the predictions with `tools/transcription_benchmark.py score`.
+For repeatable multi-model MLX runs, use the suite runner:
+
+```sh
+python3 tools/run_mlx_whisper_benchmarks.py \
+  --corpus artifacts/transcription-benchmarks/hf-librispeech-metal/corpus.json \
+  --out-dir artifacts/transcription-benchmarks/mlx-expanded \
+  --timeout 2400
+```
+
+The runner keeps the venv Python path unresolved on purpose. Resolving the
+`bin/python` symlink bypasses the venv and can make `mlx_whisper` disappear
+even when the package is installed.
 
 ## Evaluation Matrix
 
@@ -244,21 +256,46 @@ RSS. Q5_0 remains the low-memory candidate, but it was slower than Q8_0 under
 Metal despite using less memory.
 
 MLX comparison on the same smoke corpus, using `mlx-whisper` in a local Python
-3.12 venv with `HF_HOME=artifacts/transcription-benchmarks/hf-cache`. These
-runs are cached runs after the first model download. The first segment latency
-includes MLX model load because `mlx-whisper` caches the loaded model inside the
-process on first use.
+3.12 venv with `HF_HOME=artifacts/transcription-benchmarks/hf-cache`. These are
+second-pass cached runs after every model was downloaded. The first segment
+latency includes MLX model load because `mlx-whisper` caches the loaded model
+inside the process on first use.
 
 | Runtime/model | WER | CER | Avg latency | Real-time factor | First segment/load | Cached wall time | Max RSS | CPU time |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| mlx-whisper large-v3-turbo | 3.90% | 0.28% | 1177.8 ms | 0.164x | 1976.1 ms | 5.33 s | 1399.9 MB | 3100.0 ms |
-| mlx-distil-whisper large-v3 | 1.30% | 0.28% | 1210.6 ms | 0.171x | 2177.1 ms | 5.26 s | 1557.0 MB | 3030.0 ms |
+| mlx-distil-whisper large-v3 | 1.30% | 0.28% | 1635.2 ms | 0.227x | 2249.5 ms | 6.89 s | 1960.1 MB | 3310.0 ms |
+| mlx-whisper large-v3 | 1.30% | 0.28% | 3122.7 ms | 0.421x | 4356.6 ms | 11.10 s | 2410.3 MB | 7010.0 ms |
+| mlx-whisper large-v3 8-bit | 1.30% | 0.28% | 2971.2 ms | 0.393x | 3715.5 ms | 11.22 s | 2186.8 MB | 5030.0 ms |
+| mlx-whisper large-v3-turbo | 3.90% | 0.28% | 1806.6 ms | 0.250x | 2557.0 ms | 7.10 s | 1764.8 MB | 3480.0 ms |
+| mlx-whisper large-v3-turbo q4 | 3.90% | 0.28% | 1753.1 ms | 0.241x | 2208.6 ms | 7.05 s | 775.0 MB | 2700.0 ms |
+| mlx-distil-whisper medium.en | 3.90% | 0.28% | 938.7 ms | 0.131x | 1279.7 ms | 4.72 s | 1216.5 MB | 2610.0 ms |
+| mlx-whisper small | 3.90% | 0.28% | 670.1 ms | 0.088x | 974.0 ms | 3.92 s | 859.2 MB | 2770.0 ms |
+| mlx-whisper base | 5.19% | 0.85% | 350.9 ms | 0.046x | 596.1 ms | 2.69 s | 473.3 MB | 2260.0 ms |
+| mlx-whisper tiny | 6.49% | 1.70% | 283.2 ms | 0.038x | 506.2 ms | 2.51 s | 374.1 MB | 2150.0 ms |
 
-MLX is the strongest macOS-specific result so far: it is faster than
-whisper.cpp Metal on this clean fixture while preserving or improving accuracy.
-The Distil-Whisper MLX model is worth keeping in the candidate set for RedLine
-captures because it was slightly more accurate on the long LibriSpeech segment,
-with roughly the same cached wall time as MLX turbo.
+Additional medium/small/base quantization pass on the same cached setup:
+
+| Runtime/model | WER | CER | Avg latency | Real-time factor | First segment/load | Cached wall time | Max RSS | CPU time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mlx-whisper medium | 2.60% | 0.00% | 1875.1 ms | 0.249x | 2849.1 ms | 7.59 s | 1835.3 MB | 4460.0 ms |
+| mlx-whisper medium 8-bit | 2.60% | 0.00% | 1748.9 ms | 0.231x | 2313.3 ms | 7.22 s | 1296.3 MB | 3760.0 ms |
+| mlx-whisper medium q4 | 3.90% | 1.13% | 1803.9 ms | 0.221x | 2069.3 ms | 7.33 s | 961.8 MB | 3570.0 ms |
+| mlx-whisper small 8-bit | 3.90% | 0.28% | 713.2 ms | 0.094x | 1080.9 ms | 4.05 s | 681.0 MB | 2760.0 ms |
+| mlx-whisper small q4 | 3.90% | 0.28% | 695.3 ms | 0.094x | 1025.4 ms | 3.72 s | 583.3 MB | 2560.0 ms |
+| mlx-whisper base 8-bit | 5.19% | 0.85% | 362.6 ms | 0.049x | 630.7 ms | 2.74 s | 430.0 MB | 2250.0 ms |
+| mlx-whisper base q4 | 5.19% | 1.13% | 364.0 ms | 0.049x | 637.2 ms | 2.74 s | 409.1 MB | 2300.0 ms |
+
+MLX is still the strongest macOS-specific runtime found so far. For clean
+speech, `mlx-community/distil-whisper-large-v3` is the best accuracy/speed
+candidate in this set. `mlx-community/whisper-large-v3-turbo-q4` is the current
+low-memory MLX candidate because it matched turbo accuracy here while using less
+than half the peak RSS. Full large-v3 and large-v3 8-bit improved WER on this
+fixture, but they were materially slower than distil-large, so they need noisy
+RedLine captures to justify the extra latency and memory. In the middle of the
+range, medium 8-bit looks useful: it preserved medium accuracy while cutting
+roughly 539 MB from peak RSS. Small q4 is the best low-resource small-class
+variant in this pass. Base q4 saved very little memory over base 8-bit and lost
+character accuracy, so it is not a priority candidate.
 
 ## Acceptance Notes
 

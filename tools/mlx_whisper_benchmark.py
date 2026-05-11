@@ -35,7 +35,8 @@ def transcribe_corpus(args: argparse.Namespace) -> dict[str, Any]:
     except Exception as exc:
         raise SystemExit(
             "mlx-whisper is not available or cannot access Metal. "
-            "Install it in a local venv and run from a non-sandboxed Apple Silicon session."
+            "Install it in a local venv and run from a non-sandboxed Apple Silicon session. "
+            f"Python: {sys.executable}. Import error: {exc!r}"
         ) from exc
 
     corpus = load_corpus(args.corpus)
