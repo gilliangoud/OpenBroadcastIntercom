@@ -160,7 +160,7 @@ impl CoreMlDeepFilterNet {
             max_a = max_a.max(sample.abs());
             energy += sample * sample;
         }
-        let rms = energy / input.len() as f32;
+        let rms = (energy / input.len() as f32).sqrt();
         if rms < 1e-7 {
             self.skip_counter += 1;
         } else {

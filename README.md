@@ -468,10 +468,13 @@ On macOS, build the server with Apple Whisper acceleration enabled:
 cargo build -p server --release --features macos-accelerated
 ```
 
-`macos-accelerated` currently enables `whisper-rs/metal`, so built-in live
-transcription and recording transcription can use whisper.cpp's Metal path.
-The Recording page and `/admin/api/state` report the compiled transcription
-acceleration backend as `cpu`, `metal`, or `coreml`.
+`macos-accelerated` enables the native cleanup/transcription feature set:
+WebRTC APM, RNNoise, DeepFilterNet, DeepFilterNet Core ML package inference,
+and `whisper-rs/metal`. ONNX DeepFilterNet archives still use the portable Tract
+runtime; complete Core ML package directories can use Apple acceleration when
+the Core ML backend is selected. The Recording page and `/admin/api/state`
+report the compiled transcription acceleration backend as `cpu`, `metal`, or
+`coreml`.
 
 Warning: no-auth mode is for bench testing. If `--admin-token` is omitted,
 anyone who can reach `--admin-bind` can control all clients and rewrite desired

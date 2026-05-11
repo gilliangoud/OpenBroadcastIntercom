@@ -6698,32 +6698,83 @@ fn is_supported_deepfilternet_coreml_package_path(path: &Path) -> bool {
 fn deepfilternet_coreml_package_status(path: &Path) -> (bool, Option<String>) {
     let required_dirs = ["enc.mlmodelc", "erb_dec.mlmodelc", "df_dec.mlmodelc"];
     let required_files = ["config.ini", "metadata.json"];
-    let missing_dirs = required_dirs
+    let mut missing = required_dirs
         .iter()
         .filter(|name| !path.join(name).is_dir())
         .copied()
         .collect::<Vec<_>>();
-    let missing_files = required_files
-        .iter()
-        .filter(|name| !path.join(name).is_file())
-        .copied()
-        .collect::<Vec<_>>();
+    missing.extend(
+        required_files
+            .iter()
+            .filter(|name| !path.join(name).is_file())
+            .copied(),
+    );
 
-    if missing_dirs.is_empty() && missing_files.is_empty() {
+    if missing.is_empty() {
+        missing.extend(deepfilternet_coreml_missing_config_keys(path));
+    }
+
+    if missing.is_empty() {
         return (true, None);
     }
 
-    let missing = missing_dirs
-        .into_iter()
-        .chain(missing_files)
-        .collect::<Vec<_>>()
-        .join(", ");
     (
         false,
         Some(format!(
-            "Incomplete Core ML package; missing required entries: {missing}"
+            "Incomplete Core ML package; missing required entries: {}",
+            missing.join(", ")
         )),
     )
+}
+
+fn deepfilternet_coreml_missing_config_keys(path: &Path) -> Vec<&'static str> {
+    let Ok(contents) = std::fs::read_to_string(path.join("config.ini")) else {
+        return vec!["config.ini readable"];
+    };
+    let mut section = "";
+    let mut keys = std::collections::HashSet::<(&str, &str)>::new();
+    for raw_line in contents.lines() {
+        let line = raw_line.split(['#', ';']).next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim();
+            continue;
+        }
+        let Some((key, _)) = line.split_once('=') else {
+            continue;
+        };
+        keys.insert((section, key.trim()));
+    }
+
+    let mut missing = [
+        ("df", "sr", "df.sr"),
+        ("df", "hop_size", "df.hop_size"),
+        ("df", "fft_size", "df.fft_size"),
+        ("df", "min_nb_erb_freqs", "df.min_nb_erb_freqs"),
+        ("df", "nb_erb", "df.nb_erb"),
+        ("df", "nb_df", "df.nb_df"),
+        (
+            "deepfilternet",
+            "conv_lookahead",
+            "deepfilternet.conv_lookahead",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(section, key, label)| (!keys.contains(&(section, key))).then_some(label))
+    .collect::<Vec<_>>();
+
+    for key in ["df_order", "df_lookahead"] {
+        if !keys.contains(&("df", key)) && !keys.contains(&("deepfilternet", key)) {
+            missing.push(match key {
+                "df_order" => "df.df_order or deepfilternet.df_order",
+                _ => "df.df_lookahead or deepfilternet.df_lookahead",
+            });
+        }
+    }
+
+    missing
 }
 
 async fn select_whisper_model(
@@ -9947,17 +9998,17 @@ fn deepfilternet_coreml_runtime_available() -> bool {
 
 fn deepfilternet_coreml_fallback_detail(model_path: &Path) -> String {
     if !cfg!(target_os = "macos") {
-        return "Core ML backend requested, but Core ML is only available on macOS; used Tract fallback".to_string();
+        return "Core ML backend requested, but Core ML packages only run on macOS; build on macOS with processing-deepfilternet-coreml or select an ONNX .tar.gz model for Tract".to_string();
     }
     if !cfg!(feature = "processing-deepfilternet-coreml") {
-        return "Core ML backend requested, but server was built without processing-deepfilternet-coreml; used Tract fallback".to_string();
+        return "Core ML backend requested, but server was built without processing-deepfilternet-coreml; rebuild with that feature or select an ONNX .tar.gz model for Tract".to_string();
     }
     if !is_supported_deepfilternet_coreml_package_path(model_path) {
         return "Core ML backend requested, but the selected DeepFilterNet model is not a Core ML package; select a complete Core ML package directory".to_string();
     }
     let (_, detail) = deepfilternet_coreml_package_status(model_path);
     detail.unwrap_or_else(|| {
-        "Core ML backend requested, but the selected DeepFilterNet Core ML package is not usable; used Tract fallback".to_string()
+        "Core ML backend requested, but the selected DeepFilterNet Core ML package is not usable; select a complete Core ML package directory or an ONNX .tar.gz model for Tract".to_string()
     })
 }
 
@@ -11713,9 +11764,12 @@ mod tests {
         tokio::fs::create_dir_all(package.join("df_dec.mlmodelc"))
             .await
             .unwrap();
-        tokio::fs::write(package.join("config.ini"), b"[df]\nsr = 48000\n")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            package.join("config.ini"),
+            b"[df]\nsr = 48000\nhop_size = 480\nfft_size = 960\nmin_nb_erb_freqs = 2\nnb_erb = 32\nnb_df = 96\ndf_order = 5\ndf_lookahead = 2\n[deepfilternet]\nconv_lookahead = 2\n",
+        )
+        .await
+        .unwrap();
         tokio::fs::write(package.join("metadata.json"), b"{}")
             .await
             .unwrap();
