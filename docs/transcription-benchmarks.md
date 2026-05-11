@@ -281,7 +281,12 @@ python3 tools/run_moonshine_benchmarks.py \
   --backend transformers \
   --mode offline \
   --mode chunked \
-  --chunk-ms 2000
+  --mode rolling-buffer \
+  --chunk-ms 2000 \
+  --window-ms 8000 \
+  --step-ms 1000 \
+  --commit-lag-ms 1500 \
+  --min-stable-passes 2
 ```
 
 `offline` mode transcribes each benchmark WAV as one segment. `chunked` mode
@@ -291,6 +296,53 @@ feed than whole-file transcription, but it is not yet the same as RedLine's
 server path because it does not replay Opus decode, VAD hangover, cleanup
 state, context carry, partial/final transcript timing, or server-side
 finalization.
+
+`rolling-buffer` mode is the first RedLine live replay harness. It expects the
+same processed mono WAVs produced by RedLine recording sessions; those WAVs are
+tapped after Opus decode and server-side cleanup, which is also where live
+transcription receives PCM. The replay scans 20 ms frames with RMS VAD, applies
+hangover, schedules rolling transcription windows every `--step-ms`, keeps only
+the most recent `--window-ms` of audio for partial jobs, emits stable partials
+after `--min-stable-passes`, keeps the last `--commit-lag-ms` worth of words
+uncommitted, and runs a final pass on VAD endpoint/talk release by default.
+
+The rolling replay records final WER/CER, prefix-scored partial WER over time,
+first-token latency, finalization latency, emission lag, stale jobs, dropped
+jobs, queue delay, and a flicker ratio for revised partial words. This borrows
+the same quality/latency/stability split used by
+[SimulStreaming](https://github.com/ufal/SimulStreaming)-style evaluation
+without trying to implement LAAL/DAL until we have word timestamps from the
+candidate runtime. Parakeet/Nemotron-style native streaming models should plug
+into the same benchmark outputs, but their adapter should feed true streaming
+state instead of repeatedly decoding overlapping WAV windows.
+
+Useful rolling-buffer sweeps:
+
+```sh
+python3 tools/run_moonshine_benchmarks.py \
+  --corpus artifacts/transcription-benchmarks/hf-librispeech-metal/corpus.json \
+  --out-dir artifacts/transcription-benchmarks/moonshine-rolling-8s \
+  --backend transformers \
+  --no-default-models \
+  --model moonshine-tiny-transformers=UsefulSensors/moonshine-tiny \
+  --mode rolling-buffer \
+  --window-ms 8000 \
+  --step-ms 1000 \
+  --commit-lag-ms 1500 \
+  --min-stable-passes 2
+
+python3 tools/run_moonshine_benchmarks.py \
+  --corpus artifacts/transcription-benchmarks/hf-librispeech-metal/corpus.json \
+  --out-dir artifacts/transcription-benchmarks/moonshine-rolling-12s \
+  --backend transformers \
+  --no-default-models \
+  --model moonshine-tiny-transformers=UsefulSensors/moonshine-tiny \
+  --mode rolling-buffer \
+  --window-ms 12000 \
+  --step-ms 2000 \
+  --commit-lag-ms 2000 \
+  --min-stable-passes 2
+```
 
 ## Evaluation Matrix
 
@@ -434,6 +486,7 @@ ultimately want for an on-device/server runtime:
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | moonshine tiny | transformers | offline | 1.30% | 0.85% | 811.9 ms | 0.1x | 7062.4 ms | 9.94 s | 506.1 MB | 5570.0 ms |
 | moonshine tiny | transformers | chunked 2000 ms | 24.68% | 12.18% | 692.6 ms | 0.1x | 5746.8 ms | 8.29 s | 523.2 MB | 4930.0 ms |
+| moonshine tiny | transformers | rolling-buffer 8000/1000 ms | 5.19% | 1.13% | 2723.4 ms | 0.3x | 7152.1 ms | 16.10 s | 591.2 MB | 11170.0 ms |
 | moonshine base | transformers | offline | 3.90% | 0.57% | 683.5 ms | 0.1x | 6082.0 ms | 8.59 s | 586.9 MB | 5290.0 ms |
 | moonshine base | transformers | chunked 2000 ms | 28.57% | 18.41% | 713.5 ms | 0.1x | 5695.7 ms | 8.25 s | 523.2 MB | 5090.0 ms |
 
@@ -443,6 +496,14 @@ which is exactly why the benchmark suite needs a RedLine live replay mode before
 we choose a streaming default. Short chunks need VAD-aware boundaries, overlap
 handling, context carry, and finalization rules; simply cutting every two
 seconds is not representative enough for production quality.
+
+The first rolling-buffer pass is much better than naive fixed chunks but still
+behind full-utterance offline transcription on clean LibriSpeech. It emitted 16
+stable partials across 26 rolling hypotheses, with 45.99% average prefix-scored
+partial WER, 3169.4 ms average first-token latency, 558.4 ms finalization
+latency, 266.4 ms average emission lag, and no stale or dropped jobs. That is
+the right benchmark shape for RedLine UX decisions: final accuracy, partial
+quality over time, and scheduler pressure are now visible separately.
 
 ## Acceptance Notes
 

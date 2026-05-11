@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shlex
@@ -89,6 +90,56 @@ def score_text(reference: str, hypothesis: str) -> dict[str, Any]:
         "char_errors": char_errors,
         "cer": char_errors / ref_char_count if ref_char_count else 0.0,
     }
+
+
+def score_partial_updates(
+    reference: str,
+    partials: list[Any],
+    *,
+    duration_ms: float | None,
+) -> list[dict[str, Any]]:
+    scores: list[dict[str, Any]] = []
+    reference_words = reference.split()
+    for index, raw in enumerate(partials):
+        if not isinstance(raw, dict):
+            continue
+        text = raw.get("text")
+        if not isinstance(text, str):
+            continue
+        audio_end_ms = raw.get("audio_end_ms")
+        progress: float | None = None
+        partial_reference = reference
+        if (
+            isinstance(audio_end_ms, (int, float))
+            and duration_ms is not None
+            and duration_ms > 0
+            and raw.get("kind") != "final"
+            and reference_words
+        ):
+            progress = max(0.0, min(1.0, float(audio_end_ms) / duration_ms))
+            reference_word_count = max(
+                1,
+                min(len(reference_words), math.ceil(len(reference_words) * progress)),
+            )
+            partial_reference = " ".join(reference_words[:reference_word_count])
+        text_score = score_text(partial_reference, text)
+        scores.append(
+            {
+                "index": index,
+                "kind": raw.get("kind", "partial"),
+                "audio_end_ms": audio_end_ms,
+                "emitted_at_ms": raw.get("emitted_at_ms"),
+                "latency_ms": raw.get("latency_ms"),
+                "reference_progress": progress,
+                "reference_text": partial_reference,
+                "text": text,
+                "wer": text_score["wer"],
+                "cer": text_score["cer"],
+                "word_errors": text_score["word_errors"],
+                "char_errors": text_score["char_errors"],
+            }
+        )
+    return scores
 
 
 def read_wav_metadata(path: Path) -> tuple[int, int, float]:
@@ -451,11 +502,49 @@ def score_corpus(
     total_reference_chars = 0
     latencies: list[float] = []
     realtime_factors: list[float] = []
+    partial_wers: list[float] = []
+    first_token_latencies: list[float] = []
+    finalization_latencies: list[float] = []
+    emission_lags: list[float] = []
+    flicker_ratios: list[float] = []
+    partial_update_count = 0
+    hypothesis_update_count = 0
+    stale_jobs = 0
+    dropped_jobs = 0
 
     for segment in corpus.segments:
         prediction = predictions[segment.id]
         prediction_text = prediction["text"]
         text_score = score_text(segment.expected_text, prediction_text)
+        partial_scores = score_partial_updates(
+            segment.expected_text,
+            prediction.get("partials") if isinstance(prediction.get("partials"), list) else [],
+            duration_ms=segment.duration_ms,
+        )
+        partial_wers.extend(
+            score["wer"] for score in partial_scores if score.get("kind") != "final"
+        )
+        live_metrics = (
+            prediction.get("live_metrics")
+            if isinstance(prediction.get("live_metrics"), dict)
+            else {}
+        )
+        first_token_latency_ms = live_metrics.get("first_token_latency_ms")
+        finalization_latency_ms = live_metrics.get("finalization_latency_ms")
+        average_emission_lag_ms = live_metrics.get("average_emission_lag_ms")
+        flicker_ratio = live_metrics.get("flicker_ratio")
+        if isinstance(first_token_latency_ms, (int, float)):
+            first_token_latencies.append(float(first_token_latency_ms))
+        if isinstance(finalization_latency_ms, (int, float)):
+            finalization_latencies.append(float(finalization_latency_ms))
+        if isinstance(average_emission_lag_ms, (int, float)):
+            emission_lags.append(float(average_emission_lag_ms))
+        if isinstance(flicker_ratio, (int, float)):
+            flicker_ratios.append(float(flicker_ratio))
+        partial_update_count += int(live_metrics.get("partial_updates", 0) or 0)
+        hypothesis_update_count += int(live_metrics.get("hypothesis_updates", 0) or 0)
+        stale_jobs += int(live_metrics.get("stale_jobs", 0) or 0)
+        dropped_jobs += int(live_metrics.get("dropped_jobs", 0) or 0)
         latency_ms = prediction.get("latency_ms")
         if isinstance(latency_ms, (int, float)):
             latencies.append(float(latency_ms))
@@ -476,6 +565,16 @@ def score_corpus(
                 "expected_text": segment.expected_text,
                 "prediction_text": prediction_text,
                 "latency_ms": latency_ms,
+                "first_token_latency_ms": (
+                    float(first_token_latency_ms)
+                    if isinstance(first_token_latency_ms, (int, float))
+                    else None
+                ),
+                "finalization_latency_ms": (
+                    float(finalization_latency_ms)
+                    if isinstance(finalization_latency_ms, (int, float))
+                    else None
+                ),
                 "realtime_factor": (
                     float(latency_ms) / segment.duration_ms
                     if latency_ms is not None and segment.duration_ms
@@ -483,6 +582,8 @@ def score_corpus(
                 ),
                 "metadata": segment.metadata,
                 "score": text_score,
+                "partial_scores": partial_scores,
+                "live_metrics": live_metrics,
             }
         )
 
@@ -499,6 +600,39 @@ def score_corpus(
             sum(realtime_factors) / len(realtime_factors) if realtime_factors else None
         ),
     }
+    if (
+        partial_update_count
+        or hypothesis_update_count
+        or first_token_latencies
+        or finalization_latencies
+        or stale_jobs
+        or dropped_jobs
+    ):
+        summary["live"] = {
+            "partial_updates": partial_update_count,
+            "hypothesis_updates": hypothesis_update_count,
+            "average_partial_wer": (
+                sum(partial_wers) / len(partial_wers) if partial_wers else None
+            ),
+            "average_first_token_latency_ms": (
+                sum(first_token_latencies) / len(first_token_latencies)
+                if first_token_latencies
+                else None
+            ),
+            "average_finalization_latency_ms": (
+                sum(finalization_latencies) / len(finalization_latencies)
+                if finalization_latencies
+                else None
+            ),
+            "average_emission_lag_ms": (
+                sum(emission_lags) / len(emission_lags) if emission_lags else None
+            ),
+            "average_flicker_ratio": (
+                sum(flicker_ratios) / len(flicker_ratios) if flicker_ratios else None
+            ),
+            "stale_jobs": stale_jobs,
+            "dropped_jobs": dropped_jobs,
+        }
     return {
         "version": 1,
         "corpus": {
@@ -586,12 +720,38 @@ def render_markdown(result: dict[str, Any]) -> str:
             f"{percent(summary['cer'])} | {number(summary['average_latency_ms'], ' ms')} | "
             f"{number(summary['average_realtime_factor'], 'x')} |"
         ),
-        "",
-        "## Segments",
-        "",
-        "| ID | Device | Noise | Cleanup | WER | CER | Latency | Expected | Prediction |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |",
     ]
+    live_summary = summary.get("live")
+    if live_summary:
+        lines.extend(
+            [
+                "",
+                "## Live Replay",
+                "",
+                "| Partials | Hypotheses | Avg partial WER | First token | Finalization | Emission lag | Flicker | Stale | Dropped |",
+                "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                (
+                    f"| {live_summary['partial_updates']} | "
+                    f"{live_summary['hypothesis_updates']} | "
+                    f"{percent(live_summary['average_partial_wer'])} | "
+                    f"{number(live_summary['average_first_token_latency_ms'], ' ms')} | "
+                    f"{number(live_summary['average_finalization_latency_ms'], ' ms')} | "
+                    f"{number(live_summary['average_emission_lag_ms'], ' ms')} | "
+                    f"{number(live_summary['average_flicker_ratio'])} | "
+                    f"{live_summary['stale_jobs']} | "
+                    f"{live_summary['dropped_jobs']} |"
+                ),
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Segments",
+            "",
+            "| ID | Device | Noise | Cleanup | WER | CER | Latency | Expected | Prediction |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+        ]
+    )
     for segment in result["segments"]:
         metadata = segment.get("metadata", {})
         lines.append(

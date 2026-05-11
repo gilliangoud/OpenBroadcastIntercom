@@ -27,6 +27,15 @@ def write_mono_wav(path: Path, *, sample_rate: int = 16_000, samples: int = 1600
         handle.writeframes(frames)
 
 
+def write_speech_wav(path: Path, *, sample_rate: int = 16_000, samples: int = 16_000) -> None:
+    frames = struct.pack("<" + "h" * samples, *([9000] * samples))
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(frames)
+
+
 class TranscriptionBenchmarkTests(unittest.TestCase):
     def test_text_scoring_normalizes_case_and_punctuation(self):
         score = tb.score_text("Check, one two!", "check one too")
@@ -273,6 +282,106 @@ class TranscriptionBenchmarkTests(unittest.TestCase):
             moonshine_benchmark.normalize_transcribe_output(["Ref one", {"text": "check"}]),
             "Ref one check",
         )
+
+    def test_moonshine_stitches_repeated_rolling_windows(self):
+        text = moonshine_benchmark.stitch_by_word_overlap(
+            "ref one check",
+            "check clock stopped",
+        )
+
+        self.assertEqual(text, "ref one check clock stopped")
+
+    def test_moonshine_rolling_replay_emits_live_metrics(self):
+        class FakeBackend:
+            def transcribe_file(self, path: Path) -> str:
+                duration = moonshine_benchmark.wav_duration_ms(path)
+                if duration >= 1400:
+                    return "ref one check clock stopped"
+                return "ref one check"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wav = root / "speech.wav"
+            write_speech_wav(wav, samples=32_000)
+
+            text, latency_ms, jobs, partials, metrics = moonshine_benchmark.transcribe_rolling_buffer(
+                FakeBackend(),
+                wav,
+                window_ms=2000,
+                step_ms=500,
+                commit_lag_ms=0,
+                min_stable_passes=2,
+                final_pass_on_release=True,
+                final_pass_scope="utterance",
+                max_overlap_words=8,
+                vad_rms_threshold=0.01,
+                vad_hangover_ms=200,
+                vad_min_speech_ms=40,
+                stale_job_ms=30_000,
+                queue_limit=8,
+                frame_ms=20,
+            )
+
+        self.assertEqual(text, "ref one check clock stopped")
+        self.assertGreater(latency_ms, 0)
+        self.assertTrue(jobs)
+        self.assertTrue(partials)
+        self.assertEqual(metrics["mode"], "rolling-buffer")
+        self.assertEqual(metrics["stale_jobs"], 0)
+        self.assertIsNotNone(metrics["first_token_latency_ms"])
+
+    def test_score_corpus_includes_live_replay_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wav = root / "clip.wav"
+            write_mono_wav(wav)
+            corpus_path = root / "corpus.json"
+            corpus_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "segments": [
+                            {"id": "clip", "audio": "clip.wav", "expected_text": "ref one check"}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            corpus = tb.load_corpus(corpus_path)
+            result = tb.score_corpus(
+                corpus,
+                {
+                    "clip": {
+                        "text": "ref one check",
+                        "latency_ms": 30,
+                        "partials": [
+                            {
+                                "kind": "partial",
+                                "text": "ref one",
+                                "audio_end_ms": 500,
+                                "emitted_at_ms": 620,
+                            }
+                        ],
+                        "live_metrics": {
+                            "partial_updates": 1,
+                            "hypothesis_updates": 2,
+                            "first_token_latency_ms": 620,
+                            "finalization_latency_ms": 80,
+                            "average_emission_lag_ms": 120,
+                            "flicker_ratio": 0.25,
+                            "stale_jobs": 0,
+                            "dropped_jobs": 0,
+                        },
+                    }
+                },
+                model_id="live-fixture",
+                runtime="fixture",
+            )
+
+        self.assertEqual(result["summary"]["live"]["partial_updates"], 1)
+        self.assertAlmostEqual(result["summary"]["live"]["average_partial_wer"], 1 / 3)
+        markdown = tb.render_markdown(result)
+        self.assertIn("Live Replay", markdown)
 
     def test_moonshine_runner_keeps_venv_python_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:

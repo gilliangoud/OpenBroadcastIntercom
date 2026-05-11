@@ -92,6 +92,9 @@ def run_profiled(command: list[str], *, env: dict[str, str], timeout: float) -> 
     metrics = parse_macos_time_l(stderr) if time_l.exists() else {}
     return {
         "elapsed_ms": elapsed_ms,
+        "returncode": completed.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
         "max_rss_kb": metrics.get("max_rss_kb"),
         "child_cpu_time_ms": metrics.get("child_cpu_time_ms"),
         "profile_method": "time -l" if time_l.exists() and not time_sysctl_blocked else "elapsed",
@@ -132,6 +135,7 @@ def enrich_score(
         "mode": predictions.get("mode"),
         "chunk_ms": predictions.get("chunk_ms"),
         "overlap_ms": predictions.get("overlap_ms"),
+        "rolling_buffer": predictions.get("rolling_buffer"),
     }
     result["macos_profile"] = {
         key: profile.get(key)
@@ -144,8 +148,8 @@ def render_summary(results: list[dict[str, Any]]) -> str:
     lines = [
         "# Moonshine Benchmark Summary",
         "",
-        "| Model | Backend | Mode | WER | CER | Avg latency | Realtime | Load | Wall time | Max RSS | CPU time | Notes |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Model | Backend | Mode | WER | CER | Avg latency | Realtime | First token | Finalize | Partials | Stale/drop | Load | Wall time | Max RSS | CPU time | Notes |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for result in results:
         model = result.get("model", {})
@@ -165,6 +169,10 @@ def render_summary(results: list[dict[str, Any]]) -> str:
                         "-",
                         "-",
                         "-",
+                        "-",
+                        "-",
+                        "-",
+                        "-",
                         tb.markdown_escape(result["error"]),
                     ]
                 )
@@ -174,10 +182,14 @@ def render_summary(results: list[dict[str, Any]]) -> str:
         summary = result["summary"]
         profile = result.get("macos_profile", {})
         adapter = result.get("adapter", {})
+        live_summary = summary.get("live") or {}
         backend = adapter.get("backend") or {}
         backend_label = "onnx" if backend.get("onnx") else "transformers"
         rss_kb = profile.get("max_rss_kb")
         rss_mb = rss_kb / 1024.0 if isinstance(rss_kb, int) else None
+        stale_drop = "-"
+        if live_summary:
+            stale_drop = f"{live_summary.get('stale_jobs', 0)}/{live_summary.get('dropped_jobs', 0)}"
         lines.append(
             "| "
             + " | ".join(
@@ -189,6 +201,10 @@ def render_summary(results: list[dict[str, Any]]) -> str:
                     tb.percent(summary["cer"]),
                     markdown_number(summary["average_latency_ms"], " ms"),
                     markdown_number(summary["average_realtime_factor"], "x"),
+                    markdown_number(live_summary.get("average_first_token_latency_ms"), " ms"),
+                    markdown_number(live_summary.get("average_finalization_latency_ms"), " ms"),
+                    markdown_number(live_summary.get("partial_updates")),
+                    stale_drop,
                     markdown_number(adapter.get("model_load_ms"), " ms"),
                     markdown_number(profile.get("elapsed_ms"), " ms"),
                     markdown_number(rss_mb, " MB"),
@@ -236,6 +252,26 @@ def run_model(
         str(args.chunk_ms),
         "--overlap-ms",
         str(args.overlap_ms),
+        "--window-ms",
+        str(args.window_ms),
+        "--step-ms",
+        str(args.step_ms),
+        "--commit-lag-ms",
+        str(args.commit_lag_ms),
+        "--min-stable-passes",
+        str(args.min_stable_passes),
+        "--final-pass-scope",
+        args.final_pass_scope,
+        "--vad-rms-threshold",
+        str(args.vad_rms_threshold),
+        "--vad-hangover-ms",
+        str(args.vad_hangover_ms),
+        "--vad-min-speech-ms",
+        str(args.vad_min_speech_ms),
+        "--stale-job-ms",
+        str(args.stale_job_ms),
+        "--queue-limit",
+        str(args.queue_limit),
         "--device",
         args.device,
         "--token-limit-factor",
@@ -243,8 +279,17 @@ def run_model(
     ]
     if args.fp16:
         command.append("--fp16")
+    command.append(
+        "--final-pass-on-release" if args.final_pass_on_release else "--no-final-pass-on-release"
+    )
 
     profile = run_profiled(command, env=args.env, timeout=args.timeout)
+    if not predictions_path.exists():
+        stderr = (profile.get("stderr") or "").strip()
+        stdout = (profile.get("stdout") or "").strip()
+        detail = stderr or stdout or "adapter did not write predictions"
+        raise SuiteError(detail[-4000:])
+
     raw_predictions = json.loads(predictions_path.read_text(encoding="utf-8"))
     _, predictions = tb.load_predictions(predictions_path)
     scored = tb.score_corpus(corpus, predictions, model_id=f"{model_id}-{mode}", runtime="moonshine")
@@ -279,12 +324,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         action="append",
-        choices=["offline", "chunked"],
+        choices=["offline", "chunked", "rolling-buffer"],
         help="May be passed more than once. Defaults to offline and chunked.",
     )
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--chunk-ms", type=int, default=2000)
     parser.add_argument("--overlap-ms", type=int, default=0)
+    parser.add_argument("--window-ms", type=int, default=8000)
+    parser.add_argument("--step-ms", type=int, default=1000)
+    parser.add_argument("--commit-lag-ms", type=int, default=1500)
+    parser.add_argument("--min-stable-passes", type=int, default=2)
+    parser.add_argument(
+        "--final-pass-on-release",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--final-pass-scope", choices=["utterance", "window"], default="utterance")
+    parser.add_argument("--vad-rms-threshold", type=float, default=0.01)
+    parser.add_argument("--vad-hangover-ms", type=int, default=600)
+    parser.add_argument("--vad-min-speech-ms", type=int, default=120)
+    parser.add_argument("--stale-job-ms", type=int, default=30_000)
+    parser.add_argument("--queue-limit", type=int, default=8)
     parser.add_argument("--device", choices=["auto", "cpu", "mps", "cuda"], default="auto")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--token-limit-factor", type=float, default=6.5)
@@ -349,6 +409,17 @@ def main(argv: list[str] | None = None) -> int:
         "modes": modes,
         "chunk_ms": args.chunk_ms,
         "overlap_ms": args.overlap_ms,
+        "window_ms": args.window_ms,
+        "step_ms": args.step_ms,
+        "commit_lag_ms": args.commit_lag_ms,
+        "min_stable_passes": args.min_stable_passes,
+        "final_pass_on_release": args.final_pass_on_release,
+        "final_pass_scope": args.final_pass_scope,
+        "vad_rms_threshold": args.vad_rms_threshold,
+        "vad_hangover_ms": args.vad_hangover_ms,
+        "vad_min_speech_ms": args.vad_min_speech_ms,
+        "stale_job_ms": args.stale_job_ms,
+        "queue_limit": args.queue_limit,
         "results": results,
     }
     (args.out_dir / "summary.json").write_text(
