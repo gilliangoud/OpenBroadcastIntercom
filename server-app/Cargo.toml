@@ -8,6 +8,13 @@ default-run = "server-app-native"
 [features]
 default = []
 native = ["dep:tauri", "server/macos-accelerated"]
+macos-release-native = [
+  "native",
+  "server/engines-all",
+  "server/macos-metal",
+  "server/macos-coreml",
+  "server/processing-deepfilternet-coreml",
+]
 
 [[bin]]
 name = "server-app-native"

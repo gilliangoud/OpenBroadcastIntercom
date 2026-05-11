@@ -8,7 +8,7 @@ caches, so the old `.git` object database must not be pushed.
 
 - Rust/C source, Cargo manifests, docs, scripts, schemas, app icons, and Tauri
   metadata needed to regenerate mobile projects.
-- External Whisper model metadata in `intercom-models/manifest.json`.
+- Curated external model metadata in `intercom-models/manifest.json`.
 - Curated non-Whisper Git LFS model assets listed in `THIRD_PARTY_NOTICES.md`.
 - Sanitized example config files.
 
@@ -19,7 +19,8 @@ caches, so the old `.git` object database must not be pushed.
   Finder duplicates, and local runtime state JSON.
 - Apple signing assets, provisioning profiles, certificates, private keys, and
   hard-coded team identifiers.
-- Downloaded Whisper `.bin` files and uncurated large model files.
+- Downloaded Whisper `.bin`/`.gguf` files, generated Core ML model packages,
+  and uncurated large model files.
 
 ## Pre-Publish Checklist
 

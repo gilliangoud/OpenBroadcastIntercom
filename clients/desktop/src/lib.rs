@@ -32,8 +32,8 @@ use client_core::{
 };
 use common::{
     codec_samples_per_frame, AlertId, AudioPacket, ButtonCapability, ButtonId,
-    CaptureChannelHealth, CaptureHealthStatus, ClientLockoutPolicy, ClientRole, Codec,
-    ControlMessage, ControlResponse, DesktopCaptureHealthStatus, DirectCallStatus,
+    CaptureChannelHealth, CaptureHealthStatus, ClientCapabilities, ClientLockoutPolicy, ClientRole,
+    Codec, ControlMessage, ControlResponse, DesktopCaptureHealthStatus, DirectCallStatus,
     Esp32AudioConfig, IfbConfig, OpusProfile, ProcessingConfig, ProcessingMode, ProcessingProfile,
     StereoConfig, TalkButtonMode, TalkMode, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
 };
@@ -461,6 +461,12 @@ pub async fn run_until_shutdown_with_local_api(
             .map(ButtonCapability::from)
             .collect(),
     );
+    let mut capabilities = if cfg!(any(target_os = "android", target_os = "ios")) {
+        ClientCapabilities::mobile()
+    } else {
+        ClientCapabilities::desktop()
+    };
+    capabilities.supports_local_api = !args.disable_local_ui;
     let button_keys = args.button_keys.clone();
     let audio_settings = Arc::new(AudioSettings::new(args.mic_gain, args.speaker_gain));
     let input_backend_status =
@@ -512,6 +518,7 @@ pub async fn run_until_shutdown_with_local_api(
         active_alerts: Vec::new(),
         recent_alerts: Vec::new(),
         advertised_buttons: advertised_buttons.clone(),
+        capabilities: capabilities.clone(),
         ifb: IfbConfig::default(),
         lockout: ClientLockoutPolicy::default(),
         stereo: StereoConfig::default(),
@@ -640,6 +647,7 @@ pub async fn run_until_shutdown_with_local_api(
             client_uid: initial_config.client_uid.clone(),
             codecs: supported_codecs(),
             buttons: advertised_buttons.clone(),
+            capabilities,
             role: ClientRole::Client,
         },
     )
@@ -3773,6 +3781,7 @@ mod tests {
             active_alerts: Vec::new(),
             recent_alerts: Vec::new(),
             advertised_buttons: Vec::new(),
+            capabilities: ClientCapabilities::default(),
             ifb: IfbConfig::default(),
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),

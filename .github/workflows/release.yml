@@ -12,7 +12,7 @@ env:
 
 concurrency:
   group: release-main
-  cancel-in-progress: false
+  cancel-in-progress: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
 
 jobs:
   checks:
@@ -68,8 +68,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios-sim
+      - name: Install macOS native server build dependencies
+        run: brew install abseil cmake meson ninja pkg-config
       - name: Check iOS simulator Rust target
         run: cargo check -p app --features native --target aarch64-apple-ios-sim
+      - name: Check macOS server app native release features
+        working-directory: server-app
+        run: cargo check --features macos-release-native
 
   version:
     needs: [checks, ios-check]
@@ -87,12 +92,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - uses: dtolnay/rust-toolchain@stable
       - name: Apply release version
         id: release-version
         run: |
           version="$(python3 tools/release_version.py --apply --print-next | tail -n 1)"
           tools/check-version-sync.sh
-          git add Cargo.toml clients/app/tauri.conf.json clients/bridge-app/tauri.conf.json server-app/tauri.conf.json
+          git add Cargo.toml Cargo.lock clients/app/tauri.conf.json clients/bridge-app/tauri.conf.json server-app/tauri.conf.json
           if ! git diff --cached --quiet; then
             git commit -m "chore(release): v${version} [skip release]"
           fi
@@ -120,6 +126,8 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install macOS native server build dependencies
+        run: brew install abseil cmake meson ninja pkg-config
       - name: Build RedLine macOS app
         working-directory: clients/app
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
@@ -128,7 +136,7 @@ jobs:
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
       - name: Build RedLine Server macOS app
         working-directory: server-app
-        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles app --ci
+        run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features macos-release-native --bundles app --ci
       - name: Archive macOS apps
         run: |
           mkdir -p artifacts
@@ -156,7 +164,17 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libasound2-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+        timeout-minutes: 20
+        run: |
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libasound2-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
       - name: Build RedLine Linux bundles
         working-directory: clients/app
         run: npx --yes @tauri-apps/cli@${{ env.TAURI_CLI_VERSION }} build --features native --bundles appimage deb --ci
@@ -241,6 +259,16 @@ jobs:
           if [ "${1:-}" = "tauri" ]; then
             shift
           fi
+
+          project_dir="$PWD"
+          while [ "$project_dir" != "/" ]; do
+            if [ -f "$project_dir/tauri.conf.json" ] || [ -f "$project_dir/tauri.conf.json5" ] || [ -f "$project_dir/Tauri.toml" ]; then
+              cd "$project_dir"
+              break
+            fi
+            project_dir="$(dirname "$project_dir")"
+          done
+
           exec npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" "$@"
           SH
           chmod +x "$HOME/.cargo/bin/cargo-tauri"
@@ -274,7 +302,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.tag }}
-          lfs: true
       - name: Select Xcode 26.4
         run: |
           sudo xcode-select -s /Applications/Xcode_26.4.app/Contents/Developer
@@ -296,6 +323,16 @@ jobs:
           if [ "${1:-}" = "tauri" ]; then
             shift
           fi
+
+          project_dir="$PWD"
+          while [ "$project_dir" != "/" ]; do
+            if [ -f "$project_dir/tauri.conf.json" ] || [ -f "$project_dir/tauri.conf.json5" ] || [ -f "$project_dir/Tauri.toml" ]; then
+              cd "$project_dir"
+              break
+            fi
+            project_dir="$(dirname "$project_dir")"
+          done
+
           exec npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" "$@"
           SH
           chmod +x "$HOME/.cargo/bin/cargo-tauri"

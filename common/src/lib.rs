@@ -380,6 +380,8 @@ pub enum ControlMessage {
         #[serde(default)]
         buttons: Vec<ButtonCapability>,
         #[serde(default)]
+        capabilities: ClientCapabilities,
+        #[serde(default)]
         role: ClientRole,
     },
     Config {
@@ -498,6 +500,149 @@ pub struct ButtonCapability {
     pub id: ButtonId,
     #[serde(default)]
     pub label: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientKind {
+    #[default]
+    Unknown,
+    Desktop,
+    Mobile,
+    Pi,
+    Esp32,
+    Bridge,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientCapabilities {
+    #[serde(default)]
+    pub advertised: bool,
+    #[serde(default)]
+    pub client_kind: ClientKind,
+    #[serde(default)]
+    pub supports_processing: bool,
+    #[serde(default)]
+    pub supports_native_voice_processing: bool,
+    #[serde(default)]
+    pub supports_esp32_audio: bool,
+    #[serde(default)]
+    pub supports_stereo: bool,
+    #[serde(default)]
+    pub supports_ifb: bool,
+    #[serde(default)]
+    pub supports_local_api: bool,
+    #[serde(default)]
+    pub supports_device_selection: bool,
+    #[serde(default)]
+    pub button_action_types: Vec<String>,
+}
+
+impl Default for ClientCapabilities {
+    fn default() -> Self {
+        Self {
+            advertised: false,
+            client_kind: ClientKind::Unknown,
+            supports_processing: false,
+            supports_native_voice_processing: false,
+            supports_esp32_audio: false,
+            supports_stereo: false,
+            supports_ifb: false,
+            supports_local_api: false,
+            supports_device_selection: false,
+            button_action_types: Vec::new(),
+        }
+    }
+}
+
+impl ClientCapabilities {
+    pub fn desktop() -> Self {
+        Self {
+            advertised: true,
+            client_kind: ClientKind::Desktop,
+            supports_processing: true,
+            supports_native_voice_processing: true,
+            supports_esp32_audio: false,
+            supports_stereo: true,
+            supports_ifb: true,
+            supports_local_api: true,
+            supports_device_selection: true,
+            button_action_types: default_button_action_types(),
+        }
+    }
+
+    pub fn mobile() -> Self {
+        Self {
+            advertised: true,
+            client_kind: ClientKind::Mobile,
+            supports_processing: false,
+            supports_native_voice_processing: true,
+            supports_esp32_audio: false,
+            supports_stereo: true,
+            supports_ifb: true,
+            supports_local_api: false,
+            supports_device_selection: false,
+            button_action_types: default_button_action_types(),
+        }
+    }
+
+    pub fn pi() -> Self {
+        Self {
+            advertised: true,
+            client_kind: ClientKind::Pi,
+            supports_processing: false,
+            supports_native_voice_processing: false,
+            supports_esp32_audio: false,
+            supports_stereo: true,
+            supports_ifb: true,
+            supports_local_api: true,
+            supports_device_selection: true,
+            button_action_types: default_button_action_types(),
+        }
+    }
+
+    pub fn esp32() -> Self {
+        Self {
+            advertised: true,
+            client_kind: ClientKind::Esp32,
+            supports_processing: false,
+            supports_native_voice_processing: false,
+            supports_esp32_audio: true,
+            supports_stereo: false,
+            supports_ifb: false,
+            supports_local_api: false,
+            supports_device_selection: false,
+            button_action_types: default_button_action_types(),
+        }
+    }
+
+    pub fn bridge() -> Self {
+        Self {
+            advertised: true,
+            client_kind: ClientKind::Bridge,
+            supports_processing: false,
+            supports_native_voice_processing: false,
+            supports_esp32_audio: false,
+            supports_stereo: true,
+            supports_ifb: false,
+            supports_local_api: false,
+            supports_device_selection: true,
+            button_action_types: Vec::new(),
+        }
+    }
+}
+
+pub fn default_button_action_types() -> Vec<String> {
+    [
+        "transmit",
+        "alert",
+        "apply_preset",
+        "set_talk_mode",
+        "route_edit",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1575,6 +1720,8 @@ pub struct SessionStatus {
     #[serde(default)]
     pub advertised_buttons: Vec<ButtonCapability>,
     #[serde(default)]
+    pub capabilities: ClientCapabilities,
+    #[serde(default)]
     pub buttons: Vec<TalkButtonConfig>,
     #[serde(default)]
     pub active_buttons: Vec<ButtonId>,
@@ -2481,9 +2628,24 @@ mod tests {
             ControlMessage::Hello {
                 user_id: 7,
                 buttons,
+                capabilities,
                 ..
-            } if buttons.is_empty()
+            } if buttons.is_empty() && !capabilities.advertised
         ));
+        let hello = ControlMessage::Hello {
+            user_id: 8,
+            requested_user_id: Some(8),
+            client_uid: "desktop-8".to_string(),
+            codecs: vec![Codec::Opus],
+            buttons: Vec::new(),
+            capabilities: ClientCapabilities::desktop(),
+            role: ClientRole::Client,
+        };
+        let json = serde_json::to_string(&hello).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ControlMessage>(&json).unwrap(),
+            hello
+        );
 
         let button = TalkButtonConfig {
             id: "pa".to_string(),

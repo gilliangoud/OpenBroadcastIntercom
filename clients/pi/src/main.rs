@@ -27,10 +27,10 @@ use client_core::{
 };
 use common::{
     codec_samples_per_frame, AlertId, AlertStatus, AlertTarget, AudioPacket, ButtonCapability,
-    ButtonId, CaptureHealthStatus, ChannelPresenceRoster, ClientLockoutPolicy, ClientRole, Codec,
-    ControlMessage, ControlResponse, DirectCallHistoryEntry, DirectCallStatus, EmergencyStatus,
-    Esp32AudioConfig, IfbConfig, OpusProfile, ProcessingConfig, StereoConfig, TalkButtonConfig,
-    TalkMode, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
+    ButtonId, CaptureHealthStatus, ChannelPresenceRoster, ClientCapabilities, ClientLockoutPolicy,
+    ClientRole, Codec, ControlMessage, ControlResponse, DirectCallHistoryEntry, DirectCallStatus,
+    EmergencyStatus, Esp32AudioConfig, IfbConfig, OpusProfile, ProcessingConfig, StereoConfig,
+    TalkButtonConfig, TalkMode, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -279,6 +279,7 @@ async fn main() -> anyhow::Result<()> {
             .map(ButtonCapability::from)
             .collect(),
     );
+    let capabilities = ClientCapabilities::pi();
     let runtime_config = Arc::new(Mutex::new(ClientConfig {
         user_id,
         client_uid,
@@ -314,6 +315,7 @@ async fn main() -> anyhow::Result<()> {
         active_alerts: Vec::new(),
         recent_alerts: Vec::new(),
         advertised_buttons: advertised_buttons.clone(),
+        capabilities: capabilities.clone(),
         ifb: IfbConfig::default(),
         lockout: ClientLockoutPolicy::default(),
         stereo: StereoConfig::default(),
@@ -363,6 +365,7 @@ async fn main() -> anyhow::Result<()> {
             client_uid: initial_config.client_uid.clone(),
             codecs: supported_codecs(),
             buttons: advertised_buttons.clone(),
+            capabilities,
             role: ClientRole::Client,
         },
     )
@@ -1769,6 +1772,7 @@ mod tests {
             active_alerts: Vec::new(),
             recent_alerts: Vec::new(),
             advertised_buttons: Vec::new(),
+            capabilities: ClientCapabilities::default(),
             ifb: IfbConfig::default(),
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),

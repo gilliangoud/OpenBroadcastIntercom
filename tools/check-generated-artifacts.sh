@@ -29,6 +29,7 @@ tracked="$(
     '*.ipa' \
     'intercom-models/*.bin' \
     'intercom-models/*.gguf' \
+    'deepfilternet-coreml-models/**' \
     '**/.DS_Store' \
     '**/* [0-9]' \
     '**/* [0-9].*' \

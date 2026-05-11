@@ -135,6 +135,7 @@ async fn pushes_admin_config_updates_to_registered_client() {
                 client_uid: "test-client-7".to_string(),
                 codecs: vec![Codec::Pcm16],
                 buttons: Vec::new(),
+                capabilities: common::ClientCapabilities::default(),
                 role: common::ClientRole::Client,
             })
             .unwrap(),
@@ -286,6 +287,7 @@ async fn pushes_admin_config_updates_to_registered_client() {
                 client_uid: "test-client-7".to_string(),
                 codecs: vec![Codec::Pcm16, Codec::Opus],
                 buttons: Vec::new(),
+                capabilities: common::ClientCapabilities::default(),
                 role: common::ClientRole::Client,
             })
             .unwrap(),
@@ -389,6 +391,7 @@ async fn admin_api_preconfigures_client_before_connect() {
                     id: "director".to_string(),
                     label: "Director".to_string(),
                 }],
+                capabilities: common::ClientCapabilities::default(),
                 role: common::ClientRole::Client,
             })
             .unwrap(),
@@ -516,6 +519,7 @@ async fn admin_api_preconfigures_client_before_connect() {
                 client_uid: "test-client-13".to_string(),
                 codecs: vec![Codec::Pcm16],
                 buttons: Vec::new(),
+                capabilities: common::ClientCapabilities::default(),
                 role: common::ClientRole::Client,
             })
             .unwrap(),
@@ -917,6 +921,7 @@ async fn admin_api_saves_unsupported_live_codec_as_desired_with_live_fallback() 
                 client_uid: "test-client-20".to_string(),
                 codecs: vec![Codec::Pcm16],
                 buttons: Vec::new(),
+                capabilities: common::ClientCapabilities::default(),
                 role: common::ClientRole::Client,
             })
             .unwrap(),

@@ -10,6 +10,9 @@ pub struct ServerAppConfig {
     pub admin_bind: SocketAddr,
     pub admin_state_file: PathBuf,
     pub recordings_dir: PathBuf,
+    pub whisper_model_dir: PathBuf,
+    pub deepfilternet_model_dir: PathBuf,
+    pub deepfilternet_coreml_model_dir: PathBuf,
     pub advertise_name: Option<String>,
 }
 
@@ -22,6 +25,9 @@ impl ServerAppConfig {
             admin_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40002),
             admin_state_file: app_data_dir.join("intercom-state.json"),
             recordings_dir: app_data_dir.join("recordings"),
+            whisper_model_dir: app_data_dir.join("intercom-models"),
+            deepfilternet_model_dir: app_data_dir.join("deepfilternet-models"),
+            deepfilternet_coreml_model_dir: app_data_dir.join("deepfilternet-coreml-models"),
             advertise_name: Some("RedLine Server".to_string()),
         }
     }
@@ -44,8 +50,9 @@ impl ServerAppConfig {
             debug_audio_dir: None,
             whisper_command: None,
             whisper_model: None,
-            whisper_model_dir: PathBuf::from("intercom-models"),
-            deepfilternet_model_dir: PathBuf::from("deepfilternet-models"),
+            whisper_model_dir: self.whisper_model_dir,
+            deepfilternet_model_dir: self.deepfilternet_model_dir,
+            deepfilternet_coreml_model_dir: self.deepfilternet_coreml_model_dir,
             transcription_engine: server::TranscriptionEngineMode::Disabled,
         }
     }
@@ -62,6 +69,24 @@ pub async fn start_server_app_runtime(
         format!(
             "create server app recordings directory {}",
             config.recordings_dir.display()
+        )
+    })?;
+    std::fs::create_dir_all(&config.whisper_model_dir).with_context(|| {
+        format!(
+            "create server app Whisper model directory {}",
+            config.whisper_model_dir.display()
+        )
+    })?;
+    std::fs::create_dir_all(&config.deepfilternet_model_dir).with_context(|| {
+        format!(
+            "create server app DeepFilterNet model directory {}",
+            config.deepfilternet_model_dir.display()
+        )
+    })?;
+    std::fs::create_dir_all(&config.deepfilternet_coreml_model_dir).with_context(|| {
+        format!(
+            "create server app DeepFilterNet Core ML model directory {}",
+            config.deepfilternet_coreml_model_dir.display()
         )
     })?;
     server::start_runtime(config.into_server_runtime_config()).await
@@ -85,6 +110,15 @@ mod tests {
         assert_eq!(config.admin_bind, SocketAddr::from(([127, 0, 0, 1], 40002)));
         assert_eq!(config.admin_state_file, app_dir.join("intercom-state.json"));
         assert_eq!(config.recordings_dir, app_dir.join("recordings"));
+        assert_eq!(config.whisper_model_dir, app_dir.join("intercom-models"));
+        assert_eq!(
+            config.deepfilternet_model_dir,
+            app_dir.join("deepfilternet-models")
+        );
+        assert_eq!(
+            config.deepfilternet_coreml_model_dir,
+            app_dir.join("deepfilternet-coreml-models")
+        );
     }
 
     #[test]
