@@ -199,6 +199,59 @@ The runner keeps the venv Python path unresolved on purpose. Resolving the
 `bin/python` symlink bypasses the venv and can make `mlx_whisper` disappear
 even when the package is installed.
 
+To test WhisperKit/Core ML, install the CLI and run the suite:
+
+```sh
+brew install whisperkit-cli
+python3 tools/run_whisperkit_benchmarks.py \
+  --corpus artifacts/transcription-benchmarks/hf-librispeech-metal/corpus.json \
+  --out-dir artifacts/transcription-benchmarks/whisperkit-coreml \
+  --timeout 2400
+```
+
+The default suite covers `distil:large-v3`, `large-v3`, `small`, `base`, and
+`tiny`. For an exact local model package downloaded from the Argmax
+`whisperkit-coreml` repo, pass a path-backed model:
+
+```sh
+python3 tools/run_whisperkit_benchmarks.py \
+  --corpus artifacts/transcription-benchmarks/hf-librispeech-metal/corpus.json \
+  --out-dir artifacts/transcription-benchmarks/whisperkit-local \
+  --no-default-models \
+  --model whisperkit-large-v3-turbo=path:/path/to/openai_whisper-large-v3-v20240930_turbo_632MB
+```
+
+If using a locally built Argmax checkout instead of the Homebrew CLI, provide a
+command template:
+
+```sh
+python3 tools/run_whisperkit_benchmarks.py \
+  --corpus artifacts/transcription-benchmarks/hf-librispeech-metal/corpus.json \
+  --out-dir artifacts/transcription-benchmarks/whisperkit-swift-run \
+  --command-template 'swift run argmax-cli transcribe --model-path {model_path} --audio-path {audio_path}'
+```
+
+To test NVIDIA Parakeet/Nemotron models through NeMo, use a separate ignored
+Python environment because NeMo has a large dependency stack:
+
+```sh
+/opt/homebrew/bin/python3.12 -m venv artifacts/transcription-benchmarks/.venv-nemo
+artifacts/transcription-benchmarks/.venv-nemo/bin/python -m pip install -U pip wheel
+artifacts/transcription-benchmarks/.venv-nemo/bin/python -m pip install 'nemo_toolkit[asr]'
+python3 tools/run_parakeet_benchmarks.py \
+  --corpus artifacts/transcription-benchmarks/hf-librispeech-metal/corpus.json \
+  --out-dir artifacts/transcription-benchmarks/parakeet-nemo \
+  --device auto \
+  --timeout 3600
+```
+
+The default NeMo suite covers `nvidia/parakeet-unified-en-0.6b`,
+`nvidia/nemotron-speech-streaming-en-0.6b`, and
+`nvidia/parakeet-tdt-0.6b-v2`. The adapter currently scores the same offline
+corpus path for all three models and records the streaming context parameters
+that should be used for later streaming-specific captures. This keeps the
+comparison apples-to-apples until we add live chunked benchmark fixtures.
+
 ## Evaluation Matrix
 
 Fill this table only from measured local runs. The first acceptance target is a
@@ -210,6 +263,7 @@ populated comparison for RedLine captures and at least one online smoke corpus.
 | Whisper large-v3-turbo Q5_0 | reliable | TBD | TBD | TBD | TBD | TBD | TBD | Smaller baseline to compare quality loss. |
 | Distil-Whisper large-v3.5 | reliable | TBD | TBD | TBD | TBD | TBD | TBD | Candidate if local adapter is practical. |
 | Parakeet/Nemotron streaming | streaming | TBD | TBD | TBD | TBD | TBD | TBD | Candidate for low-latency local ASR. |
+| WhisperKit/Core ML | reliable | TBD | TBD | TBD | TBD | TBD | TBD | Candidate to compare Core ML/ANE against MLX. |
 | Moonshine | streaming | TBD | TBD | TBD | TBD | TBD | TBD | Candidate for low-resource devices. |
 
 ## Current macOS Smoke Result
@@ -296,6 +350,39 @@ range, medium 8-bit looks useful: it preserved medium accuracy while cutting
 roughly 539 MB from peak RSS. Small q4 is the best low-resource small-class
 variant in this pass. Base q4 saved very little memory over base 8-bit and lost
 character accuracy, so it is not a priority candidate.
+
+WhisperKit/Core ML comparison on the same smoke corpus, using
+`whisperkit-cli 1.0.0` with `cpuAndNeuralEngine` for both audio encoder and text
+decoder compute units. These are cached runs after model download and Core ML
+compilation:
+
+| Runtime/model | WER | CER | Avg latency | Real-time factor | First segment/load | Cached wall time | Max RSS | CPU time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| whisperkit distil-large-v3 | 1.30% | 0.28% | 5641.9 ms | 0.760x | 6140.3 ms | 17.00 s | 112.8 MB | 3550.0 ms |
+| whisperkit small | 3.90% | 0.28% | 4285.0 ms | 0.580x | 4111.3 ms | 12.99 s | 146.5 MB | 4170.0 ms |
+| whisperkit base | 5.19% | 0.85% | 3508.2 ms | 0.493x | 3450.7 ms | 10.66 s | 102.7 MB | 3040.0 ms |
+| whisperkit tiny | 6.49% | 1.70% | 3476.6 ms | 0.481x | 3506.6 ms | 10.53 s | 102.8 MB | 2740.0 ms |
+
+WhisperKit is not faster than MLX on this machine, but its process RSS is much
+lower. That makes it worth keeping as a potential low-memory Core ML fallback,
+not the primary macOS runtime. The openai `large-v3` variant returned no
+transcript text from `whisperkit-cli` for the debug clip and is marked failed
+until we test a path-backed package from the Argmax model repo.
+
+Parakeet/NeMo comparison on the same smoke corpus, using the local
+`artifacts/transcription-benchmarks/.venv-nemo` environment with NeMo ASR and
+PyTorch MPS:
+
+| Runtime/model | Device | WER | CER | Avg latency | Real-time factor | Load time | Cached wall time | Max RSS | CPU time |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| parakeet-tdt-0.6b-v2 | mps | 2.60% | 1.13% | 811.8 ms | 0.1x | 9619.1 ms | 22.71 s | 5232.0 MB | 23130.0 ms |
+
+Parakeet TDT V2 is fast after the model is loaded, but it used far more memory
+and CPU time than the MLX Whisper candidates. `nvidia/parakeet-unified-en-0.6b`
+did not instantiate with the PyPI NeMo 2.7.3 package on macOS because the model
+config contains `att_chunk_context_size`, which the installed encoder rejected.
+Keep Unified in the candidate set, but test it through NeMo main/nightly or an
+ONNX/runtime-specific path before using it for product decisions.
 
 ## Acceptance Notes
 

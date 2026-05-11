@@ -9,7 +9,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_transcription_benchmarks as suite
 import run_mlx_whisper_benchmarks as mlx_suite
+import run_parakeet_benchmarks as parakeet_suite
+import run_whisperkit_benchmarks as whisperkit_suite
+import parakeet_benchmark
 import transcription_benchmark as tb
+import whisperkit_benchmark
 
 
 def write_mono_wav(path: Path, *, sample_rate: int = 16_000, samples: int = 1600) -> None:
@@ -213,6 +217,51 @@ class TranscriptionBenchmarkTests(unittest.TestCase):
             venv_python.symlink_to(base_python)
 
             absolute = mlx_suite.absolute_without_symlink_resolution(venv_python)
+
+            self.assertEqual(absolute, venv_python.absolute())
+            self.assertNotEqual(absolute, base_python.resolve())
+
+    def test_whisperkit_extracts_json_text(self):
+        output = json.dumps({"segments": [{"text": "Check one."}, {"text": "Clock stopped."}]})
+
+        text = whisperkit_benchmark.extract_transcript(output, "")
+
+        self.assertEqual(text, "Check one. Clock stopped.")
+
+    def test_whisperkit_extracts_prefixed_text_line(self):
+        output = "Loading model\nTranscription: Ref one check\n"
+
+        text = whisperkit_benchmark.extract_transcript(output, "")
+
+        self.assertEqual(text, "Ref one check")
+
+    def test_whisperkit_model_spec_supports_prefix_and_path(self):
+        prefixed = whisperkit_suite.parse_model_spec("wk-distil=distil:large-v3")
+        local_path = whisperkit_suite.parse_model_spec("wk-local=path:/tmp/model")
+
+        self.assertEqual(prefixed["id"], "wk-distil")
+        self.assertEqual(prefixed["prefix"], "distil")
+        self.assertEqual(prefixed["model"], "large-v3")
+        self.assertEqual(local_path["path"], "/tmp/model")
+
+    def test_parakeet_output_text_accepts_object_text(self):
+        class Hypothesis:
+            text = "Ref one check."
+
+        self.assertEqual(parakeet_benchmark.output_text(Hypothesis()), "Ref one check.")
+        self.assertEqual(parakeet_benchmark.output_text({"pred_text": "Clock stopped."}), "Clock stopped.")
+
+    def test_parakeet_runner_keeps_venv_python_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base_python = root / "homebrew-python"
+            base_python.write_text("", encoding="utf-8")
+            venv_bin = root / "venv" / "bin"
+            venv_bin.mkdir(parents=True)
+            venv_python = venv_bin / "python"
+            venv_python.symlink_to(base_python)
+
+            absolute = parakeet_suite.absolute_without_symlink_resolution(venv_python)
 
             self.assertEqual(absolute, venv_python.absolute())
             self.assertNotEqual(absolute, base_python.resolve())
