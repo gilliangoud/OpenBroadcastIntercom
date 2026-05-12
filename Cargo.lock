@@ -3010,7 +3010,7 @@ dependencies = [
 
 [[package]]
 name = "ndi-runtime"
-version = "2026.5.9"
+version = "2026.5.10"
 dependencies = [
  "anyhow",
  "libloading 0.8.9",

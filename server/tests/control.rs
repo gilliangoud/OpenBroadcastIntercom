@@ -1084,11 +1084,18 @@ async fn read_response(
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 ) -> ControlResponse {
-    let message = ws.next().await.unwrap().unwrap();
-    let Message::Text(text) = message else {
-        panic!("expected text response");
-    };
-    serde_json::from_str(&text).unwrap()
+    for _ in 0..10 {
+        let message = ws.next().await.unwrap().unwrap();
+        let Message::Text(text) = message else {
+            panic!("expected text response");
+        };
+        if serde_json::from_str::<ControlEvent>(&text).is_ok() {
+            continue;
+        }
+        return serde_json::from_str(&text).unwrap();
+    }
+
+    panic!("expected control response");
 }
 
 async fn read_event(
