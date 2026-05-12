@@ -1,5 +1,7 @@
 # Native App
 
+[Docs index](README.md) | [Root README](../README.md)
+
 The native client is the `app-native` binary in `clients/app`. It uses Tauri 2
 for the OS window, tray/menu integration, settings window, and bundle metadata.
 The audio/control runtime is still the existing Rust desktop runtime.

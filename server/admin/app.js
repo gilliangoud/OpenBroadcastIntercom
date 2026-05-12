@@ -1,4 +1,4 @@
-let state = { sessions: [], clients: [], devices: [], channels: [], metrics: {}, warnings: [], deepfilternet: { models: [] }, models: { models: [] } };
+let state = { sessions: [], clients: [], devices: [], channels: [], metrics: {}, warnings: [], deepfilternet: { models: [] }, models: { models: [] }, vmix: { inputs: [] } };
 let selectedUser = null;
 let refreshTimer = null;
 let recordingModelTouched = false;
@@ -304,7 +304,7 @@ function defaultClient(userId) {
     codec: 'pcm16', opus_profile: 'speech_24_standard', talk_mode: 'ptt', priority: false,
     priority_channels: [], buttons: [], ifb: { enabled: false, program: [], interrupt: [], duck_gain: 0.125 },
     lockout: defaultLockout(), stereo: { enabled: false, channel_pan: {} }, processing: defaultProcessing(),
-    esp32_audio: defaultEsp32Audio(),
+    esp32_audio: defaultEsp32Audio(), tally: { input_key: null, input_number: null, input_title: null },
   };
 }
 function shownClient(userId) { return { ...defaultClient(userId), ...(session(userId) || {}), ...(desired(userId) || {}) }; }
@@ -465,7 +465,25 @@ function healthText(s) {
   if (!s.capture?.desktop && (s.capture?.raw_clipped_samples || s.capture?.software_clipped_samples)) parts.push(`capture clip ${s.capture.raw_clipped_samples || 0}/${s.capture.software_clipped_samples || 0}`);
   if (!s.capture?.desktop && s.capture?.selected?.dc_offset && Math.abs(s.capture.selected.dc_offset) > 0.08) parts.push(`capture DC ${pct(s.capture.selected.dc_offset)}`);
   if (s.capture?.selected && !s.capture?.desktop) parts.push(`mic ${dbfsText(s.capture.selected.rms)} rms`);
+  for (const endpoint of [s.bridge?.input, s.bridge?.output]) {
+    if (!endpoint) continue;
+    if (endpoint.warning) parts.push(endpoint.warning);
+    if (endpoint.underflows || endpoint.drops || endpoint.reconnects) parts.push(`${endpoint.kind || 'bridge'} U/D/R ${endpoint.underflows || 0}/${endpoint.drops || 0}/${endpoint.reconnects || 0}`);
+    if (endpoint.stale) parts.push(`${endpoint.kind || 'bridge'} stale`);
+  }
   return parts.length ? `<span class="health-warn">${esc(parts.join(', '))}</span>` : '-';
+}
+function bridgeEndpointTelemetry(endpoint = {}) {
+  const parts = [];
+  if (endpoint.runtime) parts.push(endpoint.runtime);
+  if (Number.isFinite(Number(endpoint.audio_level))) parts.push(`level ${Math.round(Number(endpoint.audio_level) * 100)}%`);
+  if (endpoint.frames) parts.push(`${endpoint.frames} frames`);
+  if (endpoint.underflows) parts.push(`${endpoint.underflows} underflows`);
+  if (endpoint.drops) parts.push(`${endpoint.drops} drops`);
+  if (endpoint.reconnects) parts.push(`${endpoint.reconnects} reconnects`);
+  if (endpoint.last_audio_ms_ago != null) parts.push(`last ${endpoint.last_audio_ms_ago} ms ago`);
+  if (endpoint.stale) parts.push('stale');
+  return parts;
 }
 function bridgeText(item = {}) {
   if ((item.role || '') !== 'bridge') return '-';
@@ -480,6 +498,10 @@ function bridgeText(item = {}) {
   if (Number.isFinite(Number(bridge.input_gain)) && Number(bridge.input_gain) !== 1) gains.push(`in ${Number(bridge.input_gain).toFixed(2)}x`);
   if (Number.isFinite(Number(bridge.output_gain)) && Number(bridge.output_gain) !== 1) gains.push(`out ${Number(bridge.output_gain).toFixed(2)}x`);
   if (gains.length) parts.push(`gain ${gains.join('/')}`);
+  for (const endpoint of [bridge.input, bridge.output]) {
+    const telemetry = bridgeEndpointTelemetry(endpoint);
+    if (telemetry.length) parts.push(`${endpoint.kind || 'endpoint'} ${telemetry.join(' ')}`);
+  }
   if (bridge.note) parts.push(bridge.note);
   return `<span class="bridge-detail" title="${esc(parts.join(' | '))}">${esc(parts.join(' | '))}</span>`;
 }
@@ -950,11 +972,13 @@ function renderSystemPage() {
       <section class="card"><div class="card-head"><h2>Security</h2></div><div class="warn-box"><strong>No admin authentication is enforced unless configured.</strong> Anyone who can reach the admin bind address can control every client.</div></section>
       <section class="card"><div class="card-head"><h2>Transcription Engine</h2></div>${recordingSummary()}</section>
       <section class="card wide"><div class="card-head"><h2>Model Assets</h2><button id="refresh-model-assets" type="button">Refresh</button></div>${modelAssetsHtml()}</section>
+      <section class="card wide"><div class="card-head"><h2>vMix Tally</h2><button id="save-vmix" class="primary" type="button">Save vMix</button></div>${vmixConfigHtml()}</section>
       <section class="card"><div class="card-head"><h2>Warnings</h2></div>${renderWarnings(100)}</section>
       <section class="card"><div class="card-head"><h2>Metrics</h2></div><pre>${esc(JSON.stringify(state.metrics || {}, null, 2))}</pre></section>
       <section class="card wide"><div class="card-head"><h2>Session Health</h2></div>${clientTable(['User','Role','Bridge','Address','Queue','Age ms','Input','Output','Health'], sessionHealthRows())}</section>
     </div>`;
   bindModelAssetControls();
+  bindVmixControls();
 }
 function modelAssetsHtml() {
   const catalog = state.models || {};
@@ -1005,6 +1029,54 @@ function bindModelAssetControls() {
       }
     };
   });
+}
+function vmixConfigHtml() {
+  const vmix = state.vmix || {};
+  const status = vmix.enabled ? (vmix.connected ? 'connected' : 'unavailable') : 'disabled';
+  const statusClass = vmix.enabled ? (vmix.connected ? 'ok' : 'danger') : 'offline';
+  const active = vmix.active ? `Program ${vmix.active}` : 'Program -';
+  const preview = vmix.preview ? `Preview ${vmix.preview}` : 'Preview -';
+  const inputs = vmix.inputs || [];
+  return `
+    <form id="vmix-form" class="config-grid">
+      <label class="check"><input id="vmix-enabled" type="checkbox" ${vmix.enabled ? 'checked' : ''}> Enable vMix tally</label>
+      <label class="check"><input id="vmix-prefer-tcp" type="checkbox" ${vmix.prefer_tcp !== false ? 'checked' : ''}> Prefer TCP updates</label>
+      <label>HTTP API URL<input id="vmix-http-url" value="${esc(vmix.http_url || 'http://127.0.0.1:8088/api')}" autocomplete="off"></label>
+      <label>TCP API Address<input id="vmix-tcp-addr" value="${esc(vmix.tcp_addr || '127.0.0.1:8099')}" autocomplete="off"></label>
+      <label>Poll ms<input id="vmix-poll-ms" type="number" min="250" max="10000" step="250" value="${Number(vmix.poll_interval_ms || 1000)}"></label>
+      <label>Timeout ms<input id="vmix-timeout-ms" type="number" min="250" max="10000" step="250" value="${Number(vmix.timeout_ms || 1500)}"></label>
+      <div class="wide status-line">
+        ${badge(status, statusClass)}
+        <span>${esc(active)}</span>
+        <span>${esc(preview)}</span>
+        <span>${vmix.using_tcp ? 'TCP tally' : 'HTTP XML'}</span>
+        <span>${vmix.last_update_ms == null ? 'No update yet' : `${vmix.last_update_ms} ms ago`}</span>
+        ${vmix.error ? `<span class="health-warn">${esc(vmix.error)}</span>` : ''}
+      </div>
+      <div class="wide table-wrap"><table><thead><tr><th>Number</th><th>Key</th><th>Title</th><th>Tally</th></tr></thead><tbody>${inputs.map((input) => `<tr><td>${input.number}</td><td><code>${esc(input.key || '-')}</code></td><td>${esc(input.title || '-')}</td><td>${esc(input.tally || 'off')}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">No vMix inputs discovered yet.</td></tr>'}</tbody></table></div>
+    </form>`;
+}
+function bindVmixControls() {
+  const button = $('save-vmix');
+  if (!button) return;
+  button.onclick = async () => {
+    try {
+      await api('/vmix', {
+        method: 'PUT',
+        body: JSON.stringify({
+          enabled: $('vmix-enabled').checked,
+          http_url: $('vmix-http-url').value.trim(),
+          tcp_addr: $('vmix-tcp-addr').value.trim(),
+          prefer_tcp: $('vmix-prefer-tcp').checked,
+          poll_interval_ms: Number($('vmix-poll-ms').value) || 1000,
+          timeout_ms: Number($('vmix-timeout-ms').value) || 1500,
+        }),
+      });
+      await refresh();
+    } catch (err) {
+      showError(err);
+    }
+  };
 }
 function sessionHealthRows() {
   return (state.sessions || []).map((s) => `<tr><td>${esc(clientLabel(s.user_id))}</td><td>${esc(s.role || 'client')}</td><td>${bridgeText(s)}</td><td>${esc(s.addr || '-')}</td><td>${s.queue_depth}</td><td>${s.age_ms}</td><td>${meter(s.input?.rms, '', s.input?.peak)}</td><td>${meter(s.output?.rms, 'out', s.output?.peak)}</td><td>${healthText(s)}</td></tr>`).join('');
@@ -1143,6 +1215,9 @@ function clientDetailHtml(userId) {
       <fieldset class="wide"><legend>Routing & Buttons</legend>
         ${editorRoutingHtml(cfg, { includeIfb: false })}
         ${buttonSetupHtml(cfg, advertisedButtons, actionTypes)}
+      </fieldset>
+      <fieldset class="wide"><legend>Tally</legend>
+        ${clientTallyHtml(cfg, live)}
       </fieldset>
       <fieldset class="wide audio-pipeline-section"><legend>Audio Pipeline</legend>
         <label>Mode<select id="processing-mode"><option value="auto">Auto</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
@@ -1389,6 +1464,53 @@ function lockoutHtml(lockout = {}, caps = {}) {
   ];
   return `<div class="pill-list">${items.map(([id, key, label]) => `<label class="check"><input id="${id}" type="checkbox" ${cfg[key] ? 'checked' : ''}> ${label}</label>`).join('')}</div>`;
 }
+function clientTallyHtml(cfg, live) {
+  const mapping = cfg.tally || {};
+  const tally = live.tally || {};
+  const inputs = state.vmix?.inputs || [];
+  const selectedKey = mapping.input_key || '';
+  const statusText = tally.state || 'off';
+  const statusClass = statusText === 'live' ? 'danger' : statusText === 'preview' ? 'talk' : tally.stale ? 'warn' : 'offline';
+  const inputOptions = inputs.map((input) => `<option value="${esc(input.key)}">${input.number} - ${esc(input.title || input.key || 'Untitled')}</option>`).join('');
+  return `
+    <div class="config-grid wide">
+      <label>vMix Input<select id="vmix-client-input"><option value="">Manual / unmapped</option>${inputOptions}</select></label>
+      <label>Input Key<input id="vmix-client-key" value="${esc(selectedKey)}" placeholder="Stable vMix input key"></label>
+      <label>Input Number<input id="vmix-client-number" type="number" min="1" max="999" value="${mapping.input_number ?? ''}" placeholder="Fallback"></label>
+      <label>Input Title<input id="vmix-client-title" value="${esc(mapping.input_title || '')}" placeholder="Manual fallback"></label>
+      <div class="wide status-line">
+        ${badge(statusText, statusClass)}
+        <span>${tally.input_number ? `Input ${tally.input_number}` : 'No resolved input'}</span>
+        <span>${esc(tally.input_title || tally.input_key || '')}</span>
+        ${tally.warning ? `<span class="health-warn">${esc(tally.warning)}</span>` : ''}
+      </div>
+      <p class="muted wide">Map by key when possible. Number and title are fallbacks for manually entered vMix inputs and can change when the vMix show is edited.</p>
+    </div>`;
+}
+function bindTallyControls() {
+  const select = $('vmix-client-input');
+  if (!select) return;
+  const key = $('vmix-client-key')?.value || '';
+  if (key && [...select.options].some((option) => option.value === key)) select.value = key;
+  select.onchange = () => {
+    const input = (state.vmix?.inputs || []).find((item) => item.key === select.value);
+    $('vmix-client-key').value = input?.key || '';
+    $('vmix-client-number').value = input?.number || '';
+    $('vmix-client-title').value = input?.title || '';
+    clientEditorDirty = true;
+  };
+}
+function tallyBody(existing = {}) {
+  const key = $('vmix-client-key')?.value.trim() || '';
+  const numberValue = Number($('vmix-client-number')?.value || 0);
+  const title = $('vmix-client-title')?.value.trim() || '';
+  return {
+    ...existing,
+    input_key: key || null,
+    input_number: Number.isInteger(numberValue) && numberValue > 0 ? numberValue : null,
+    input_title: title || null,
+  };
+}
 function bindClientEditor(cfg) {
   $('client-role').value = cfg.role || 'client';
   if ($('client-type-default')) {
@@ -1461,6 +1583,7 @@ function bindClientEditor(cfg) {
     updateEsp32AudioVisibility();
   }
   if ($('close-client-panel')) $('close-client-panel').onclick = closeClientEditor;
+  bindTallyControls();
   if ($('add-button-row')) $('add-button-row').onclick = (e) => {
     e.preventDefault();
     const actionTypes = ($('button-action-types')?.value || '').split(',').filter(Boolean);
@@ -1704,6 +1827,7 @@ async function saveClientEditor(e) {
     stereo: hasStereo ? { enabled: $('stereo-enabled').checked, channel_pan: readPanMap() } : existing.stereo || defaultClient(id).stereo,
     processing: processingBody(existing.processing || defaultProcessing()),
     esp32_audio: esp32AudioBody(existing.esp32_audio || defaultEsp32Audio()),
+    tally: tallyBody(existing.tally || {}),
   };
   try {
     await api(`/clients/${id}`, { method: 'PUT', body: JSON.stringify(body) });

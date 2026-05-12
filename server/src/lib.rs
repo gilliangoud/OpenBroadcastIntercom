@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "processing-deepfilternet")]
 use std::sync::mpsc as std_mpsc;
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use axum::extract::Request;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -34,15 +34,17 @@ use common::{
     OutputMeterStatus, PcmFrameResampler, ProcessingConfig, ProcessingEngine, ProcessingMode,
     ProcessingProfile, ProcessingStageConfig, ProcessingStageStatus, ProcessingStatus,
     SessionStatus, StatusMetrics, StereoConfig, StereoStatus, TalkButtonAction, TalkButtonConfig,
-    TalkButtonMode, TalkMode, TransportHealthStatus, UserId, DEFAULT_IFB_DUCK_GAIN,
-    MAX_PACKET_BYTES, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE, PCM48_STEREO_PAYLOAD_BYTES,
-    SERVER_USER_ID,
+    TalkButtonMode, TalkMode, TallyState, TallyStatus, TransportHealthStatus, UserId,
+    DEFAULT_IFB_DUCK_GAIN, MAX_PACKET_BYTES, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
+    PCM48_STEREO_PAYLOAD_BYTES, SERVER_USER_ID,
 };
 use futures_util::{SinkExt, StreamExt};
+use quick_xml::events::Event as XmlEvent;
+use quick_xml::Reader as XmlReader;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, UdpSocket};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::process::Command;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio::task::JoinHandle;
@@ -259,6 +261,7 @@ pub struct ServerState {
     deepfilternet_model_dir: RwLock<PathBuf>,
     deepfilternet_coreml_model_dir: RwLock<PathBuf>,
     model_downloads: RwLock<HashMap<String, ModelDownloadStatus>>,
+    vmix: RwLock<VmixRuntimeState>,
     debug_audio_tx: RwLock<Option<mpsc::Sender<ServerDebugAudioFrame>>>,
     next_alert_id: AtomicU64,
     next_tts_id: AtomicU64,
@@ -296,6 +299,7 @@ impl ServerState {
                 DEFAULT_DEEPFILTERNET_COREML_MODEL_DIR,
             )),
             model_downloads: RwLock::new(HashMap::new()),
+            vmix: RwLock::new(VmixRuntimeState::default()),
             debug_audio_tx: RwLock::new(None),
             next_alert_id: AtomicU64::new(1),
             next_tts_id: AtomicU64::new(1),
@@ -850,6 +854,8 @@ struct PersistedAdminState {
     #[serde(default)]
     clients: Vec<DesiredClientConfig>,
     #[serde(default)]
+    vmix: VmixTallyConfig,
+    #[serde(default)]
     presets: Vec<PresetConfig>,
     #[serde(default)]
     templates: Vec<ClientTemplateConfig>,
@@ -861,11 +867,118 @@ impl Default for PersistedAdminState {
             channels: default_workflow_channels(),
             devices: Vec::new(),
             clients: Vec::new(),
+            vmix: VmixTallyConfig::default(),
             presets: default_workflow_presets(),
             templates: default_workflow_templates(),
         };
         normalize_admin_state(&mut state);
         state
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct VmixTallyConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_vmix_http_url")]
+    http_url: String,
+    #[serde(default = "default_vmix_tcp_addr")]
+    tcp_addr: String,
+    #[serde(default = "default_true")]
+    prefer_tcp: bool,
+    #[serde(default = "default_vmix_poll_interval_ms")]
+    poll_interval_ms: u64,
+    #[serde(default = "default_vmix_timeout_ms")]
+    timeout_ms: u64,
+}
+
+impl Default for VmixTallyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            http_url: default_vmix_http_url(),
+            tcp_addr: default_vmix_tcp_addr(),
+            prefer_tcp: true,
+            poll_interval_ms: default_vmix_poll_interval_ms(),
+            timeout_ms: default_vmix_timeout_ms(),
+        }
+    }
+}
+
+fn default_vmix_http_url() -> String {
+    "http://127.0.0.1:8088/api".to_string()
+}
+
+fn default_vmix_tcp_addr() -> String {
+    "127.0.0.1:8099".to_string()
+}
+
+fn default_vmix_poll_interval_ms() -> u64 {
+    1_000
+}
+
+fn default_vmix_timeout_ms() -> u64 {
+    1_500
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+struct VmixTallyMapping {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_number: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_title: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+struct VmixStatusResponse {
+    enabled: bool,
+    http_url: String,
+    tcp_addr: String,
+    prefer_tcp: bool,
+    poll_interval_ms: u64,
+    timeout_ms: u64,
+    connected: bool,
+    using_tcp: bool,
+    last_update_ms: Option<u64>,
+    active: Option<u16>,
+    preview: Option<u16>,
+    inputs: Vec<VmixInputInfo>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+struct VmixInputInfo {
+    key: String,
+    number: u16,
+    title: String,
+    #[serde(default)]
+    tally: TallyState,
+}
+
+#[derive(Debug, Clone)]
+struct VmixRuntimeState {
+    connected: bool,
+    using_tcp: bool,
+    last_update: Option<Instant>,
+    active: Option<u16>,
+    preview: Option<u16>,
+    inputs: Vec<VmixInputInfo>,
+    error: Option<String>,
+}
+
+impl Default for VmixRuntimeState {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            using_tcp: false,
+            last_update: None,
+            active: None,
+            preview: None,
+            inputs: Vec::new(),
+            error: None,
+        }
     }
 }
 
@@ -953,6 +1066,8 @@ struct ClientTemplateClientConfig {
     esp32_audio: Esp32AudioConfig,
     #[serde(default)]
     processing: ProcessingConfig,
+    #[serde(default)]
+    tally: VmixTallyMapping,
 }
 
 impl Default for ClientTemplateClientConfig {
@@ -975,6 +1090,7 @@ impl Default for ClientTemplateClientConfig {
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
             processing: ProcessingConfig::default(),
+            tally: VmixTallyMapping::default(),
         }
     }
 }
@@ -1001,6 +1117,7 @@ impl ClientTemplateClientConfig {
             stereo: normalize_stereo_config(self.stereo.clone()),
             esp32_audio: normalize_esp32_audio_config(self.esp32_audio.clone()),
             processing: self.processing.clone(),
+            tally: normalize_vmix_tally_mapping(self.tally.clone()),
         }
     }
 }
@@ -1044,6 +1161,8 @@ struct DesiredClientConfig {
     esp32_audio: Esp32AudioConfig,
     #[serde(default)]
     processing: ProcessingConfig,
+    #[serde(default)]
+    tally: VmixTallyMapping,
 }
 
 impl DesiredClientConfig {
@@ -1068,6 +1187,7 @@ impl DesiredClientConfig {
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
             processing: ProcessingConfig::default(),
+            tally: VmixTallyMapping::default(),
         }
     }
 }
@@ -1442,6 +1562,7 @@ struct AdminStateResponse {
     transcription: LiveTranscriptionStatusResponse,
     deepfilternet: DeepFilterNetStatusResponse,
     models: ModelCatalogResponse,
+    vmix: VmixStatusResponse,
     channels: Vec<ChannelConfig>,
     devices: Vec<DeviceEnrollment>,
     clients: Vec<DesiredClientConfig>,
@@ -1988,6 +2109,8 @@ struct ClientConfigPut {
     esp32_audio: Esp32AudioConfig,
     #[serde(default)]
     processing: ProcessingConfig,
+    #[serde(default)]
+    tally: VmixTallyMapping,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2011,6 +2134,7 @@ struct ClientConfigPatch {
     stereo: Option<StereoConfig>,
     esp32_audio: Option<Esp32AudioConfig>,
     processing: Option<ProcessingConfig>,
+    tally: Option<VmixTallyMapping>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2327,6 +2451,7 @@ struct ServerRuntimeTasks {
     receiver: JoinHandle<anyhow::Result<()>>,
     mixer: JoinHandle<anyhow::Result<()>>,
     presence: JoinHandle<anyhow::Result<()>>,
+    vmix: JoinHandle<anyhow::Result<()>>,
     control: JoinHandle<anyhow::Result<()>>,
     admin: Option<JoinHandle<anyhow::Result<()>>>,
 }
@@ -2336,6 +2461,7 @@ impl ServerRuntimeTasks {
         self.receiver.abort();
         self.mixer.abort();
         self.presence.abort();
+        self.vmix.abort();
         self.control.abort();
         if let Some(admin) = &self.admin {
             admin.abort();
@@ -2350,6 +2476,7 @@ impl ServerRuntimeHandle {
             result = &mut tasks.receiver => result.context("audio receiver task panicked")??,
             result = &mut tasks.mixer => result.context("audio mixer task panicked")??,
             result = &mut tasks.presence => result.context("presence task panicked")??,
+            result = &mut tasks.vmix => result.context("vMix tally task panicked")??,
             result = &mut tasks.control => result.context("control task panicked")??,
             result = wait_for_optional_task(tasks.admin.as_mut()) => result.context("admin task panicked")??,
         }
@@ -2524,12 +2651,14 @@ async fn start_runtime_from_bound(
     let control_state = Arc::clone(&state);
     let admin_state = Arc::clone(&state);
     let presence_state = Arc::clone(&state);
+    let vmix_state = Arc::clone(&state);
     let receiver_socket = Arc::clone(&audio_socket);
     let mixer_socket = Arc::clone(&audio_socket);
     let receiver_task =
         tokio::spawn(async move { run_audio_receiver(receiver_socket, receiver_state).await });
     let mixer_task = tokio::spawn(async move { run_audio_mixer(mixer_socket, mixer_state).await });
     let presence_task = tokio::spawn(async move { run_presence_updates(presence_state).await });
+    let vmix_task = tokio::spawn(async move { run_vmix_tally_monitor(vmix_state).await });
     let control_task =
         tokio::spawn(async move { run_control(control_listener, control_state).await });
     let admin_task = admin_listener.map(|listener| {
@@ -2545,6 +2674,7 @@ async fn start_runtime_from_bound(
             receiver: receiver_task,
             mixer: mixer_task,
             presence: presence_task,
+            vmix: vmix_task,
             control: control_task,
             admin: admin_task,
         },
@@ -2817,6 +2947,206 @@ async fn run_presence_updates(state: Arc<ServerState>) -> anyhow::Result<()> {
     }
 }
 
+async fn run_vmix_tally_monitor(state: Arc<ServerState>) -> anyhow::Result<()> {
+    loop {
+        let config = state.admin_state.read().await.vmix.clone();
+        if !config.enabled {
+            {
+                let mut vmix = state.vmix.write().await;
+                vmix.connected = false;
+                vmix.using_tcp = false;
+                vmix.error = None;
+            }
+            push_vmix_tally_updates(&state).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+
+        let update = fetch_vmix_state(&config).await;
+        {
+            let mut vmix = state.vmix.write().await;
+            match update {
+                Ok(next) => *vmix = next,
+                Err(err) => {
+                    vmix.connected = false;
+                    vmix.using_tcp = false;
+                    vmix.error = Some(err.to_string());
+                }
+            }
+        }
+        push_vmix_tally_updates(&state).await;
+        tokio::time::sleep(Duration::from_millis(config.poll_interval_ms)).await;
+    }
+}
+
+async fn fetch_vmix_state(config: &VmixTallyConfig) -> anyhow::Result<VmixRuntimeState> {
+    let timeout = Duration::from_millis(config.timeout_ms);
+    let mut state = fetch_vmix_http_state(&config.http_url, timeout).await?;
+    if config.prefer_tcp {
+        match fetch_vmix_tcp_tally(&config.tcp_addr, timeout).await {
+            Ok(tally) => {
+                apply_vmix_tally_digits(&mut state.inputs, &tally);
+                state.using_tcp = true;
+                state.connected = true;
+                state.error = None;
+            }
+            Err(err) => {
+                state.using_tcp = false;
+                state.error = Some(format!("TCP tally unavailable, using HTTP: {err}"));
+            }
+        }
+    }
+    state.last_update = Some(Instant::now());
+    Ok(state)
+}
+
+async fn fetch_vmix_http_state(url: &str, timeout: Duration) -> anyhow::Result<VmixRuntimeState> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("build vMix HTTP client")?;
+    let text = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("request vMix HTTP API at {url}"))?
+        .error_for_status()
+        .with_context(|| format!("vMix HTTP API returned an error at {url}"))?
+        .text()
+        .await
+        .context("read vMix HTTP XML")?;
+    parse_vmix_xml(&text)
+}
+
+async fn fetch_vmix_tcp_tally(addr: &str, timeout: Duration) -> anyhow::Result<String> {
+    let mut stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
+        .await
+        .context("vMix TCP connect timed out")?
+        .with_context(|| format!("connect vMix TCP API at {addr}"))?;
+    stream
+        .write_all(b"SUBSCRIBE TALLY\r\nTALLY\r\n")
+        .await
+        .context("send vMix TCP tally request")?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    let deadline = Instant::now() + timeout;
+    loop {
+        line.clear();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow!("vMix TCP tally response timed out"));
+        }
+        let read = tokio::time::timeout(remaining, reader.read_line(&mut line))
+            .await
+            .context("vMix TCP tally response timed out")?
+            .context("read vMix TCP tally response")?;
+        if read == 0 {
+            return Err(anyhow!("vMix TCP tally connection closed"));
+        }
+        if let Some(tally) = parse_vmix_tally_line(&line) {
+            return Ok(tally);
+        }
+    }
+}
+
+fn parse_vmix_tally_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let rest = trimmed.strip_prefix("TALLY OK ")?;
+    Some(
+        rest.chars()
+            .take_while(|ch| matches!(ch, '0' | '1' | '2'))
+            .collect(),
+    )
+    .filter(|digits: &String| !digits.is_empty())
+}
+
+fn apply_vmix_tally_digits(inputs: &mut [VmixInputInfo], tally: &str) {
+    for input in inputs {
+        input.tally = tally
+            .as_bytes()
+            .get(input.number.saturating_sub(1) as usize)
+            .map(|value| match value {
+                b'1' => TallyState::Live,
+                b'2' => TallyState::Preview,
+                _ => TallyState::Off,
+            })
+            .unwrap_or(TallyState::Off);
+    }
+}
+
+fn parse_vmix_xml(xml: &str) -> anyhow::Result<VmixRuntimeState> {
+    let mut reader = XmlReader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut inputs = Vec::new();
+    let mut active = None;
+    let mut preview = None;
+    let mut text_target: Option<&'static str> = None;
+    loop {
+        match reader.read_event_into(&mut buf).context("parse vMix XML")? {
+            XmlEvent::Start(event) => match event.name().as_ref() {
+                b"input" => {
+                    let mut input = VmixInputInfo::default();
+                    for attr in event.attributes() {
+                        let attr = attr.context("parse vMix input attribute")?;
+                        let value = attr
+                            .decode_and_unescape_value(reader.decoder())
+                            .context("decode vMix input attribute")?
+                            .into_owned();
+                        match attr.key.as_ref() {
+                            b"key" => input.key = value,
+                            b"number" => input.number = value.parse().unwrap_or_default(),
+                            b"title" => input.title = value,
+                            _ => {}
+                        }
+                    }
+                    if input.number > 0 {
+                        inputs.push(input);
+                    }
+                }
+                b"active" => text_target = Some("active"),
+                b"preview" => text_target = Some("preview"),
+                _ => {}
+            },
+            XmlEvent::Text(text) => {
+                if let Some(target) = text_target.take() {
+                    let value = text.decode().context("decode vMix XML text")?;
+                    let number = value.trim().parse::<u16>().ok();
+                    if target == "active" {
+                        active = number;
+                    } else {
+                        preview = number;
+                    }
+                }
+            }
+            XmlEvent::End(event) if matches!(event.name().as_ref(), b"active" | b"preview") => {
+                text_target = None;
+            }
+            XmlEvent::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    for input in &mut inputs {
+        input.tally = if Some(input.number) == active {
+            TallyState::Live
+        } else if Some(input.number) == preview {
+            TallyState::Preview
+        } else {
+            TallyState::Off
+        };
+    }
+    Ok(VmixRuntimeState {
+        connected: true,
+        using_tcp: false,
+        last_update: Some(Instant::now()),
+        active,
+        preview,
+        inputs,
+        error: None,
+    })
+}
+
 pub async fn run_admin(
     listener: TcpListener,
     state: Arc<ServerState>,
@@ -2946,6 +3276,7 @@ fn admin_router(state: Arc<ServerState>, auth: HttpAuthConfig) -> Router {
             "/admin/api/models/downloads",
             get(admin_model_downloads_handler),
         )
+        .route("/admin/api/vmix", put(admin_vmix_config_handler))
         .route("/admin/api/transcripts", get(admin_transcripts_handler))
         .route("/admin/api/transcripts", post(admin_add_transcript_handler))
         .layer(middleware::from_fn_with_state(auth, require_http_auth))
@@ -3027,6 +3358,24 @@ async fn admin_model_downloads_handler(
     Json(downloads)
 }
 
+async fn admin_vmix_config_handler(
+    State(state): State<Arc<ServerState>>,
+    Json(mut body): Json<VmixTallyConfig>,
+) -> Result<Json<VmixStatusResponse>, AdminApiError> {
+    normalize_vmix_config(&mut body);
+    let admin_snapshot = {
+        let mut admin_state = state.admin_state.write().await;
+        admin_state.vmix = body;
+        admin_state.clone()
+    };
+    save_admin_state(&state, &admin_snapshot).await?;
+    if !admin_snapshot.vmix.enabled {
+        *state.vmix.write().await = VmixRuntimeState::default();
+    }
+    push_vmix_tally_updates(&state).await;
+    Ok(Json(vmix_status_snapshot(&state, &admin_snapshot).await))
+}
+
 async fn put_client_handler(
     State(state): State<Arc<ServerState>>,
     AxumPath(user_id): AxumPath<UserId>,
@@ -3054,6 +3403,7 @@ async fn put_client_handler(
         stereo: normalize_stereo_config(body.stereo),
         esp32_audio: normalize_esp32_audio_config(body.esp32_audio),
         processing: body.processing,
+        tally: normalize_vmix_tally_mapping(body.tally),
     };
     upsert_admin_client(&state, desired.clone()).await?;
     Ok(Json(
@@ -3120,6 +3470,9 @@ async fn patch_client_handler(
     }
     if let Some(processing) = body.processing {
         desired.processing = processing;
+    }
+    if let Some(tally) = body.tally {
+        desired.tally = normalize_vmix_tally_mapping(tally);
     }
 
     upsert_admin_client(&state, desired.clone()).await?;
@@ -3560,6 +3913,7 @@ async fn admin_state_snapshot(state: &ServerState) -> AdminStateResponse {
     let transcription = live_transcription_status_snapshot(state).await;
     let deepfilternet = deepfilternet_status_snapshot(state).await;
     let models = model_catalog_snapshot(state).await;
+    let vmix = vmix_status_snapshot(state, &admin_state).await;
 
     AdminStateResponse {
         build: common::current_build_info(),
@@ -3570,6 +3924,7 @@ async fn admin_state_snapshot(state: &ServerState) -> AdminStateResponse {
         transcription,
         deepfilternet,
         models,
+        vmix,
         channels: admin_state.channels,
         devices: admin_state.devices,
         clients: admin_state.clients,
@@ -3651,6 +4006,80 @@ async fn model_catalog_snapshot(state: &ServerState) -> ModelCatalogResponse {
         source_policy: manifest.source_policy,
         models,
         error: None,
+    }
+}
+
+async fn vmix_status_snapshot(
+    state: &ServerState,
+    admin_state: &PersistedAdminState,
+) -> VmixStatusResponse {
+    let runtime = state.vmix.read().await.clone();
+    VmixStatusResponse {
+        enabled: admin_state.vmix.enabled,
+        http_url: admin_state.vmix.http_url.clone(),
+        tcp_addr: admin_state.vmix.tcp_addr.clone(),
+        prefer_tcp: admin_state.vmix.prefer_tcp,
+        poll_interval_ms: admin_state.vmix.poll_interval_ms,
+        timeout_ms: admin_state.vmix.timeout_ms,
+        connected: runtime.connected,
+        using_tcp: runtime.using_tcp,
+        last_update_ms: runtime
+            .last_update
+            .map(|instant| instant.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
+        active: runtime.active,
+        preview: runtime.preview,
+        inputs: runtime.inputs,
+        error: runtime.error,
+    }
+}
+
+fn resolve_tally_status(
+    mapping: &VmixTallyMapping,
+    vmix: &VmixRuntimeState,
+    enabled: bool,
+) -> TallyStatus {
+    let has_mapping = mapping.input_key.is_some()
+        || mapping.input_number.is_some()
+        || mapping.input_title.is_some();
+    if !enabled || !has_mapping {
+        return TallyStatus::default();
+    }
+    let matched = mapping
+        .input_key
+        .as_deref()
+        .and_then(|key| vmix.inputs.iter().find(|input| input.key == key))
+        .or_else(|| {
+            mapping
+                .input_number
+                .and_then(|number| vmix.inputs.iter().find(|input| input.number == number))
+        })
+        .or_else(|| {
+            mapping
+                .input_title
+                .as_deref()
+                .and_then(|title| vmix.inputs.iter().find(|input| input.title == title))
+        });
+    let Some(input) = matched else {
+        return TallyStatus {
+            stale: true,
+            warning: Some("mapped vMix input was not found".to_string()),
+            ..TallyStatus::default()
+        };
+    };
+    let state = if Some(input.number) == vmix.active || input.tally == TallyState::Live {
+        TallyState::Live
+    } else if Some(input.number) == vmix.preview || input.tally == TallyState::Preview {
+        TallyState::Preview
+    } else {
+        TallyState::Off
+    };
+    TallyStatus {
+        state,
+        input_key: (!input.key.is_empty()).then(|| input.key.clone()),
+        input_number: Some(input.number),
+        input_title: (!input.title.is_empty()).then(|| input.title.clone()),
+        stale: !vmix.connected,
+        warning: vmix.error.clone(),
     }
 }
 
@@ -5144,6 +5573,7 @@ async fn desired_baseline_for_user(state: &ServerState, user_id: UserId) -> Desi
         stereo: session.stereo.clone(),
         esp32_audio: session.esp32_audio.clone(),
         processing: session.processing.clone(),
+        tally: VmixTallyMapping::default(),
     }
 }
 
@@ -5234,6 +5664,7 @@ async fn apply_desired_client(
         .client_uid
         .map(|uid| normalize_client_uid(&uid, Some(desired.user_id)));
     desired.priority_channels = sorted_unique_channels(desired.priority_channels);
+    desired.tally = normalize_vmix_tally_mapping(desired.tally);
 
     let admin_snapshot = {
         let mut admin_state = state.admin_state.write().await;
@@ -5282,6 +5713,7 @@ async fn apply_desired_client(
 
     apply_desired_to_live_session(state, &desired).await;
     push_config_update(state, desired.user_id).await;
+    push_vmix_tally_updates(state).await;
     ControlResponse::Ack
 }
 
@@ -5331,6 +5763,7 @@ fn normalize_preset_clients(clients: Vec<DesiredClientConfig>) -> Vec<DesiredCli
             client.talker_vol = normalize_talker_volumes(client.talker_vol, client.user_id);
             client.stereo = normalize_stereo_config(client.stereo);
             client.esp32_audio = normalize_esp32_audio_config(client.esp32_audio);
+            client.tally = normalize_vmix_tally_mapping(client.tally);
             client.priority_channels = sorted_unique_channels(client.priority_channels);
             client
         })
@@ -5347,6 +5780,19 @@ fn normalize_template_client(mut client: ClientTemplateClientConfig) -> ClientTe
     client.esp32_audio = normalize_esp32_audio_config(client.esp32_audio);
     client.priority_channels = sorted_unique_channels(client.priority_channels);
     client
+}
+
+fn normalize_vmix_tally_mapping(mut mapping: VmixTallyMapping) -> VmixTallyMapping {
+    mapping.input_key = mapping
+        .input_key
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    mapping.input_title = mapping
+        .input_title
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    mapping.input_number = mapping.input_number.filter(|number| *number > 0);
+    mapping
 }
 
 fn normalize_template_talker_volumes(volumes: HashMap<UserId, f32>) -> HashMap<UserId, f32> {
@@ -6698,6 +7144,20 @@ fn normalize_admin_state(state: &mut PersistedAdminState) {
         .templates
         .sort_by(|left, right| left.id.cmp(&right.id));
     state.templates.dedup_by(|left, right| left.id == right.id);
+    normalize_vmix_config(&mut state.vmix);
+}
+
+fn normalize_vmix_config(config: &mut VmixTallyConfig) {
+    config.http_url = config.http_url.trim().to_string();
+    if config.http_url.is_empty() {
+        config.http_url = default_vmix_http_url();
+    }
+    config.tcp_addr = config.tcp_addr.trim().to_string();
+    if config.tcp_addr.is_empty() {
+        config.tcp_addr = default_vmix_tcp_addr();
+    }
+    config.poll_interval_ms = config.poll_interval_ms.clamp(250, 30_000);
+    config.timeout_ms = config.timeout_ms.clamp(250, 10_000);
 }
 
 fn normalize_channels(channels: &mut Vec<ChannelConfig>) {
@@ -7152,6 +7612,61 @@ async fn push_presence_updates(state: &ServerState) {
             user_id,
             client_uid,
             channels,
+        };
+        let Some(sender) = state.control_clients.read().await.get(&user_id).cloned() else {
+            continue;
+        };
+        if sender.send(event).is_err() {
+            state.control_clients.write().await.remove(&user_id);
+        }
+    }
+}
+
+async fn push_vmix_tally_updates(state: &ServerState) {
+    let user_ids = state
+        .control_clients
+        .read()
+        .await
+        .keys()
+        .copied()
+        .collect::<Vec<_>>();
+    if user_ids.is_empty() {
+        return;
+    }
+
+    let admin_state = state.admin_state.read().await.clone();
+    let vmix = state.vmix.read().await.clone();
+    let tally_by_user = admin_state
+        .clients
+        .iter()
+        .map(|client| {
+            (
+                client.user_id,
+                resolve_tally_status(&client.tally, &vmix, admin_state.vmix.enabled),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let client_uids = {
+        let sessions = state.sessions.read().await;
+        user_ids
+            .iter()
+            .map(|user_id| {
+                (
+                    *user_id,
+                    sessions
+                        .get(user_id)
+                        .map(|session| session.client_uid.clone())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<HashMap<_, _>>()
+    };
+
+    for user_id in user_ids {
+        let event = ControlEvent::TallyUpdate {
+            user_id,
+            client_uid: client_uids.get(&user_id).cloned().unwrap_or_default(),
+            tally: tally_by_user.get(&user_id).cloned().unwrap_or_default(),
         };
         let Some(sender) = state.control_clients.read().await.get(&user_id).cloned() else {
             continue;
@@ -8243,6 +8758,18 @@ async fn status_snapshot(state: &ServerState) -> (Vec<SessionStatus>, StatusMetr
     let transcription = state.transcription.read().await;
     let live_transcription_active = transcription.active;
     let live_transcription_users = transcription.users.clone();
+    let admin_snapshot = state.admin_state.read().await.clone();
+    let vmix_snapshot = state.vmix.read().await.clone();
+    let tally_by_user = admin_snapshot
+        .clients
+        .iter()
+        .map(|client| {
+            (
+                client.user_id,
+                resolve_tally_status(&client.tally, &vmix_snapshot, admin_snapshot.vmix.enabled),
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let mut statuses = sessions
         .iter()
         .map(|(&user_id, session)| {
@@ -8341,6 +8868,7 @@ async fn status_snapshot(state: &ServerState) -> (Vec<SessionStatus>, StatusMetr
                 output,
                 capture,
                 bridge: session.bridge.clone(),
+                tally: tally_by_user.get(&user_id).cloned().unwrap_or_default(),
                 transport,
                 recording_enabled: recording_active.is_some_and(|active| {
                     active
@@ -11839,6 +12367,99 @@ mod tests {
     }
 
     #[test]
+    fn vmix_http_xml_parses_inputs_and_tally_state() {
+        let xml = r#"
+            <vmix>
+              <inputs>
+                <input key="a1" number="1" title="Ref Cam"></input>
+                <input key="b2" number="2" title="Program Cam"></input>
+                <input key="c3" number="3" title="Bench"></input>
+              </inputs>
+              <active>2</active>
+              <preview>1</preview>
+            </vmix>
+        "#;
+
+        let state = parse_vmix_xml(xml).unwrap();
+
+        assert!(state.connected);
+        assert_eq!(state.active, Some(2));
+        assert_eq!(state.preview, Some(1));
+        assert_eq!(state.inputs.len(), 3);
+        assert_eq!(state.inputs[0].tally, TallyState::Preview);
+        assert_eq!(state.inputs[1].tally, TallyState::Live);
+        assert_eq!(state.inputs[2].tally, TallyState::Off);
+    }
+
+    #[test]
+    fn vmix_tcp_tally_digits_override_discovered_inputs() {
+        let mut inputs = vec![
+            VmixInputInfo {
+                key: "a1".to_string(),
+                number: 1,
+                title: "A".to_string(),
+                tally: TallyState::Off,
+            },
+            VmixInputInfo {
+                key: "b2".to_string(),
+                number: 2,
+                title: "B".to_string(),
+                tally: TallyState::Off,
+            },
+            VmixInputInfo {
+                key: "c3".to_string(),
+                number: 3,
+                title: "C".to_string(),
+                tally: TallyState::Off,
+            },
+        ];
+
+        let digits = parse_vmix_tally_line("TALLY OK 201\r\n").unwrap();
+        apply_vmix_tally_digits(&mut inputs, &digits);
+
+        assert_eq!(inputs[0].tally, TallyState::Preview);
+        assert_eq!(inputs[1].tally, TallyState::Off);
+        assert_eq!(inputs[2].tally, TallyState::Live);
+    }
+
+    #[test]
+    fn vmix_mapping_resolves_by_key_before_fallbacks() {
+        let runtime = VmixRuntimeState {
+            connected: true,
+            using_tcp: true,
+            last_update: Some(Instant::now()),
+            active: Some(3),
+            preview: Some(2),
+            inputs: vec![
+                VmixInputInfo {
+                    key: "preferred".to_string(),
+                    number: 1,
+                    title: "Ref".to_string(),
+                    tally: TallyState::Off,
+                },
+                VmixInputInfo {
+                    key: "fallback".to_string(),
+                    number: 2,
+                    title: "Ref".to_string(),
+                    tally: TallyState::Preview,
+                },
+            ],
+            error: None,
+        };
+        let mapping = VmixTallyMapping {
+            input_key: Some("preferred".to_string()),
+            input_number: Some(2),
+            input_title: Some("Ref".to_string()),
+        };
+
+        let tally = resolve_tally_status(&mapping, &runtime, true);
+
+        assert_eq!(tally.state, TallyState::Off);
+        assert_eq!(tally.input_key.as_deref(), Some("preferred"));
+        assert_eq!(tally.input_number, Some(1));
+    }
+
+    #[test]
     fn esp32_audio_normalization_allows_mic_bypass_boost() {
         let config = Esp32AudioConfig {
             mic_pga_gain_db: 29,
@@ -12614,6 +13235,8 @@ mod tests {
             mode: common::BridgeMode::Output,
             input_device: None,
             output_device: Some("USB Audio".to_string()),
+            input: None,
+            output: None,
             input_gain: 2.0,
             output_gain: 0.5,
             tx: vec![5, 5, 0],
@@ -12656,6 +13279,7 @@ mod tests {
             clients: Vec::new(),
             presets: Vec::new(),
             templates: Vec::new(),
+            vmix: VmixTallyConfig::default(),
         };
         let warnings = admin_warnings(&admin_state, &sessions);
 
@@ -13013,6 +13637,7 @@ mod tests {
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
             processing: ProcessingConfig::default(),
+            tally: VmixTallyMapping::default(),
         };
         assert!(matches!(
             apply_desired_client(&state, desired).await,
@@ -13391,6 +14016,7 @@ mod tests {
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
             processing: ProcessingConfig::default(),
+            tally: VmixTallyMapping::default(),
         };
         let desired_2 = DesiredClientConfig {
             user_id: 2,
@@ -13412,6 +14038,7 @@ mod tests {
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
             processing: ProcessingConfig::default(),
+            tally: VmixTallyMapping::default(),
         };
         assert!(matches!(
             apply_desired_client(&state, desired_1).await,
@@ -13500,6 +14127,7 @@ mod tests {
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
             processing: ProcessingConfig::default(),
+            tally: VmixTallyMapping::default(),
         };
         assert!(matches!(
             apply_desired_client(&state, desired).await,
@@ -13563,6 +14191,7 @@ mod tests {
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
             processing: ProcessingConfig::default(),
+            tally: VmixTallyMapping::default(),
         };
 
         assert!(matches!(
@@ -13604,6 +14233,7 @@ mod tests {
                 stereo: StereoConfig::default(),
                 esp32_audio: Esp32AudioConfig::default(),
                 processing: ProcessingConfig::default(),
+                tally: VmixTallyMapping::default(),
             }],
         };
 
@@ -13660,6 +14290,7 @@ mod tests {
                     stereo: StereoConfig::default(),
                     esp32_audio: Esp32AudioConfig::default(),
                     processing: ProcessingConfig::default(),
+                    tally: VmixTallyMapping::default(),
                 },
             });
         }
@@ -13727,9 +14358,11 @@ mod tests {
                 stereo: StereoConfig::default(),
                 esp32_audio: Esp32AudioConfig::default(),
                 processing: ProcessingConfig::default(),
+                tally: VmixTallyMapping::default(),
             }],
             presets: Vec::new(),
             templates: Vec::new(),
+            vmix: VmixTallyConfig::default(),
         };
         let mut status = SessionStatus {
             user_id: 1,
@@ -13771,6 +14404,7 @@ mod tests {
             output: OutputMeterStatus::default(),
             capture: None,
             bridge: None,
+            tally: TallyStatus::default(),
             transport: TransportHealthStatus::default(),
             recording_enabled: false,
             transcription_enabled: false,
@@ -13888,6 +14522,7 @@ mod tests {
             clients: Vec::new(),
             presets: Vec::new(),
             templates: Vec::new(),
+            vmix: VmixTallyConfig::default(),
         };
 
         normalize_admin_state(&mut state);
@@ -13937,6 +14572,7 @@ mod tests {
             clients: vec![pa_regular_tx, bad_talent, bad_program_bridge, bad_pa_bridge],
             presets: Vec::new(),
             templates: Vec::new(),
+            vmix: VmixTallyConfig::default(),
         };
 
         let messages = workflow_validation_warnings(&admin_state)
@@ -14032,6 +14668,7 @@ mod tests {
                 stereo: StereoConfig::default(),
                 esp32_audio: Esp32AudioConfig::default(),
                 processing: ProcessingConfig::default(),
+                tally: VmixTallyMapping::default(),
             }],
             presets: vec![PresetConfig {
                 id: "refs".to_string(),
@@ -14056,6 +14693,7 @@ mod tests {
                     stereo: StereoConfig::default(),
                     esp32_audio: Esp32AudioConfig::default(),
                     processing: ProcessingConfig::default(),
+                    tally: VmixTallyMapping::default(),
                 }],
             }],
             templates: vec![ClientTemplateConfig {
@@ -14079,8 +14717,10 @@ mod tests {
                     stereo: StereoConfig::default(),
                     esp32_audio: Esp32AudioConfig::default(),
                     processing: ProcessingConfig::default(),
+                    tally: VmixTallyMapping::default(),
                 },
             }],
+            vmix: VmixTallyConfig::default(),
         };
 
         save_admin_state_to_path(&path, &state).await.unwrap();

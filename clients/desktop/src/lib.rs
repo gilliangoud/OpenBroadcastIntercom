@@ -35,7 +35,7 @@ use common::{
     CaptureChannelHealth, CaptureHealthStatus, ClientCapabilities, ClientLockoutPolicy, ClientRole,
     Codec, ControlMessage, ControlResponse, DesktopCaptureHealthStatus, DirectCallStatus,
     Esp32AudioConfig, IfbConfig, OpusProfile, ProcessingConfig, ProcessingMode, ProcessingProfile,
-    StereoConfig, TalkButtonMode, TalkMode, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
+    StereoConfig, TalkButtonMode, TalkMode, TallyStatus, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -523,6 +523,7 @@ pub async fn run_until_shutdown_with_local_api(
         lockout: ClientLockoutPolicy::default(),
         stereo: StereoConfig::default(),
         esp32_audio: Esp32AudioConfig::default(),
+        tally: TallyStatus::default(),
     }));
     capture_processing_settings.store(&runtime_config.lock().unwrap().processing);
     let jitter_samples = samples_for_ms(args.jitter_ms);
@@ -3786,6 +3787,7 @@ mod tests {
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
+            tally: TallyStatus::default(),
         }
     }
 

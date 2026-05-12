@@ -1,5 +1,7 @@
 # Advanced Routing And UI Rework
 
+[Docs index](README.md) | [Root README](../README.md)
+
 GOU-60 moves routing beyond channel membership while keeping the server as the
 only authority for mix decisions.
 

@@ -69,6 +69,48 @@ pub enum BridgeMode {
     Duplex,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BridgeEndpointKind {
+    #[default]
+    AudioDevice,
+    VmixBrowserSource,
+    NdiSource,
+    NdiOutput,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BridgeEndpointStatus {
+    #[serde(default)]
+    pub kind: BridgeEndpointKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connected_clients: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_level: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frames: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underflows: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drops: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnects: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_audio_ms_ago: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BridgeStatus {
     #[serde(default)]
@@ -77,6 +119,10 @@ pub struct BridgeStatus {
     pub input_device: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<BridgeEndpointStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<BridgeEndpointStatus>,
     #[serde(default = "default_unit_gain")]
     pub input_gain: f32,
     #[serde(default = "default_unit_gain")]
@@ -95,6 +141,8 @@ impl Default for BridgeStatus {
             mode: BridgeMode::Duplex,
             input_device: None,
             output_device: None,
+            input: None,
+            output: None,
             input_gain: 1.0,
             output_gain: 1.0,
             tx: Vec::new(),
@@ -106,6 +154,31 @@ impl Default for BridgeStatus {
 
 fn default_unit_gain() -> f32 {
     1.0
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TallyState {
+    #[default]
+    Off,
+    Preview,
+    Live,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TallyStatus {
+    #[serde(default)]
+    pub state: TallyState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_number: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_title: Option<String>,
+    #[serde(default)]
+    pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1675,6 +1748,13 @@ pub enum ControlEvent {
         #[serde(default)]
         channels: Vec<ChannelPresenceRoster>,
     },
+    TallyUpdate {
+        user_id: UserId,
+        #[serde(default)]
+        client_uid: ClientUid,
+        #[serde(default)]
+        tally: TallyStatus,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1770,6 +1850,8 @@ pub struct SessionStatus {
     pub capture: Option<CaptureHealthStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge: Option<BridgeStatus>,
+    #[serde(default)]
+    pub tally: TallyStatus,
     #[serde(default)]
     pub transport: TransportHealthStatus,
     #[serde(default)]
@@ -2584,6 +2666,8 @@ mod tests {
             mode: BridgeMode::Duplex,
             input_device: Some("BlackHole 2ch".to_string()),
             output_device: Some("USB Audio".to_string()),
+            input: None,
+            output: None,
             input_gain: 0.75,
             output_gain: 0.5,
             tx: vec![20],

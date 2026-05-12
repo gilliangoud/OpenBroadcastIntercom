@@ -1,5 +1,7 @@
 # Release Automation
 
+[Docs index](README.md) | [Root README](../README.md)
+
 Every non-release push to `main` runs the release workflow. The workflow computes
 the next SemVer-compatible CalVer version (`YYYY.M.counter`), commits the version
 updates as `chore(release): vYYYY.M.N [skip release]`, tags that commit, builds

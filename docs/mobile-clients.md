@@ -1,5 +1,7 @@
 # Mobile Tauri Clients
 
+[Docs index](README.md) | [Root README](../README.md)
+
 `clients/app` contains the first iOS and Android Tauri 2 mobile shell for the
 RedLine client. The mobile app reuses the same Rust client runtime,
 control protocol, UDP audio transport, codecs, local UI, and server-owned

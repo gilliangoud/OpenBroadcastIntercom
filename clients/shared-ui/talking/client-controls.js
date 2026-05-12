@@ -725,6 +725,7 @@ function render() {
 function renderStatus() {
   const statusTag = $('status-tag');
   const activeChannels = [...activeTalkChannels()];
+  renderTallyHalo();
   if (statusTag) {
     const connection = state.server_connection || 'reconnecting';
     statusTag.textContent = serverConnectionLabel(connection);
@@ -775,6 +776,16 @@ function renderStatus() {
   const strip = $('lockout-strip');
   if (strip) strip.hidden = !lockout.length;
   setText('lockout-summary', lockout.join(', '));
+}
+
+function renderTallyHalo() {
+  const halo = $('tally-halo');
+  if (!halo) return;
+  const tally = state.tally || {};
+  const tallyState = tally.state || 'off';
+  halo.className = `tally-halo ${tallyState === 'live' ? 'live' : tallyState === 'preview' ? 'preview' : ''}`;
+  const source = tally.input_title || tally.input_key || (tally.input_number ? `Input ${tally.input_number}` : '');
+  halo.title = source ? `vMix ${tallyState}: ${source}` : `vMix ${tallyState}`;
 }
 
 function serverConnectionLabel(connection) {

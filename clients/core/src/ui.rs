@@ -6,7 +6,7 @@ use common::{
     AlertId, AlertStatus, AlertTarget, BuildInfo, ButtonCapability, ButtonId,
     ChannelPresenceRoster, ClientLockoutPolicy, ClientTelemetryStatus, Codec, ControlMessage,
     DirectCallHistoryEntry, DirectCallStatus, EmergencyStatus, IfbConfig, OpusProfile,
-    ProcessingConfig, StereoConfig, TalkButtonConfig, TalkMode,
+    ProcessingConfig, StereoConfig, TalkButtonConfig, TalkMode, TallyStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -175,6 +175,7 @@ pub struct StateResponse {
     pub ifb: IfbConfig,
     pub lockout: ClientLockoutPolicy,
     pub stereo: StereoConfig,
+    pub tally: TallyStatus,
     pub mic_gain: f32,
     pub speaker_gain: f32,
     pub requested_input_backend: ClientAudioBackendKind,
@@ -226,6 +227,7 @@ impl StateResponse {
             ifb: config.ifb.clone(),
             lockout: config.lockout.clone(),
             stereo: config.stereo.clone(),
+            tally: config.tally.clone(),
             mic_gain: audio_settings.mic_gain(),
             speaker_gain: audio_settings.speaker_gain(),
             requested_input_backend: input_backend.requested,

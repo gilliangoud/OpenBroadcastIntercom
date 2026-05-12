@@ -10,6 +10,7 @@ clap.workspace = true
 client-core.workspace = true
 common.workspace = true
 cpal.workspace = true
+ndi-runtime.workspace = true
 opus = "0.3"
 tokio.workspace = true
 tracing.workspace = true

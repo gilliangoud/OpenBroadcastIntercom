@@ -13,7 +13,7 @@ use common::{
     ChannelPresenceRoster, ClientCapabilities, ClientLockoutPolicy, ClientRole, ClientUid, Codec,
     ControlEvent, ControlMessage, ControlResponse, DirectCallHistoryEntry, DirectCallStatus,
     EmergencyStatus, Esp32AudioConfig, IfbConfig, OpusBandwidth, OpusProfile, ProcessingConfig,
-    StereoConfig, TalkButtonAction, TalkButtonConfig, TalkMode, MIX_SAMPLES_PER_FRAME,
+    StereoConfig, TalkButtonAction, TalkButtonConfig, TalkMode, TallyStatus, MIX_SAMPLES_PER_FRAME,
     MIX_SAMPLE_RATE,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -453,6 +453,7 @@ pub struct ClientConfig {
     pub lockout: ClientLockoutPolicy,
     pub stereo: StereoConfig,
     pub esp32_audio: Esp32AudioConfig,
+    pub tally: TallyStatus,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1338,6 +1339,22 @@ pub fn apply_control_event(config: &Arc<Mutex<ClientConfig>>, event: ControlEven
                 return;
             }
             config.channel_rosters = channels;
+        }
+        ControlEvent::TallyUpdate {
+            user_id,
+            client_uid: _,
+            tally,
+        } => {
+            let mut config = config.lock().unwrap();
+            if config.user_id != user_id {
+                tracing::warn!(
+                    local_user_id = config.user_id,
+                    event_user_id = user_id,
+                    "ignored tally update for a different user"
+                );
+                return;
+            }
+            config.tally = tally;
         }
         ControlEvent::ConfigUpdate {
             user_id,
@@ -2247,6 +2264,7 @@ mod tests {
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
+            tally: TallyStatus::default(),
             processing: ProcessingConfig::default(),
             channel_rosters: Vec::new(),
         };
@@ -2300,6 +2318,7 @@ mod tests {
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
+            tally: TallyStatus::default(),
             processing: ProcessingConfig::default(),
             channel_rosters: Vec::new(),
         };
@@ -2346,6 +2365,7 @@ mod tests {
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
+            tally: TallyStatus::default(),
         }));
 
         apply_control_event(
@@ -2373,6 +2393,61 @@ mod tests {
             Some("Production PL")
         );
         assert!(config.channel_rosters[0].members[0].transmitting);
+    }
+
+    #[test]
+    fn tally_update_replaces_client_tally_state() {
+        let config = Arc::new(Mutex::new(ClientConfig {
+            user_id: 1,
+            client_uid: "test-client".to_string(),
+            role: ClientRole::Client,
+            name: String::new(),
+            listen: Vec::new(),
+            tx: Vec::new(),
+            codec: Codec::Pcm16,
+            opus_profile: OpusProfile::default(),
+            talk_mode: TalkMode::Ptt,
+            last_non_muted_talk_mode: TalkMode::Ptt,
+            regular_talk_active: false,
+            priority: false,
+            priority_channels: Vec::new(),
+            processing: ProcessingConfig::default(),
+            channel_rosters: Vec::new(),
+            emergency: None,
+            vol: HashMap::new(),
+            talker_vol: HashMap::new(),
+            buttons: Vec::new(),
+            active_buttons: Vec::new(),
+            active_direct_calls: Vec::new(),
+            last_direct_caller: None,
+            direct_call_history: Vec::new(),
+            active_alerts: Vec::new(),
+            recent_alerts: Vec::new(),
+            advertised_buttons: Vec::new(),
+            capabilities: ClientCapabilities::default(),
+            ifb: IfbConfig::default(),
+            lockout: ClientLockoutPolicy::default(),
+            stereo: StereoConfig::default(),
+            esp32_audio: Esp32AudioConfig::default(),
+            tally: TallyStatus::default(),
+        }));
+        apply_control_event(
+            &config,
+            ControlEvent::TallyUpdate {
+                user_id: 1,
+                client_uid: "test-client".to_string(),
+                tally: TallyStatus {
+                    state: common::TallyState::Live,
+                    input_number: Some(3),
+                    input_title: Some("Main".to_string()),
+                    ..TallyStatus::default()
+                },
+            },
+        );
+
+        let config = config.lock().unwrap();
+        assert_eq!(config.tally.state, common::TallyState::Live);
+        assert_eq!(config.tally.input_number, Some(3));
     }
 
     #[test]
@@ -2488,6 +2563,7 @@ mod tests {
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
+            tally: TallyStatus::default(),
         }));
         let task = tokio::spawn(run_control_connection(
             format!("ws://{addr}"),
