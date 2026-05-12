@@ -2948,6 +2948,9 @@ async fn run_presence_updates(state: Arc<ServerState>) -> anyhow::Result<()> {
 }
 
 async fn run_vmix_tally_monitor(state: Arc<ServerState>) -> anyhow::Result<()> {
+    let http_client = reqwest::Client::builder()
+        .build()
+        .context("build vMix HTTP client")?;
     loop {
         let config = state.admin_state.read().await.vmix.clone();
         if !config.enabled {
@@ -2962,7 +2965,7 @@ async fn run_vmix_tally_monitor(state: Arc<ServerState>) -> anyhow::Result<()> {
             continue;
         }
 
-        let update = fetch_vmix_state(&config).await;
+        let update = fetch_vmix_state(&http_client, &config).await;
         {
             let mut vmix = state.vmix.write().await;
             match update {
@@ -2979,9 +2982,13 @@ async fn run_vmix_tally_monitor(state: Arc<ServerState>) -> anyhow::Result<()> {
     }
 }
 
-async fn fetch_vmix_state(config: &VmixTallyConfig) -> anyhow::Result<VmixRuntimeState> {
+async fn fetch_vmix_state(
+    http_client: &reqwest::Client,
+    config: &VmixTallyConfig,
+) -> anyhow::Result<VmixRuntimeState> {
+    validate_vmix_config(config).map_err(|message| anyhow!(message))?;
     let timeout = Duration::from_millis(config.timeout_ms);
-    let mut state = fetch_vmix_http_state(&config.http_url, timeout).await?;
+    let mut state = fetch_vmix_http_state(http_client, &config.http_url, timeout).await?;
     if config.prefer_tcp {
         match fetch_vmix_tcp_tally(&config.tcp_addr, timeout).await {
             Ok(tally) => {
@@ -3000,13 +3007,14 @@ async fn fetch_vmix_state(config: &VmixTallyConfig) -> anyhow::Result<VmixRuntim
     Ok(state)
 }
 
-async fn fetch_vmix_http_state(url: &str, timeout: Duration) -> anyhow::Result<VmixRuntimeState> {
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .context("build vMix HTTP client")?;
+async fn fetch_vmix_http_state(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+) -> anyhow::Result<VmixRuntimeState> {
     let text = client
         .get(url)
+        .timeout(timeout)
         .send()
         .await
         .with_context(|| format!("request vMix HTTP API at {url}"))?
@@ -3363,6 +3371,7 @@ async fn admin_vmix_config_handler(
     Json(mut body): Json<VmixTallyConfig>,
 ) -> Result<Json<VmixStatusResponse>, AdminApiError> {
     normalize_vmix_config(&mut body);
+    validate_vmix_config(&body).map_err(AdminApiError::BadRequest)?;
     let admin_snapshot = {
         let mut admin_state = state.admin_state.write().await;
         admin_state.vmix = body;
@@ -7158,6 +7167,87 @@ fn normalize_vmix_config(config: &mut VmixTallyConfig) {
     }
     config.poll_interval_ms = config.poll_interval_ms.clamp(250, 30_000);
     config.timeout_ms = config.timeout_ms.clamp(250, 10_000);
+}
+
+fn validate_vmix_config(config: &VmixTallyConfig) -> Result<(), String> {
+    validate_vmix_http_url(&config.http_url)?;
+    validate_vmix_tcp_addr(&config.tcp_addr)?;
+    Ok(())
+}
+
+fn validate_vmix_http_url(url: &str) -> Result<(), String> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|err| format!("invalid vMix HTTP URL `{url}`: {err}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("vMix HTTP URL must use http or https".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("vMix HTTP URL must not include credentials".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "vMix HTTP URL must include a host".to_string())?;
+    if !is_allowed_vmix_host(host) {
+        return Err("vMix HTTP URL host must be localhost, a private/link-local IP, a .local name, or a single-label LAN hostname".to_string());
+    }
+    Ok(())
+}
+
+fn validate_vmix_tcp_addr(addr: &str) -> Result<(), String> {
+    if let Ok(socket) = addr.parse::<std::net::SocketAddr>() {
+        if socket.port() == 0 {
+            return Err("vMix TCP address port must be non-zero".to_string());
+        }
+        if !is_allowed_vmix_ip(socket.ip()) {
+            return Err(
+                "vMix TCP address host must be localhost or a private/link-local IP".to_string(),
+            );
+        }
+        return Ok(());
+    }
+    let (host, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| "vMix TCP address must include host:port".to_string())?;
+    if host.is_empty() || port.is_empty() {
+        return Err("vMix TCP address must include host and port".to_string());
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|err| format!("invalid vMix TCP address port `{port}`: {err}"))?;
+    if port == 0 {
+        return Err("vMix TCP address port must be non-zero".to_string());
+    }
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if !is_allowed_vmix_host(host) {
+        return Err("vMix TCP address host must be localhost, a private/link-local IP, a .local name, or a single-label LAN hostname".to_string());
+    }
+    Ok(())
+}
+
+fn is_allowed_vmix_host(host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return is_allowed_vmix_ip(ip);
+    }
+    if host == "localhost" || host.ends_with(".local") {
+        return true;
+    }
+    !host.contains('.')
+        && host
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn is_allowed_vmix_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+        }
+    }
 }
 
 fn normalize_channels(channels: &mut Vec<ChannelConfig>) {
@@ -12457,6 +12547,32 @@ mod tests {
         assert_eq!(tally.state, TallyState::Off);
         assert_eq!(tally.input_key.as_deref(), Some("preferred"));
         assert_eq!(tally.input_number, Some(1));
+    }
+
+    #[test]
+    fn vmix_config_validation_rejects_public_or_invalid_endpoints() {
+        let mut config = VmixTallyConfig {
+            enabled: true,
+            http_url: "http://192.168.1.50:8088/api".to_string(),
+            tcp_addr: "192.168.1.50:8099".to_string(),
+            prefer_tcp: true,
+            poll_interval_ms: 1_000,
+            timeout_ms: 1_500,
+        };
+        assert!(validate_vmix_config(&config).is_ok());
+
+        config.http_url = "ftp://192.168.1.50/api".to_string();
+        assert!(validate_vmix_config(&config).is_err());
+
+        config.http_url = "https://example.com/api".to_string();
+        assert!(validate_vmix_config(&config).is_err());
+
+        config.http_url = "http://vmix.local:8088/api".to_string();
+        config.tcp_addr = "example.com:8099".to_string();
+        assert!(validate_vmix_config(&config).is_err());
+
+        config.tcp_addr = "vmix-pc:8099".to_string();
+        assert!(validate_vmix_config(&config).is_ok());
     }
 
     #[test]

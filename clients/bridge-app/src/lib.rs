@@ -742,13 +742,16 @@ async fn start_all_handler(
 async fn stop_all_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<OkResponse>, BridgeAppError> {
-    let route_ids = state
+    let mut route_ids = state
         .children
         .lock()
         .await
         .keys()
         .cloned()
         .collect::<Vec<_>>();
+    route_ids.extend(state.browser_sources.lock().await.keys().cloned());
+    route_ids.sort();
+    route_ids.dedup();
     for route_id in route_ids {
         stop_route(&state, &route_id).await?;
     }

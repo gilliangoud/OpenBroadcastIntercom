@@ -31,6 +31,8 @@ struct Args {
 struct GpioConfig {
     debounce_ms: u64,
     poll_ms: u64,
+    #[serde(default = "default_tally_poll_ms")]
+    tally_poll_ms: u64,
     outputs: GpioOutputs,
     buttons: Vec<GpioButton>,
 }
@@ -40,6 +42,7 @@ impl Default for GpioConfig {
         Self {
             debounce_ms: 30,
             poll_ms: 20,
+            tally_poll_ms: default_tally_poll_ms(),
             outputs: GpioOutputs::default(),
             buttons: vec![
                 GpioButton {
@@ -117,6 +120,12 @@ struct ButtonRuntime {
     candidate_since: Instant,
 }
 
+#[derive(Debug, Default)]
+struct TallyOutputState {
+    preview: Option<bool>,
+    live: Option<bool>,
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("pi_gpio=info".parse()?))
@@ -150,7 +159,12 @@ fn run_loop(
 ) -> anyhow::Result<()> {
     let debounce = Duration::from_millis(config.debounce_ms);
     let poll = Duration::from_millis(config.poll_ms.max(1));
+    let tally_poll = Duration::from_millis(config.tally_poll_ms.max(1));
     let outputs = config.outputs.clone();
+    let mut last_tally_poll = Instant::now()
+        .checked_sub(tally_poll)
+        .unwrap_or_else(Instant::now);
+    let mut tally_state = TallyOutputState::default();
     let mut buttons = config
         .buttons
         .into_iter()
@@ -185,8 +199,18 @@ fn run_loop(
                 }
             }
         }
-        if let Err(err) = update_tally_outputs(gpio_root, &outputs, target, token, dry_run) {
-            tracing::warn!(%err, "failed to update tally GPIO outputs");
+        if last_tally_poll.elapsed() >= tally_poll {
+            if let Err(err) = update_tally_outputs(
+                gpio_root,
+                &outputs,
+                &mut tally_state,
+                target,
+                token,
+                dry_run,
+            ) {
+                tracing::warn!(%err, "failed to update tally GPIO outputs");
+            }
+            last_tally_poll = Instant::now();
         }
         thread::sleep(poll);
     }
@@ -274,6 +298,7 @@ fn endpoints_for_event(button: &GpioButton, pressed: bool) -> anyhow::Result<Vec
 fn update_tally_outputs(
     root: &Path,
     outputs: &GpioOutputs,
+    cached: &mut TallyOutputState,
     target: &HttpTarget,
     token: Option<&str>,
     dry_run: bool,
@@ -290,10 +315,16 @@ fn update_tally_outputs(
     let preview = tally == "preview";
     let live = tally == "live";
     if let Some(output) = &outputs.preview {
-        write_gpio_output(root, output, preview, dry_run)?;
+        if cached.preview != Some(preview) {
+            write_gpio_output(root, output, preview, dry_run)?;
+            cached.preview = Some(preview);
+        }
     }
     if let Some(output) = &outputs.live {
-        write_gpio_output(root, output, live, dry_run)?;
+        if cached.live != Some(live) {
+            write_gpio_output(root, output, live, dry_run)?;
+            cached.live = Some(live);
+        }
     }
     Ok(())
 }
@@ -390,6 +421,10 @@ fn encode_path_segment(value: &str) -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_tally_poll_ms() -> u64 {
+    500
 }
 
 #[cfg(test)]
@@ -518,7 +553,9 @@ mod tests {
 
     #[test]
     fn default_config_is_valid() {
-        validate_config(&GpioConfig::default()).unwrap();
+        let config = GpioConfig::default();
+        assert_eq!(config.tally_poll_ms, 500);
+        validate_config(&config).unwrap();
     }
 
     #[test]

@@ -782,12 +782,7 @@ fn bridge_status_snapshot(config: &ClientConfig, bridge: BridgeStatusConfig) -> 
         kind: bridge.output_kind.status_kind(),
         name: match bridge.output_kind {
             BridgeOutputKind::AudioDevice => bridge.output_device.clone(),
-            BridgeOutputKind::VmixBrowserSource => Some(
-                bridge
-                    .ndi_output_name
-                    .clone()
-                    .unwrap_or_else(|| "vMix Browser Source".to_string()),
-            ),
+            BridgeOutputKind::VmixBrowserSource => Some(config.name.clone()),
             BridgeOutputKind::NdiOutput => bridge.ndi_output_name.clone(),
         },
         url: bridge.vmix_source_url.clone(),
@@ -1606,6 +1601,36 @@ mod tests {
         assert_eq!(input.reconnects, Some(1));
         assert!(input.audio_level.unwrap() > 0.9);
         assert_eq!(input.stale, Some(false));
+    }
+
+    #[test]
+    fn vmix_browser_source_status_uses_bridge_name_and_url() {
+        let config = test_config();
+        let status = bridge_status_snapshot(
+            &config,
+            BridgeStatusConfig {
+                mode: BridgeCliMode::Output,
+                input_kind: BridgeInputKind::AudioDevice,
+                output_kind: BridgeOutputKind::VmixBrowserSource,
+                input_device: None,
+                output_device: None,
+                ndi_source: None,
+                ndi_output_name: Some("Unrelated NDI Name".to_string()),
+                vmix_source_url: Some("http://127.0.0.1:41012/vmix/source/program".to_string()),
+                input_gain: 1.0,
+                output_gain: 1.0,
+                note: String::new(),
+                telemetry: Arc::new(BridgeRuntimeTelemetry::default()),
+            },
+        );
+
+        let output = status.output.unwrap();
+        assert_eq!(output.kind, BridgeEndpointKind::VmixBrowserSource);
+        assert_eq!(output.name.as_deref(), Some("Program Bridge"));
+        assert_eq!(
+            output.url.as_deref(),
+            Some("http://127.0.0.1:41012/vmix/source/program")
+        );
     }
 
     #[test]
