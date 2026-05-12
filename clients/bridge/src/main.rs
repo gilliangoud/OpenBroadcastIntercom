@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,12 +14,14 @@ use client_core::{
     DEFAULT_SERVER_HOST,
 };
 use common::{
-    codec_samples_per_frame, AudioPacket, BridgeStatus, ClientCapabilities, ClientLockoutPolicy,
-    ClientRole, Codec, ControlMessage, ControlResponse, Esp32AudioConfig, IfbConfig, OpusProfile,
-    ProcessingConfig, StereoConfig, TalkMode, MIX_SAMPLES_PER_FRAME,
+    codec_samples_per_frame, AudioPacket, BridgeEndpointKind, BridgeEndpointStatus, BridgeStatus,
+    ClientCapabilities, ClientLockoutPolicy, ClientRole, Codec, ControlMessage, ControlResponse,
+    Esp32AudioConfig, IfbConfig, OpusProfile, ProcessingConfig, StereoConfig, TalkMode,
+    TallyStatus, MIX_SAMPLES_PER_FRAME,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
+use ndi_runtime::NdiRuntime;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
@@ -33,7 +35,7 @@ struct Args {
     server: SocketAddr,
     #[arg(long, default_value = "ws://127.0.0.1:40001")]
     control: String,
-    #[arg(long, required_unless_present = "list_devices")]
+    #[arg(long)]
     user_id: Option<u16>,
     #[arg(long)]
     client_uid: Option<String>,
@@ -57,6 +59,18 @@ struct Args {
     input_device: Option<String>,
     #[arg(long)]
     output_device: Option<String>,
+    #[arg(long, value_enum, default_value_t = BridgeInputKind::AudioDevice)]
+    input_kind: BridgeInputKind,
+    #[arg(long, value_enum, default_value_t = BridgeOutputKind::AudioDevice)]
+    output_kind: BridgeOutputKind,
+    #[arg(long)]
+    ndi_source: Option<String>,
+    #[arg(long)]
+    ndi_output_name: Option<String>,
+    #[arg(long)]
+    ndi_groups: Option<String>,
+    #[arg(long)]
+    vmix_source_url: Option<String>,
     #[arg(long, default_value_t = 1.0)]
     input_gain: f32,
     #[arg(long, default_value_t = 1.0)]
@@ -65,6 +79,8 @@ struct Args {
     note: String,
     #[arg(long)]
     list_devices: bool,
+    #[arg(long)]
+    list_ndi_sources: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -72,6 +88,43 @@ enum BridgeCliMode {
     Input,
     Output,
     Duplex,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum BridgeInputKind {
+    #[value(name = "audio-device")]
+    AudioDevice,
+    #[value(name = "ndi-source")]
+    NdiSource,
+}
+
+impl BridgeInputKind {
+    fn status_kind(self) -> BridgeEndpointKind {
+        match self {
+            Self::AudioDevice => BridgeEndpointKind::AudioDevice,
+            Self::NdiSource => BridgeEndpointKind::NdiSource,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum BridgeOutputKind {
+    #[value(name = "audio-device")]
+    AudioDevice,
+    #[value(name = "vmix-browser-source")]
+    VmixBrowserSource,
+    #[value(name = "ndi-output")]
+    NdiOutput,
+}
+
+impl BridgeOutputKind {
+    fn status_kind(self) -> BridgeEndpointKind {
+        match self {
+            Self::AudioDevice => BridgeEndpointKind::AudioDevice,
+            Self::VmixBrowserSource => BridgeEndpointKind::VmixBrowserSource,
+            Self::NdiOutput => BridgeEndpointKind::NdiOutput,
+        }
+    }
 }
 
 impl BridgeCliMode {
@@ -95,11 +148,119 @@ impl BridgeCliMode {
 #[derive(Debug, Clone)]
 struct BridgeStatusConfig {
     mode: BridgeCliMode,
+    input_kind: BridgeInputKind,
+    output_kind: BridgeOutputKind,
     input_device: Option<String>,
     output_device: Option<String>,
+    ndi_source: Option<String>,
+    ndi_output_name: Option<String>,
+    vmix_source_url: Option<String>,
     input_gain: f32,
     output_gain: f32,
     note: String,
+    telemetry: Arc<BridgeRuntimeTelemetry>,
+}
+
+#[derive(Debug)]
+struct BridgeRuntimeTelemetry {
+    started_at: Instant,
+    input: EndpointRuntimeTelemetry,
+    output: EndpointRuntimeTelemetry,
+}
+
+impl Default for BridgeRuntimeTelemetry {
+    fn default() -> Self {
+        Self {
+            started_at: Instant::now(),
+            input: EndpointRuntimeTelemetry::default(),
+            output: EndpointRuntimeTelemetry::default(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct EndpointRuntimeTelemetry {
+    audio_level_ppm: AtomicU32,
+    frames: AtomicU64,
+    underflows: AtomicU64,
+    drops: AtomicU64,
+    reconnects: AtomicU64,
+    last_audio_ms: AtomicU64,
+    runtime: Mutex<Option<String>>,
+    warning: Mutex<Option<String>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EndpointTelemetrySnapshot {
+    audio_level: Option<f32>,
+    frames: u64,
+    underflows: u64,
+    drops: u64,
+    reconnects: u64,
+    stale: bool,
+    last_audio_ms_ago: Option<u64>,
+    runtime: Option<String>,
+    warning: Option<String>,
+}
+
+impl EndpointRuntimeTelemetry {
+    fn record_audio_i16(&self, samples: &[i16], started_at: Instant) {
+        self.record_audio_level(i16_peak_level(samples), started_at);
+    }
+
+    fn record_audio_f32(&self, samples: &[f32], started_at: Instant) {
+        self.record_audio_level(f32_peak_level(samples), started_at);
+    }
+
+    fn record_audio_level(&self, level: f32, started_at: Instant) {
+        self.audio_level_ppm.store(
+            (level.clamp(0.0, 1.0) * 1_000_000.0).round() as u32,
+            Ordering::Relaxed,
+        );
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        self.last_audio_ms
+            .store(elapsed_ms(started_at), Ordering::Relaxed);
+    }
+
+    fn record_underflow(&self) {
+        self.underflows.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_drop(&self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_reconnect(&self) {
+        self.reconnects.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn set_runtime(&self, runtime: impl Into<String>) {
+        *self.runtime.lock().unwrap() = Some(runtime.into());
+    }
+
+    fn set_warning(&self, warning: Option<String>) {
+        *self.warning.lock().unwrap() = warning;
+    }
+
+    fn snapshot(&self, started_at: Instant) -> EndpointTelemetrySnapshot {
+        let last_audio_ms = self.last_audio_ms.load(Ordering::Relaxed);
+        let now = elapsed_ms(started_at);
+        let last_audio_ms_ago = (last_audio_ms > 0).then_some(now.saturating_sub(last_audio_ms));
+        let frames = self.frames.load(Ordering::Relaxed);
+        let stale = frames == 0 || last_audio_ms_ago.is_some_and(|age| age > 2_000);
+        EndpointTelemetrySnapshot {
+            audio_level: (frames > 0)
+                .then_some(self.audio_level_ppm.load(Ordering::Relaxed) as f32 / 1_000_000.0),
+            frames,
+            underflows: self.underflows.load(Ordering::Relaxed),
+            drops: self.drops.load(Ordering::Relaxed),
+            reconnects: self.reconnects.load(Ordering::Relaxed),
+            stale,
+            last_audio_ms_ago,
+            runtime: self.runtime.lock().unwrap().clone(),
+            warning: self.warning.lock().unwrap().clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -154,7 +315,12 @@ async fn main() -> anyhow::Result<()> {
         list_audio_devices()?;
         return Ok(());
     }
+    if args.list_ndi_sources {
+        list_ndi_sources()?;
+        return Ok(());
+    }
     resolve_endpoint_args(&mut args)?;
+    validate_route_endpoint_kinds(&args)?;
     run(args).await
 }
 
@@ -169,6 +335,33 @@ fn resolve_endpoint_args(args: &mut Args) -> anyhow::Result<()> {
     }
     if args.control == default_control {
         args.control = endpoint.control_url();
+    }
+    Ok(())
+}
+
+fn validate_route_endpoint_kinds(args: &Args) -> anyhow::Result<()> {
+    if args.mode.captures() && args.input_kind == BridgeInputKind::NdiSource {
+        if args
+            .ndi_source
+            .as_deref()
+            .filter(|source| !source.trim().is_empty())
+            .is_none()
+        {
+            bail!("NDI receive routes require --ndi-source");
+        }
+    }
+    if args.mode.plays() && args.output_kind == BridgeOutputKind::NdiOutput {
+        if args
+            .ndi_output_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .is_none()
+        {
+            bail!("NDI output routes require --ndi-output-name");
+        }
+    }
+    if args.mode.plays() && args.output_kind == BridgeOutputKind::VmixBrowserSource {
+        bail!("vMix Browser Source output routes must be run by bridge-app so it can serve the local browser-source URL");
     }
     Ok(())
 }
@@ -227,6 +420,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             channel_pan: HashMap::new(),
         },
         esp32_audio: Esp32AudioConfig::default(),
+        tally: TallyStatus::default(),
     }));
 
     let (control_tx, control_rx) = mpsc::channel::<ControlRequest>(16);
@@ -291,6 +485,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Arc::clone(&runtime_config),
     ));
     let telemetry_counters = ClientTelemetryCounters::default();
+    let bridge_runtime_telemetry = Arc::new(BridgeRuntimeTelemetry::default());
     let mut telemetry_playback = Arc::new(Mutex::new(PlaybackBuffer::new(
         MIX_SAMPLES_PER_FRAME * 20,
         0,
@@ -299,51 +494,115 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let mut bridge_output_device = None;
     let mut _input_stream = None;
     let capture_task = if args.mode.captures() {
-        let (mic_tx, mic_rx) = mpsc::channel::<Vec<i16>>(8);
-        let settings = Arc::new(AudioSettings::new(args.input_gain, 1.0));
-        let (stream, device_name) = build_input_stream(
-            mic_tx,
-            settings,
-            args.input_device.as_deref(),
-            telemetry_counters.clone(),
-        )?;
-        bridge_input_device = Some(device_name);
-        stream.play()?;
-        _input_stream = Some(stream);
-        Some(tokio::spawn(run_capture_sender(
-            Arc::clone(&socket),
-            Arc::clone(&runtime_config),
-            mic_rx,
-            telemetry_counters.clone(),
-        )))
+        match args.input_kind {
+            BridgeInputKind::AudioDevice => {
+                let (mic_tx, mic_rx) = mpsc::channel::<Vec<i16>>(8);
+                let settings = Arc::new(AudioSettings::new(args.input_gain, 1.0));
+                let (stream, device_name) = build_input_stream(
+                    mic_tx,
+                    settings,
+                    args.input_device.as_deref(),
+                    telemetry_counters.clone(),
+                )?;
+                bridge_input_device = Some(device_name);
+                stream.play()?;
+                _input_stream = Some(stream);
+                Some(tokio::spawn(run_capture_sender(
+                    Arc::clone(&socket),
+                    Arc::clone(&runtime_config),
+                    mic_rx,
+                    telemetry_counters.clone(),
+                )))
+            }
+            BridgeInputKind::NdiSource => {
+                let source_name = args
+                    .ndi_source
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|source| !source.is_empty())
+                    .context("NDI receive routes require --ndi-source")?
+                    .to_string();
+                bridge_input_device = Some(source_name.clone());
+                let (mic_tx, mic_rx) = mpsc::channel::<Vec<i16>>(8);
+                let capture_sender = tokio::spawn(run_capture_sender(
+                    Arc::clone(&socket),
+                    Arc::clone(&runtime_config),
+                    mic_rx,
+                    telemetry_counters.clone(),
+                ));
+                let telemetry = telemetry_counters.clone();
+                let endpoint_telemetry = Arc::clone(&bridge_runtime_telemetry);
+                let input_gain = args.input_gain;
+                let ndi_capture = tokio::task::spawn_blocking(move || {
+                    run_ndi_capture_producer(
+                        source_name,
+                        input_gain,
+                        mic_tx,
+                        telemetry,
+                        endpoint_telemetry,
+                    )
+                });
+                Some(tokio::spawn(async move {
+                    tokio::select! {
+                        result = ndi_capture => result.context("NDI capture task panicked")??,
+                        result = capture_sender => result.context("capture sender task panicked")??,
+                    }
+                    Ok(())
+                }))
+            }
+        }
     } else {
         None
     };
     let mut _output_stream = None;
     let playback_task = if args.mode.plays() {
-        let playback = Arc::new(Mutex::new(PlaybackBuffer::new(
-            MIX_SAMPLES_PER_FRAME * 20,
-            MIX_SAMPLES_PER_FRAME * 4,
-        )));
-        telemetry_playback = Arc::clone(&playback);
-        let settings = Arc::new(AudioSettings::new(1.0, args.output_gain));
-        let (stream, device_name) = build_output_stream(
-            Arc::clone(&playback),
-            settings,
-            args.output_device.as_deref(),
-        )?;
-        bridge_output_device = Some(device_name);
-        stream.play()?;
-        _output_stream = Some(stream);
-        if let Some(events) = connection_event_rx.take() {
-            tokio::spawn(run_connection_cue_task(Arc::clone(&playback), events));
+        match args.output_kind {
+            BridgeOutputKind::AudioDevice => {
+                let playback = Arc::new(Mutex::new(PlaybackBuffer::new(
+                    MIX_SAMPLES_PER_FRAME * 20,
+                    MIX_SAMPLES_PER_FRAME * 4,
+                )));
+                telemetry_playback = Arc::clone(&playback);
+                let settings = Arc::new(AudioSettings::new(1.0, args.output_gain));
+                let (stream, device_name) = build_output_stream(
+                    Arc::clone(&playback),
+                    settings,
+                    args.output_device.as_deref(),
+                )?;
+                bridge_output_device = Some(device_name);
+                stream.play()?;
+                _output_stream = Some(stream);
+                if let Some(events) = connection_event_rx.take() {
+                    tokio::spawn(run_connection_cue_task(Arc::clone(&playback), events));
+                }
+                Some(tokio::spawn(run_playback_receiver(
+                    Arc::clone(&socket),
+                    Arc::clone(&runtime_config),
+                    playback,
+                    telemetry_counters.clone(),
+                )))
+            }
+            BridgeOutputKind::NdiOutput => {
+                let output_name = args
+                    .ndi_output_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .context("NDI output routes require --ndi-output-name")?
+                    .to_string();
+                bridge_output_device = Some(output_name.clone());
+                Some(tokio::spawn(run_ndi_output_receiver(
+                    Arc::clone(&socket),
+                    Arc::clone(&runtime_config),
+                    output_name,
+                    args.ndi_groups.clone(),
+                    args.output_gain,
+                    telemetry_counters.clone(),
+                    Arc::clone(&bridge_runtime_telemetry),
+                )))
+            }
+            BridgeOutputKind::VmixBrowserSource => None,
         }
-        Some(tokio::spawn(run_playback_receiver(
-            Arc::clone(&socket),
-            Arc::clone(&runtime_config),
-            playback,
-            telemetry_counters.clone(),
-        )))
     } else {
         None
     };
@@ -352,11 +611,17 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Arc::clone(&runtime_config),
         BridgeStatusConfig {
             mode: args.mode,
+            input_kind: args.input_kind,
+            output_kind: args.output_kind,
             input_device: bridge_input_device,
             output_device: bridge_output_device,
+            ndi_source: args.ndi_source,
+            ndi_output_name: args.ndi_output_name,
+            vmix_source_url: args.vmix_source_url,
             input_gain: args.input_gain,
             output_gain: args.output_gain,
             note: args.note,
+            telemetry: Arc::clone(&bridge_runtime_telemetry),
         },
     ));
     let bridge_telemetry_task = tokio::spawn(run_bridge_telemetry(
@@ -419,15 +684,7 @@ async fn run_bridge_status(
             let config = config.lock().unwrap();
             (
                 config.user_id,
-                bridge_status_snapshot(
-                    &config,
-                    BridgeStatusConfig {
-                        input_device: bridge.input_device.clone(),
-                        output_device: bridge.output_device.clone(),
-                        note: bridge.note.clone(),
-                        ..bridge
-                    },
-                ),
+                bridge_status_snapshot(&config, bridge.clone()),
             )
         };
         match send_control_request(
@@ -496,10 +753,64 @@ async fn run_bridge_telemetry(
 }
 
 fn bridge_status_snapshot(config: &ClientConfig, bridge: BridgeStatusConfig) -> BridgeStatus {
+    let input_telemetry = bridge.telemetry.input.snapshot(bridge.telemetry.started_at);
+    let output_telemetry = bridge
+        .telemetry
+        .output
+        .snapshot(bridge.telemetry.started_at);
+    let input = bridge.mode.captures().then(|| BridgeEndpointStatus {
+        kind: bridge.input_kind.status_kind(),
+        name: match bridge.input_kind {
+            BridgeInputKind::AudioDevice => bridge.input_device.clone(),
+            BridgeInputKind::NdiSource => bridge.ndi_source.clone(),
+        },
+        url: None,
+        connected_clients: None,
+        available: Some(true),
+        warning: input_telemetry.warning.clone(),
+        runtime: input_telemetry.runtime.clone(),
+        audio_level: input_telemetry.audio_level,
+        frames: (input_telemetry.frames > 0).then_some(input_telemetry.frames),
+        underflows: (input_telemetry.underflows > 0).then_some(input_telemetry.underflows),
+        drops: (input_telemetry.drops > 0).then_some(input_telemetry.drops),
+        reconnects: (input_telemetry.reconnects > 0).then_some(input_telemetry.reconnects),
+        stale: matches!(bridge.input_kind, BridgeInputKind::NdiSource)
+            .then_some(input_telemetry.stale),
+        last_audio_ms_ago: input_telemetry.last_audio_ms_ago,
+    });
+    let output = bridge.mode.plays().then(|| BridgeEndpointStatus {
+        kind: bridge.output_kind.status_kind(),
+        name: match bridge.output_kind {
+            BridgeOutputKind::AudioDevice => bridge.output_device.clone(),
+            BridgeOutputKind::VmixBrowserSource => Some(config.name.clone()),
+            BridgeOutputKind::NdiOutput => bridge.ndi_output_name.clone(),
+        },
+        url: bridge.vmix_source_url.clone(),
+        connected_clients: None,
+        available: Some(bridge.output_kind != BridgeOutputKind::VmixBrowserSource),
+        warning: match bridge.output_kind {
+            BridgeOutputKind::AudioDevice => output_telemetry.warning.clone(),
+            BridgeOutputKind::VmixBrowserSource => {
+                Some("vMix browser sources are served by bridge-app".to_string())
+            }
+            BridgeOutputKind::NdiOutput => output_telemetry.warning.clone(),
+        },
+        runtime: output_telemetry.runtime.clone(),
+        audio_level: output_telemetry.audio_level,
+        frames: (output_telemetry.frames > 0).then_some(output_telemetry.frames),
+        underflows: (output_telemetry.underflows > 0).then_some(output_telemetry.underflows),
+        drops: (output_telemetry.drops > 0).then_some(output_telemetry.drops),
+        reconnects: (output_telemetry.reconnects > 0).then_some(output_telemetry.reconnects),
+        stale: matches!(bridge.output_kind, BridgeOutputKind::NdiOutput)
+            .then_some(output_telemetry.stale),
+        last_audio_ms_ago: output_telemetry.last_audio_ms_ago,
+    });
     BridgeStatus {
         mode: bridge.mode.status_mode(),
         input_device: bridge.input_device,
         output_device: bridge.output_device,
+        input,
+        output,
         input_gain: bridge.input_gain,
         output_gain: bridge.output_gain,
         tx: config.tx.clone(),
@@ -628,6 +939,205 @@ async fn run_playback_receiver(
     }
 }
 
+fn run_ndi_capture_producer(
+    source_name: String,
+    input_gain: f32,
+    mic_tx: mpsc::Sender<Vec<i16>>,
+    telemetry: ClientTelemetryCounters,
+    runtime_telemetry: Arc<BridgeRuntimeTelemetry>,
+) -> anyhow::Result<()> {
+    let runtime = NdiRuntime::load().context("load system NDI runtime for receive")?;
+    runtime_telemetry.input.set_runtime(
+        runtime
+            .library_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "system NDI runtime".to_string()),
+    );
+    tracing::info!(
+        source = %source_name,
+        library = ?runtime.library_path(),
+        "starting NDI receive route"
+    );
+    let settings = Arc::new(AudioSettings::new(input_gain, 1.0));
+    loop {
+        let mut receiver = match runtime.receiver(&source_name) {
+            Ok(receiver) => {
+                runtime_telemetry.input.set_warning(None);
+                receiver
+            }
+            Err(err) => {
+                runtime_telemetry.input.record_reconnect();
+                runtime_telemetry
+                    .input
+                    .set_warning(Some(format!("NDI source unavailable: {err}")));
+                std::thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+        };
+        let mut capture: Option<(u32, usize, CaptureAdapter)> = None;
+        loop {
+            let frame = match receiver.capture_audio(Duration::from_millis(500)) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => {
+                    runtime_telemetry.input.record_underflow();
+                    continue;
+                }
+                Err(err) => {
+                    runtime_telemetry.input.record_reconnect();
+                    runtime_telemetry
+                        .input
+                        .set_warning(Some(format!("NDI receive reconnecting: {err}")));
+                    break;
+                }
+            };
+            runtime_telemetry
+                .input
+                .record_audio_f32(&frame.samples, runtime_telemetry.started_at);
+            if capture.as_ref().is_none_or(|(rate, channels, _)| {
+                *rate != frame.sample_rate_hz || *channels != frame.channels
+            }) {
+                tracing::info!(
+                    source = %source_name,
+                    sample_rate = frame.sample_rate_hz,
+                    channels = frame.channels,
+                    "NDI receive audio format changed"
+                );
+                capture = Some((
+                    frame.sample_rate_hz,
+                    frame.channels,
+                    CaptureAdapter::new(
+                        mic_tx.clone(),
+                        frame.sample_rate_hz,
+                        frame.channels,
+                        Arc::clone(&settings),
+                        telemetry.clone(),
+                    ),
+                ));
+            }
+            if let Some((_, _, adapter)) = capture.as_mut() {
+                adapter
+                    .push_interleaved(frame.samples.into_iter().map(|sample| float_to_i16(sample)));
+            }
+        }
+    }
+}
+
+async fn run_ndi_output_receiver(
+    socket: Arc<UdpSocket>,
+    config: Arc<Mutex<ClientConfig>>,
+    output_name: String,
+    groups: Option<String>,
+    output_gain: f32,
+    telemetry: ClientTelemetryCounters,
+    runtime_telemetry: Arc<BridgeRuntimeTelemetry>,
+) -> anyhow::Result<()> {
+    let runtime = NdiRuntime::load().context("load system NDI runtime for send")?;
+    runtime_telemetry.output.set_runtime(
+        runtime
+            .library_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "system NDI runtime".to_string()),
+    );
+    tracing::info!(
+        name = %output_name,
+        groups = ?groups,
+        library = ?runtime.library_path(),
+        "starting NDI output route"
+    );
+    let mut sender = runtime.sender(&output_name, groups.as_deref())?;
+    runtime_telemetry.output.set_warning(None);
+    let mut decoder = AudioDecoder::default();
+    let mut buf = vec![0_u8; common::MAX_PACKET_BYTES];
+    let mut floats = Vec::<f32>::new();
+    loop {
+        let len = socket.recv(&mut buf).await?;
+        let packet = match AudioPacket::decode(&buf[..len]) {
+            Ok(packet) => {
+                telemetry.record_udp_rx_packet();
+                packet
+            }
+            Err(err) => {
+                telemetry.record_malformed_packet();
+                runtime_telemetry.output.record_drop();
+                tracing::warn!(%err, "dropped malformed bridge NDI output packet");
+                continue;
+            }
+        };
+        let (receive_channels, opus_profile) = {
+            let config = config.lock().unwrap();
+            let channels = if config.stereo.active_for_codec(config.codec)
+                && matches!(packet.codec, Codec::Pcm48 | Codec::Opus)
+            {
+                2
+            } else {
+                1
+            };
+            (channels, config.opus_profile)
+        };
+        let samples = match decoder.decode_with_channels(
+            packet.codec,
+            opus_profile,
+            &packet.payload,
+            receive_channels,
+        ) {
+            Ok(samples) => samples,
+            Err(err) => {
+                telemetry.record_decode_error();
+                runtime_telemetry.output.record_drop();
+                tracing::warn!(%err, codec = ?packet.codec, "dropped invalid bridge NDI output packet");
+                continue;
+            }
+        };
+        runtime_telemetry
+            .output
+            .record_audio_i16(&samples, runtime_telemetry.started_at);
+        floats.clear();
+        floats.extend(
+            samples
+                .iter()
+                .map(|sample| ((*sample as f32 / i16::MAX as f32) * output_gain).clamp(-1.0, 1.0)),
+        );
+        if let Err(err) =
+            sender.send_interleaved_f32(common::MIX_SAMPLE_RATE, receive_channels, &floats)
+        {
+            runtime_telemetry.output.record_reconnect();
+            runtime_telemetry
+                .output
+                .set_warning(Some(format!("NDI output send failed: {err}")));
+            sender = runtime.sender(&output_name, groups.as_deref())?;
+            runtime_telemetry.output.set_warning(None);
+        }
+    }
+}
+
+fn float_to_i16(sample: f32) -> i16 {
+    (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at
+        .elapsed()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn i16_peak_level(samples: &[i16]) -> f32 {
+    samples
+        .iter()
+        .map(|sample| (*sample as f32).abs() / i16::MAX as f32)
+        .fold(0.0, f32::max)
+        .clamp(0.0, 1.0)
+}
+
+fn f32_peak_level(samples: &[f32]) -> f32 {
+    samples
+        .iter()
+        .map(|sample| sample.abs())
+        .fold(0.0, f32::max)
+        .clamp(0.0, 1.0)
+}
+
 fn list_audio_devices() -> anyhow::Result<()> {
     let host = cpal::default_host();
     println!("Input devices:");
@@ -643,6 +1153,30 @@ fn list_audio_devices() -> anyhow::Result<()> {
             "  {}",
             device.name().unwrap_or_else(|_| "<unknown>".to_string())
         );
+    }
+    Ok(())
+}
+
+fn list_ndi_sources() -> anyhow::Result<()> {
+    let runtime = NdiRuntime::load()?;
+    println!(
+        "NDI runtime: {}",
+        runtime
+            .library_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "system loader path".to_string())
+    );
+    println!("NDI sources:");
+    let sources = runtime.find_sources(Duration::from_millis(2_000), None)?;
+    if sources.is_empty() {
+        println!("  <none found>");
+    } else {
+        for source in sources {
+            match source.url {
+                Some(url) => println!("  {} ({url})", source.name),
+                None => println!("  {}", source.name),
+            }
+        }
     }
     Ok(())
 }
@@ -919,6 +1453,7 @@ mod tests {
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
+            tally: TallyStatus::default(),
         }
     }
 
@@ -946,17 +1481,31 @@ mod tests {
             &config,
             BridgeStatusConfig {
                 mode: BridgeCliMode::Duplex,
+                input_kind: BridgeInputKind::AudioDevice,
+                output_kind: BridgeOutputKind::AudioDevice,
                 input_device: Some("BlackHole".to_string()),
                 output_device: Some("USB Audio".to_string()),
+                ndi_source: None,
+                ndi_output_name: None,
+                vmix_source_url: None,
                 input_gain: 0.8,
                 output_gain: 0.6,
                 note: "vMix program bridge".to_string(),
+                telemetry: Arc::new(BridgeRuntimeTelemetry::default()),
             },
         );
 
         assert_eq!(status.mode, common::BridgeMode::Duplex);
         assert_eq!(status.input_device.as_deref(), Some("BlackHole"));
         assert_eq!(status.output_device.as_deref(), Some("USB Audio"));
+        assert_eq!(
+            status.input.as_ref().unwrap().kind,
+            BridgeEndpointKind::AudioDevice
+        );
+        assert_eq!(
+            status.output.as_ref().unwrap().kind,
+            BridgeEndpointKind::AudioDevice
+        );
         assert_eq!(status.input_gain, 0.8);
         assert_eq!(status.output_gain, 0.6);
         assert_eq!(status.tx, vec![20]);
@@ -985,6 +1534,118 @@ mod tests {
         assert_eq!(args.tx_channels, vec![20, 21]);
         assert_eq!(args.listen_channels, vec![1]);
         assert_eq!(args.input_device.as_deref(), Some("BlackHole"));
+        assert_eq!(args.input_kind, BridgeInputKind::AudioDevice);
+        assert_eq!(args.output_kind, BridgeOutputKind::AudioDevice);
         assert_eq!(args.note, "program feed");
+    }
+
+    #[test]
+    fn bridge_cli_parses_default_ndi_route_fields() {
+        let args = Args::try_parse_from([
+            "bridge",
+            "--user-id",
+            "95",
+            "--mode",
+            "output",
+            "--output-kind",
+            "ndi-output",
+            "--ndi-output-name",
+            "RedLine Program",
+            "--ndi-groups",
+            "arena",
+        ])
+        .unwrap();
+
+        assert_eq!(args.output_kind, BridgeOutputKind::NdiOutput);
+        assert_eq!(args.ndi_output_name.as_deref(), Some("RedLine Program"));
+        assert_eq!(args.ndi_groups.as_deref(), Some("arena"));
+        assert!(validate_route_endpoint_kinds(&args).is_ok());
+    }
+
+    #[test]
+    fn bridge_status_snapshot_includes_endpoint_telemetry() {
+        let config = test_config();
+        let telemetry = Arc::new(BridgeRuntimeTelemetry::default());
+        telemetry.input.set_runtime("/usr/local/lib/libndi.4.dylib");
+        telemetry
+            .input
+            .record_audio_i16(&[0, i16::MAX], telemetry.started_at);
+        telemetry.input.record_underflow();
+        telemetry.input.record_reconnect();
+
+        let status = bridge_status_snapshot(
+            &config,
+            BridgeStatusConfig {
+                mode: BridgeCliMode::Input,
+                input_kind: BridgeInputKind::NdiSource,
+                output_kind: BridgeOutputKind::AudioDevice,
+                input_device: None,
+                output_device: None,
+                ndi_source: Some("vMix Program".to_string()),
+                ndi_output_name: None,
+                vmix_source_url: None,
+                input_gain: 1.0,
+                output_gain: 1.0,
+                note: String::new(),
+                telemetry,
+            },
+        );
+
+        let input = status.input.unwrap();
+        assert_eq!(
+            input.runtime.as_deref(),
+            Some("/usr/local/lib/libndi.4.dylib")
+        );
+        assert_eq!(input.frames, Some(1));
+        assert_eq!(input.underflows, Some(1));
+        assert_eq!(input.reconnects, Some(1));
+        assert!(input.audio_level.unwrap() > 0.9);
+        assert_eq!(input.stale, Some(false));
+    }
+
+    #[test]
+    fn vmix_browser_source_status_uses_bridge_name_and_url() {
+        let config = test_config();
+        let status = bridge_status_snapshot(
+            &config,
+            BridgeStatusConfig {
+                mode: BridgeCliMode::Output,
+                input_kind: BridgeInputKind::AudioDevice,
+                output_kind: BridgeOutputKind::VmixBrowserSource,
+                input_device: None,
+                output_device: None,
+                ndi_source: None,
+                ndi_output_name: Some("Unrelated NDI Name".to_string()),
+                vmix_source_url: Some("http://127.0.0.1:41012/vmix/source/program".to_string()),
+                input_gain: 1.0,
+                output_gain: 1.0,
+                note: String::new(),
+                telemetry: Arc::new(BridgeRuntimeTelemetry::default()),
+            },
+        );
+
+        let output = status.output.unwrap();
+        assert_eq!(output.kind, BridgeEndpointKind::VmixBrowserSource);
+        assert_eq!(output.name.as_deref(), Some("Program Bridge"));
+        assert_eq!(
+            output.url.as_deref(),
+            Some("http://127.0.0.1:41012/vmix/source/program")
+        );
+    }
+
+    #[test]
+    fn bridge_cli_requires_ndi_route_names() {
+        let args = Args::try_parse_from([
+            "bridge",
+            "--user-id",
+            "95",
+            "--mode",
+            "output",
+            "--output-kind",
+            "ndi-output",
+        ])
+        .unwrap();
+
+        assert!(validate_route_endpoint_kinds(&args).is_err());
     }
 }

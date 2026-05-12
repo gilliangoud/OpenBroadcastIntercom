@@ -1,5 +1,7 @@
 # Public Repository Hygiene
 
+[Docs index](README.md) | [Root README](../README.md)
+
 Use a fresh Git history for the public repository. This working tree previously
 contained local state, generated native build output, and very large build
 caches, so the old `.git` object database must not be pushed.

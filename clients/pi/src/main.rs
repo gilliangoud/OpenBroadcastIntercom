@@ -30,7 +30,7 @@ use common::{
     ButtonId, CaptureHealthStatus, ChannelPresenceRoster, ClientCapabilities, ClientLockoutPolicy,
     ClientRole, Codec, ControlMessage, ControlResponse, DirectCallHistoryEntry, DirectCallStatus,
     EmergencyStatus, Esp32AudioConfig, IfbConfig, OpusProfile, ProcessingConfig, StereoConfig,
-    TalkButtonConfig, TalkMode, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
+    TalkButtonConfig, TalkMode, TallyStatus, MIX_SAMPLES_PER_FRAME, MIX_SAMPLE_RATE,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -320,6 +320,7 @@ async fn main() -> anyhow::Result<()> {
         lockout: ClientLockoutPolicy::default(),
         stereo: StereoConfig::default(),
         esp32_audio: Esp32AudioConfig::default(),
+        tally: TallyStatus::default(),
     }));
     let jitter_samples = samples_for_ms(args.jitter_ms);
     let playback = Arc::new(Mutex::new(PlaybackBuffer::new(
@@ -784,6 +785,7 @@ struct StateResponse {
     ifb: IfbConfig,
     lockout: ClientLockoutPolicy,
     stereo: StereoConfig,
+    tally: TallyStatus,
     playback: PlaybackStats,
     telemetry: Option<CaptureHealthStatus>,
 }
@@ -825,6 +827,7 @@ impl StateResponse {
             ifb: config.ifb.clone(),
             lockout: config.lockout.clone(),
             stereo: config.stereo.clone(),
+            tally: config.tally.clone(),
             playback,
             telemetry,
         }
@@ -1777,6 +1780,7 @@ mod tests {
             lockout: ClientLockoutPolicy::default(),
             stereo: StereoConfig::default(),
             esp32_audio: Esp32AudioConfig::default(),
+            tally: TallyStatus::default(),
         }
     }
 

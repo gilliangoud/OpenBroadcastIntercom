@@ -1,5 +1,7 @@
 # Model Assets
 
+[Docs index](README.md) | [Root README](../README.md)
+
 The repository keeps source code and small metadata in Git. Large model
 weights are curated external downloads from Hugging Face and must not be
 committed unless they are explicitly approved Git LFS assets.

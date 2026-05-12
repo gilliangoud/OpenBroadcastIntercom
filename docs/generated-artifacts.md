@@ -1,5 +1,7 @@
 # Generated Artifact Policy
 
+[Docs index](README.md) | [Root README](../README.md)
+
 The source of truth for the Tauri mobile app lives in `clients/app`: Rust
 sources, `tauri.conf.json`, `tauri.ios.conf.json`, `Info.ios.plist`, app icons,
 `tauri-assets`, and scripts. Generated Apple and Android projects under

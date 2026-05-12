@@ -1,0 +1,10 @@
+[package]
+name = "ndi-runtime"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+libloading.workspace = true
+tracing.workspace = true

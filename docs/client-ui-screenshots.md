@@ -1,5 +1,7 @@
 # Client UI Screenshots
 
+[Docs index](README.md) | [Root README](../README.md)
+
 These screenshots are generated from the checked-in UI assets with:
 
 ```sh

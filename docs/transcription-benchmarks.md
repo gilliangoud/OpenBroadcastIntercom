@@ -1,5 +1,7 @@
 # Transcription Benchmarks
 
+[Docs index](README.md) | [Root README](../README.md)
+
 RedLine transcription should be selected from measured behavior on real
 intercom audio, not model reputation alone. The benchmark harness keeps the
 first version simple: validate curated mono WAV corpora, run or import model

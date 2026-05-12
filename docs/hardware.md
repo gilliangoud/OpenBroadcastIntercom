@@ -1,5 +1,7 @@
 # RedLine Hardware Plan
 
+[Docs index](README.md) | [Root README](../README.md)
+
 This is a working hardware path for the first low-cost units. Prices and stock
 change often; verify before ordering.
 
@@ -93,6 +95,29 @@ Default behavior:
   explicitly wants it.
 - Multiple active buttons transmit to the union of their configured transmit
   actions, including channel routes and direct-user routes.
+
+## Tally LEDs
+
+The Pi companion `pi-gpio` process can drive two tally outputs from the local
+client state:
+
+```json
+{
+  "tally_poll_ms": 500,
+  "outputs": {
+    "preview": { "name": "preview-led", "gpio": 22, "active_low": false },
+    "live": { "name": "live-led", "gpio": 23, "active_low": false }
+  }
+}
+```
+
+It polls the Pi client local API at `/api/state`, reads `tally.state`, and sets
+the preview output for `preview` or the live output for `live`. `tally_poll_ms`
+defaults to `500`, so tally state is checked separately from the button poll
+loop and GPIO output files are only written when the tally state changes.
+Active-low LEDs or transistor stages can set `active_low` per output. The same
+logical mapping is the target for ESP32 firmware tally LEDs or a later
+RGB/NeoPixel output.
 
 ## Audio And Mechanical Requirements
 

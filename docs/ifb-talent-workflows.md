@@ -1,5 +1,7 @@
 # IFB And Talent Workflow Design
 
+[Docs index](README.md) | [Root README](../README.md)
+
 This document is the workflow design output for GOU-69. It turns the current
 RedLine routing primitives into practical event templates for talent,
 referees, director, producer, PA, and program audio.
